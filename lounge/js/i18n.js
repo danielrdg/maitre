@@ -1,0 +1,183 @@
+export const STATE_KEYS = Object.freeze([
+  'queue', 'coffee', 'work', 'slot', 'smoke', 'visitor', 'boss',
+  'blocked', 'ready', 'whisky', 'dance', 'sleep', 'exit',
+]);
+
+export const LANGS = ['en', 'pt-BR'];
+
+export const STRINGS = {
+  en: {
+    'state.queue': 'Queued, waiting for a seat',
+    'state.coffee': 'New room, planning',
+    'state.work': 'Working',
+    'state.slot': 'Subagent reading files',
+    'state.smoke': 'Waiting on something outside',
+    'state.visitor': 'Consulting Fable',
+    'state.boss': 'House advisor',
+    'state.blocked': 'Needs you',
+    'state.ready': 'Ready for you to look',
+    'state.whisky': 'Delivered, waiting for merge',
+    'state.dance': 'Merged! Celebrating',
+    'state.sleep': 'Parked with a pending item',
+    'state.exit': 'Leaving',
+
+    'model.haiku': 'Haiku',
+    'model.sonnet': 'Sonnet',
+    'model.opus': 'Opus',
+    'model.fable': 'Fable',
+    'model.queued': 'no model yet',
+
+    'page.title': 'maître · lounge',
+    'legend.queued': 'Queued',
+    'legend.staff': 'Staff (not agents)',
+    'hint': 'click anywhere to turn on the sound',
+    'help.title': 'Legend',
+    'help.hint': 'Click an agent for details · pull a slot lever · click the musician for music',
+
+    'btn.sound.on': 'Sound: on',
+    'btn.sound.off': 'Sound: off',
+    'btn.block': 'Simulate blocked agent',
+    'btn.merge': 'Simulate merge',
+    'btn.newRoom': 'New room in queue',
+    'btn.names.always': 'Names: always',
+    'btn.names.hover': 'Names: on hover',
+    'btn.help': 'Legend and help',
+    'btn.demo': 'demo',
+
+    'tag.needsYou': '{name} · needs you',
+    'queue.one': 'queue · {n} room',
+    'queue.many': 'queue · {n} rooms',
+    'tip.lever': 'pull the lever',
+    'tip.agent': '{name} · {state}',
+
+    'pop.jackpot': 'JACKPOT!',
+    'pop.lose': 'so close...',
+    'pop.merge': 'MERGE!',
+    'pop.receptionFull': 'reception is full',
+
+    'panel.close': 'close',
+    'panel.doing': 'DOING',
+    'panel.where': 'WHERE',
+    'panel.steps': 'LAST STEPS',
+    'panel.inRoom': 'IN THE ROOM FOR',
+    'panel.usage': '{minutes} min · {tokens} tokens',
+    'panel.blocked': 'Blocked:',
+    'panel.recommended': 'recommended',
+    'panel.other': 'Another answer...',
+    'panel.send': 'Send',
+    'panel.freeText': 'text',
+    'panel.done': 'Answer sent to {name} ({key}): {text}. The room goes back to the table.',
+
+    'npc.maitre': 'maître',
+    'npc.barman': 'bartender',
+    'npc.dealer': 'dealer',
+    'npc.sax': 'musician',
+    'npc.waiter': 'waiter',
+    'npc.bouncer': 'doorman',
+    'quip.maitre': 'Good evening! Tell me the topic and I will find the right table.',
+    'quip.barman': 'Coffee for those arriving, whisky for those delivering.',
+    'quip.dealer': 'Every card on the table is a tool the room used.',
+    'quip.sax': 'I play while you work.',
+    'quip.waiter': 'Excuse me, coming through!',
+    'quip.bouncer': 'Full house: 6 of 6 rooms. I will let you in shortly.',
+    'tip.sax': 'musician · click for music',
+
+    'music.title': 'Music',
+    'music.off': 'Off',
+    'music.jazz': 'Jazz (calm)',
+    'music.house': 'House',
+    'music.volume': 'VOLUME',
+  },
+  'pt-BR': {
+    'state.queue': 'Na fila, esperando vaga',
+    'state.coffee': 'Sala nova, planejando',
+    'state.work': 'Trabalhando',
+    'state.slot': 'Subagente lendo arquivos',
+    'state.smoke': 'Esperando algo de fora',
+    'state.visitor': 'Consultando o Fable',
+    'state.boss': 'Conselheiro da casa',
+    'state.blocked': 'Precisa de você',
+    'state.ready': 'Pronto pra você ver',
+    'state.whisky': 'Entregou, esperando merge',
+    'state.dance': 'Mergeou! Comemorando',
+    'state.sleep': 'Parada com pendência',
+    'state.exit': 'Indo embora',
+
+    'model.haiku': 'Haiku',
+    'model.sonnet': 'Sonnet',
+    'model.opus': 'Opus',
+    'model.fable': 'Fable',
+    'model.queued': 'sem modelo ainda',
+
+    'page.title': 'maître · lounge',
+    'legend.queued': 'Na fila',
+    'legend.staff': 'Funcionários (não são agentes)',
+    'hint': 'clique em qualquer lugar pra ligar o som',
+    'help.title': 'Legenda',
+    'help.hint': 'Clique num agente pra ver detalhes · puxe a alavanca de uma slot · clique no músico pra música',
+
+    'btn.sound.on': 'Som: ligado',
+    'btn.sound.off': 'Som: desligado',
+    'btn.block': 'Simular agente travado',
+    'btn.merge': 'Simular merge',
+    'btn.newRoom': 'Nova sala na fila',
+    'btn.names.always': 'Nomes: sempre',
+    'btn.names.hover': 'Nomes: só no hover',
+    'btn.help': 'Legenda e ajuda',
+    'btn.demo': 'demo',
+
+    'tag.needsYou': '{name} · precisa de você',
+    'queue.one': 'fila · {n} sala',
+    'queue.many': 'fila · {n} salas',
+    'tip.lever': 'puxar a alavanca',
+    'tip.agent': '{name} · {state}',
+
+    'pop.jackpot': 'JACKPOT!',
+    'pop.lose': 'quase...',
+    'pop.merge': 'MERGE!',
+    'pop.receptionFull': 'recepção cheia',
+
+    'panel.close': 'fechar',
+    'panel.doing': 'FAZENDO',
+    'panel.where': 'ONDE',
+    'panel.steps': 'ÚLTIMOS PASSOS',
+    'panel.inRoom': 'NA SALA HÁ',
+    'panel.usage': '{minutes} min · {tokens} tokens',
+    'panel.blocked': 'Travado:',
+    'panel.recommended': 'recomendado',
+    'panel.other': 'Outra resposta...',
+    'panel.send': 'Enviar',
+    'panel.freeText': 'texto',
+    'panel.done': 'Resposta enviada pra {name} ({key}): {text}. A sala volta pra mesa.',
+
+    'npc.maitre': 'maître',
+    'npc.barman': 'barman',
+    'npc.dealer': 'crupiê',
+    'npc.sax': 'músico',
+    'npc.waiter': 'garçom',
+    'npc.bouncer': 'porteiro',
+    'quip.maitre': 'Boa noite! Me diga o assunto que eu acho a mesa certa.',
+    'quip.barman': 'Café pra quem chega, uísque pra quem entrega.',
+    'quip.dealer': 'Cada carta na mesa é uma ferramenta que a sala usou.',
+    'quip.sax': 'Toco enquanto vocês trabalham.',
+    'quip.waiter': 'Licença, licença!',
+    'quip.bouncer': 'Casa cheia: 6 de 6 salas. Já já libero.',
+    'tip.sax': 'músico · clique pra música',
+
+    'music.title': 'Música',
+    'music.off': 'Desligada',
+    'music.jazz': 'Jazz (calmo)',
+    'music.house': 'House',
+    'music.volume': 'VOLUME',
+  },
+};
+
+export function normalizeLang(lang) {
+  return LANGS.includes(lang) ? lang : 'en';
+}
+
+export function t(key, lang = 'en', vars) {
+  const s = STRINGS[normalizeLang(lang)][key] ?? STRINGS.en[key] ?? key;
+  if (!vars) return s;
+  return s.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m));
+}

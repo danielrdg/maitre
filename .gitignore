@@ -1,0 +1,9 @@
+node_modules/
+dist/
+state/
+memory/
+config/*.local.*
+.superpowers/
+docs/superpowers/specs/
+docs/mockups/
+*.log

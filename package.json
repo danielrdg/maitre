@@ -1,0 +1,29 @@
+{
+  "name": "maitre",
+  "version": "0.0.1",
+  "private": true,
+  "description": "A terminal orchestrator for Claude Code agents, with a pixel-art lounge to watch them work.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "maitre": "bin/maitre"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "npm run build && node scripts/run-tests.mjs",
+    "demo": "node bin/maitre lounge --demo",
+    "assets": "npm run build && node scripts/capture-assets.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "puppeteer-core": "^24.43.1",
+    "typescript": "^5"
+  },
+  "overrides": {
+    "basic-ftp": "^6.2.6",
+    "zod": "^4.6.7"
+  }
+}

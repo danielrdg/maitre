@@ -1,0 +1,10 @@
+#!/usr/bin/env node
+import { existsSync } from 'node:fs';
+
+const cli = new URL('../dist/src/cli.js', import.meta.url);
+if (!existsSync(cli)) {
+  console.error('maitre: dist/ is missing. Run `npm run build` first.');
+  process.exit(1);
+}
+const { main } = await import(cli.href);
+await main(process.argv.slice(2));

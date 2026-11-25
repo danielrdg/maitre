@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>maître · lounge</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="stage" id="stage">
+    <canvas id="lounge" width="576" height="324"></canvas>
+    <div class="neon" id="neon" role="img" aria-label="maître">ma<span class="circ">ı</span>tre</div>
+    <div class="tip" id="tip"></div>
+    <div class="hint" id="hint" data-i18n="hint"></div>
+    <div class="hud" id="hud"></div>
+    <div class="panel" id="panel"></div>
+    <div class="panel music" id="music"></div>
+    <div class="panel help" id="help" role="dialog"></div>
+  </div>
+
+  <script type="module">
+    import { boot } from './js/main.js';
+    boot(document);
+  </script>
+</body>
+</html>

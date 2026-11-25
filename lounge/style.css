@@ -1,0 +1,109 @@
+@font-face { font-family: 'Pixelify Sans'; src: url('fonts/PixelifySans%5Bwght%5D.ttf') format('truetype'); font-weight: 400 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Silkscreen'; src: url('fonts/Silkscreen-Regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Silkscreen'; src: url('fonts/Silkscreen-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+:root {
+  --gold: #d9a441;
+  --ink: #140b08;
+  --neon: #ff5fa2;
+  --neon-text: #ffe0ef;
+  --font-pixel: 'Pixelify Sans', monospace;
+  --font-tag: 'Silkscreen', monospace;
+}
+
+html, body { height: 100%; }
+body { margin: 0; overflow: hidden; display: grid; place-items: center; background: #0b0605; color: #f3e6d3; font-family: var(--font-pixel); }
+
+/* The stage keeps 16:9 and fills the window. Overlays are sized in --px:
+   one pixel of the original 1150 px wide stage. */
+.stage { position: relative; width: min(100vw, calc(100vh * 16 / 9)); aspect-ratio: 16 / 9; overflow: hidden; background: #000;
+         user-select: none; container-type: inline-size; }
+.stage > * { --px: calc(100cqw / 1150); }
+.stage canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
+.tag { position: absolute; transform: translate(-50%, -100%); font: max(6px, calc(8 * var(--px)))/1 var(--font-tag); color: #f7e7c6;
+       text-shadow: 1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000; white-space: nowrap; pointer-events: none; }
+.tag.alert { color: #ff8b7b; } .tag.gold { color: #ffd45c; } .tag.dim { color: #b9b4c8; } .tag.hide { display: none; }
+.tip { position: absolute; transform: translate(-50%, -100%); font: 600 max(10px, calc(12 * var(--px)))/1.2 var(--font-pixel); color: var(--ink);
+       background: #f7e7c6; padding: calc(3 * var(--px)) calc(6 * var(--px)); border: 2px solid var(--ink); pointer-events: none; display: none; white-space: nowrap; }
+.neon { position: absolute; transform: translate(-50%, -50%); font: 700 calc(22 * var(--px))/1 var(--font-pixel); color: var(--neon-text);
+        text-shadow: 0 0 calc(3 * var(--px)) var(--neon), 0 0 calc(9 * var(--px)) var(--neon), 0 0 calc(18 * var(--px)) #ff2d8a; pointer-events: none; }
+/* Pixelify's î accent is a small blob, so the logotype draws a 7x3 pixel circumflex over a dotless ı.
+   --u is one font pixel of Pixelify Sans (0.0425 em). */
+.circ { position: relative; --u: .0425em; }
+.circ::before { content: ''; position: absolute; left: 50%; bottom: .79em; width: calc(7 * var(--u)); height: calc(3 * var(--u));
+                margin-left: calc(-3.5 * var(--u)); background:
+                  linear-gradient(currentColor 0 0) calc(2 * var(--u)) 0 / calc(3 * var(--u)) var(--u),
+                  linear-gradient(currentColor 0 0) var(--u) var(--u) / calc(2 * var(--u)) var(--u),
+                  linear-gradient(currentColor 0 0) calc(4 * var(--u)) var(--u) / calc(2 * var(--u)) var(--u),
+                  linear-gradient(currentColor 0 0) 0 calc(2 * var(--u)) / calc(2 * var(--u)) var(--u),
+                  linear-gradient(currentColor 0 0) calc(5 * var(--u)) calc(2 * var(--u)) / calc(2 * var(--u)) var(--u);
+                background-repeat: no-repeat; filter: var(--circ-glow); }
+.neon .circ { --u: calc(1.2 * var(--px)); --circ-glow: drop-shadow(0 0 calc(3 * var(--px)) var(--neon)) drop-shadow(0 0 calc(8 * var(--px)) #ff2d8a); }
+.pop { position: absolute; transform: translate(-50%, -50%); font: 700 calc(26 * var(--px))/1 var(--font-pixel); color: #ffd45c; pointer-events: none;
+       text-shadow: calc(3 * var(--px)) calc(3 * var(--px)) 0 #7a1c16, 0 0 calc(12 * var(--px)) #ffb000; animation: pop 1.8s ease-out forwards; }
+.pop.small { font-size: max(10px, calc(16 * var(--px))); color: #f7e7c6; text-shadow: calc(2 * var(--px)) calc(2 * var(--px)) 0 #3a1a10; }
+@keyframes pop { 0% { transform: translate(-50%, -50%) scale(.3); opacity: 0; } 15% { transform: translate(-50%, -50%) scale(1.25); opacity: 1; }
+                 70% { opacity: 1; } 100% { transform: translate(-50%, -110%) scale(1); opacity: 0; } }
+.hint { position: absolute; left: 50%; bottom: calc(8 * var(--px)); transform: translateX(-50%); font: 600 max(10px, calc(12 * var(--px)))/1 var(--font-pixel);
+        color: #f7e7c6; background: rgba(20,11,8,.85); border: 2px solid var(--gold); padding: calc(5 * var(--px)) calc(9 * var(--px)); pointer-events: none; }
+
+/* Pixel panels: agent details, music menu, help overlay. */
+.panel { position: absolute; z-index: 2; right: 1.5%; top: 3%; width: calc(430 * var(--px)); max-height: 92%; overflow: auto; display: none;
+         background: #24100b; color: #f7e7c6; font: 400 max(11px, calc(14 * var(--px)))/1.35 var(--font-pixel);
+         padding: calc(12 * var(--px)) calc(14 * var(--px)) calc(14 * var(--px));
+         border: 3px solid var(--gold); outline: 3px solid var(--ink); box-shadow: calc(8 * var(--px)) calc(8 * var(--px)) 0 rgba(0,0,0,.55); }
+.panel .head { display: flex; gap: calc(12 * var(--px)); align-items: center; margin-bottom: calc(8 * var(--px)); }
+.panel .head canvas { width: calc(54 * var(--px)); height: calc(102 * var(--px)); image-rendering: pixelated; background: #3a160f; border: 2px solid var(--ink); }
+.panel h4 { margin: 0; font: 700 max(14px, calc(20 * var(--px)))/1.1 var(--font-pixel); color: #ffd45c; }
+.panel .chip { display: inline-block; padding: 1px calc(6 * var(--px)); margin: 4px 4px 0 0; font-size: max(10px, calc(12 * var(--px))); border: 2px solid var(--ink); color: var(--ink); }
+.panel .lbl { font: max(8px, calc(9 * var(--px)))/1 var(--font-tag); color: var(--gold); letter-spacing: .06em; margin: calc(10 * var(--px)) 0 calc(4 * var(--px)); }
+.panel ul { margin: 0; padding-left: 0; list-style: none; } .panel li::before { content: '› '; color: var(--gold); }
+.panel .x { position: absolute; right: calc(8 * var(--px)); top: calc(6 * var(--px)); background: none; border: none; color: #f7e7c6;
+            font: 700 max(14px, calc(18 * var(--px)))/1 var(--font-pixel); cursor: pointer; }
+.panel .stuck { background: #4a0f0c; border: 2px solid #ff5a4a; padding: calc(8 * var(--px)) calc(10 * var(--px)); margin-top: calc(10 * var(--px)); }
+.panel .stuck b { color: #ff9a8a; }
+.panel .opt { display: block; width: 100%; text-align: left; margin-top: calc(6 * var(--px)); padding: calc(7 * var(--px)) calc(9 * var(--px)); cursor: pointer;
+              font: 400 max(11px, calc(14 * var(--px)))/1.25 var(--font-pixel);
+              color: #f7e7c6; background: #3a160f; border: 2px solid var(--gold); box-shadow: 3px 3px 0 var(--ink); }
+.panel .opt:hover { background: var(--gold); color: var(--ink); }
+.panel .opt .k { display: inline-block; width: 1.4em; font-weight: 700; color: #ffd45c; } .panel .opt:hover .k { color: #7a1c16; }
+.panel .opt small { display: block; opacity: .75; margin: 2px 0 0 1.4em; font-size: max(10px, calc(12 * var(--px))); line-height: 1.2; }
+.panel .rec { font-size: max(9px, calc(11 * var(--px))); color: #5fd39a; margin-left: 4px; } .panel .opt:hover .rec { color: #1f6b45; }
+.panel .other { display: flex; gap: calc(6 * var(--px)); margin-top: calc(8 * var(--px)); }
+.panel .other input { flex: 1; min-width: 0; font: 400 max(11px, calc(14 * var(--px))) var(--font-pixel); background: var(--ink); color: #f7e7c6;
+                      border: 2px solid #6b3a22; padding: calc(5 * var(--px)) calc(7 * var(--px)); }
+.panel .done { margin-top: calc(10 * var(--px)); padding: calc(8 * var(--px)) calc(10 * var(--px)); border: 2px solid #5fd39a; color: #c9f5dc; background: #10301f; }
+
+.panel.music { right: auto; top: auto; left: 20%; bottom: 30%; width: calc(340 * var(--px)); }
+.panel .quip { font-size: max(10px, calc(12 * var(--px))); opacity: .8; margin: 2px 0 calc(8 * var(--px)); }
+.panel .seg { display: flex; gap: calc(6 * var(--px)); }
+.panel .seg .opt { width: auto; flex: 1; margin-top: 0; text-align: center; white-space: nowrap; padding: calc(6 * var(--px)) calc(4 * var(--px)); }
+.panel .seg .opt.on { background: var(--gold); color: var(--ink); }
+.panel .vol { width: 100%; margin: 2px 0 0; accent-color: var(--gold); cursor: pointer; }
+
+.panel.help { z-index: 4; right: auto; left: 50%; top: 50%; transform: translate(-50%, -50%); width: calc(520 * var(--px)); }
+.panel.help .legend { display: flex; flex-wrap: wrap; gap: calc(8 * var(--px)) calc(16 * var(--px)); margin: calc(10 * var(--px)) 0; }
+.panel.help .item { display: inline-flex; align-items: center; gap: calc(6 * var(--px)); white-space: nowrap; }
+.panel.help .sw { display: inline-block; width: calc(12 * var(--px)); height: calc(12 * var(--px)); min-width: 8px; min-height: 8px; border: 2px solid var(--ink); outline: 1px solid #6b5a4a; }
+.panel.help .hintline { color: #ffd45c; font-size: max(10px, calc(12 * var(--px))); border-top: 2px solid #3a160f; padding-top: calc(8 * var(--px)); }
+
+/* Corner controls over the stage. */
+.hud { position: absolute; z-index: 3; left: 1.2%; top: 2.2%; display: flex; gap: calc(6 * var(--px)); align-items: flex-start; }
+.hud button, .panel .other button { font: 600 max(10px, calc(12 * var(--px)))/1 var(--font-pixel); cursor: pointer;
+       padding: calc(6 * var(--px)) calc(8 * var(--px)); white-space: nowrap;
+       background: var(--gold); color: var(--ink); border: 2px solid var(--ink); box-shadow: 2px 2px 0 var(--ink); }
+.hud button.off { background: #6b5a4a; }
+.hud button.help { min-width: 2.2em; }
+.hud button.demo { font-family: var(--font-tag); background: #24100b; color: var(--gold); border-color: var(--gold); outline: 2px solid var(--ink); }
+.hud button.demo[aria-expanded="true"] { background: var(--gold); color: var(--ink); }
+.hud .wrap { position: relative; }
+.hud .menu { position: absolute; top: calc(100% + 8px); left: 0; display: none; flex-direction: column; gap: calc(6 * var(--px));
+             padding: calc(8 * var(--px)); background: #24100b; border: 3px solid var(--gold); outline: 3px solid var(--ink);
+             box-shadow: calc(6 * var(--px)) calc(6 * var(--px)) 0 rgba(0,0,0,.55); }
+.hud .menu.open { display: flex; }
+.hud .menu button { text-align: left; background: #3a160f; color: #f7e7c6; border-color: var(--gold); }
+.hud .menu button:hover { background: var(--gold); color: var(--ink); }
+.hud button:active, .panel .other button:active, .panel .opt:active { transform: translate(2px, 2px); box-shadow: 0 0 0 var(--ink); }
+
+/* ?capture=1: the bare scene, for README art. */
+.stage.capture .hint, .stage.capture .hud, .stage.capture .panel, .stage.capture .tip { display: none !important; }
+.stage.capture .tag { font-size: max(6px, calc(10 * var(--px))); }

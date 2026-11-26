@@ -189,13 +189,38 @@ The daemon computes each room's state by combining three sources, in order of tr
    - tool activity → working;
    - pending permission or a question to the user → needs you, with the options when the event carries them;
    - subagent event → slot;
-   - advisor call → VIP;
+   - advisor call → VIP (there is no hook for it: it comes from the transcript or a declaration, M5);
    - `gh pr create` → whisky.
 
    **Bell rule:** it only rings for a real block: pending permission, a question with options, or `maitre status blocked`. A `Stop` with no declaration becomes "ready for you to look", silently, even if the last message is a loose question.
 3. **Daemon polling:** `gh pr view` for rooms with a PR (detects the merge → dance floor), idle time (→ couch or exit) and the queue (→ sidewalk).
 
-Which hook events exist and what each payload carries in the installed version is **spike 1** (section 9).
+**Measured mapping** (spike 1, Claude Code 2.1.332; details and payloads in [the spike notes](spikes/2026-11-25-hooks-and-herdr.md)). `main` = an event without `agent_id`.
+
+| Hook | Filter | Lounge state |
+|---|---|---|
+| `SessionStart` | a new `session_id` resets the room | arrives, idle |
+| `UserPromptSubmit` (main) | a `<task-notification>` or `<agent-message …>` prompt is a synthetic resume after a subagent | working; clears a pending block |
+| `PreToolUse` | with `agent_id` = subagent activity | working (`tool_name` drives the animation); does not clear a block |
+| `PermissionRequest` | `tool_name == "AskUserQuestion"` | needs you: question, options from `tool_input.questions` |
+| `PermissionRequest` | any other tool | needs you: permission (`tool_input.command` / `file_path`) |
+| `PostToolUse` / `PostToolUseFailure` / `PermissionDenied` | same `tool_use_id` as the block | back to working |
+| `SubagentStart` / `SubagentStop` | ignore `agent_type == ""` (a phantom after every `Stop`) | guest added to / removed from the slots |
+| `Stop` (main) | `background_tasks` has a `running` task | still working |
+| `Stop` (main) | otherwise | ready, silently; clears a block |
+| `Notification` | — | no change (the permission one is ~6 s late and generic; the idle one is unreliable) |
+| `SessionEnd` | — | leaves |
+
+**Correlating a block.** `PermissionRequest` has no `tool_use_id`, so the reducer pairs it with the most recent pending `PreToolUse` (main or subagent) that has the same `tool_name` and a deep-equal `tool_input`. The block's id is that `PreToolUse`'s `tool_use_id`, and the later `PostToolUse`/`PostToolUseFailure`/`PermissionDenied` with that id clears it. Hook events can be lost (see the spike notes), so a `PostToolUse` or `PermissionDenied` whose `PreToolUse` never arrived must be tolerated: no crash, and the room goes back to working.
+
+- **Permission modes:** in auto mode, actions the classifier allows fire no `PermissionRequest`, and a classifier refusal fires `PermissionDenied` (read from the binary; no refusal was observed).
+- **Paths that fire no hook:**
+  - a denied permission;
+  - Esc;
+  - the folder-trust dialog;
+  - the auto-mode onboarding overlay.
+
+  The next main `UserPromptSubmit`/`Stop` or herdr's `agent_status` closes those.
 
 ### 6.5 Answering from the lounge
 
@@ -307,7 +332,7 @@ A subset of the README's [maître vs firstmate](../README.md#maître-vs-firstmat
 - **M0 · Repo:** skeleton, license and the v5 mockup in `lounge/` running in `--demo` mode.
   - The README is at firstmate's level: a hero with the lounge GIF, "what is it", features, quick start (clone, `./setup`, `maitre`), how it works with a diagram, the state map illustrated with the sprites, configuration (routing, capacity, janitor, project roots), FAQ and an honest comparison with firstmate.
   - Demo room names are generic.
-- **M1 · Events:** hook, daemon with SSE, and the lounge reading the real state of a room opened by hand.
+- **M1 · Events (done):** hook, daemon with SSE, and the lounge reading the real state of a room opened by hand (`maitre room run`, `maitre status`).
 - **M2 · Rooms:** `maitre` opens herdr, `room open|send` with a worktree, reception + `route` with Haiku.
 - **M3 · Doorman and janitor:** queue, capacity, cleanup with minutes in the vault.
 - **M4 · Building:** facade, floors, terrace, elevator.
@@ -334,6 +359,14 @@ A subset of the README's [maître vs firstmate](../README.md#maître-vs-firstmat
 - Exact SSE reconnection policy and `events.jsonl` replay.
 
 ## 9. Risks and spikes before M1
+
+**Spikes 0–3: resolved on 25-11-2026.** Findings are in [docs/spikes/2026-11-25-hooks-and-herdr.md](spikes/2026-11-25-hooks-and-herdr.md).
+- **Spike 0:** about 50k → 1.1k tokens with `--setting-sources "" --tools "" --system-prompt "<short>"`.
+- **Spike 1:** the event table and the auto-mode capture.
+- **Spike 2:** herdr answer recipes.
+- **Spike 3:** hooks go only through `--settings`, which merges with the global hooks and leaves `~/.claude/settings.json` untouched. The trust dialog does block new interactive rooms; its default is "No, exit". `-p` runs are not gated by it.
+
+The original questions:
 
 0. **Inherited context and cost:**
    - Measure the tokens of `claude -p --model haiku "ok"` on a machine with personal plugins, MCPs and hooks.

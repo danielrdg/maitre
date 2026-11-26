@@ -3,13 +3,40 @@ import { MODEL } from './sprites.js';
 
 // Every piece of agent-sourced text goes through textContent.
 
-export function panelModel(agent, lang = 'en') {
+const letter = i => String.fromCharCode(65 + i);
+
+// A live block is read-only: answering from the lounge comes later, so the room's terminal answers.
+function liveBlock(b, lang) {
+  const questions = (b.questions || []).map(q => ({
+    text: q.question,
+    options: (q.options || []).map((o, i) => ({ key: letter(i), text: o.label, detail: o.description || '' })),
+  }));
+  return {
+    readOnly: true,
+    intro: b.kind === 'permission' ? t('panel.permission', lang, { tool: b.tool }) : null,
+    reason: questions.length ? null : b.detail,
+    questions,
+    note: t('panel.answerInTerminal', lang),
+  };
+}
+
+function usageFor(info, lang, now) {
+  if (!info.live) {
+    return { usageLabel: t('panel.inRoom', lang), usage: t('panel.usage', lang, { minutes: info.minutes ?? 0, tokens: info.tokens ?? '—' }) };
+  }
+  if (!Number.isFinite(info.since)) return { usageLabel: undefined, usage: undefined };
+  const minutes = Math.max(0, Math.floor((now - info.since) / 60000));
+  return { usageLabel: t('panel.inState', lang), usage: t('panel.minutes', lang, { minutes }) };
+}
+
+export function panelModel(agent, lang = 'en', now = Date.now()) {
   const info = agent.info || {};
   const modelKey = MODEL[agent.look.model] && agent.look.model !== 'tux' ? agent.look.model : 'queued';
-  const block = agent.state === 'blocked' && info.block ? {
-    reason: info.block.reason,
-    options: info.block.options.map((o, i) => ({ key: 'ABC'[i], text: o.text, detail: o.detail, recommended: !!o.recommended })),
-  } : undefined;
+  const b = agent.state === 'blocked' ? info.block : undefined;
+  const block = !b ? undefined : b.kind ? liveBlock(b, lang) : {
+    reason: b.reason,
+    options: b.options.map((o, i) => ({ key: 'ABC'[i], text: o.text, detail: o.detail, recommended: !!o.recommended })),
+  };
   return {
     title: agent.label === 'haiku' ? agent.id : agent.label,
     model: t(`model.${modelKey}`, lang),
@@ -21,6 +48,7 @@ export function panelModel(agent, lang = 'en') {
     steps: [...(info.steps || [])],
     minutes: info.minutes ?? 0,
     tokens: info.tokens ?? '—',
+    ...usageFor(info, lang, now),
     block,
   };
 }
@@ -33,7 +61,7 @@ function el(doc, tag, cls, text) {
 }
 
 // `code` spans in agent text become bold, still as text nodes.
-function appendMarked(doc, parent, text) {
+export function appendMarked(doc, parent, text) {
   String(text).split('`').forEach((part, i) => {
     if (!part) return;
     parent.append(i % 2 ? el(doc, 'b', null, part) : doc.createTextNode(part));
@@ -77,9 +105,13 @@ export function renderPanel(root, model, onAnswer, { lang = 'en', portrait = nul
     el(doc, 'div', 'lbl', t('panel.doing', lang)), el(doc, 'div', null, model.task),
     el(doc, 'div', 'lbl', t('panel.where', lang)), el(doc, 'div', null, model.where),
     el(doc, 'div', 'lbl', t('panel.steps', lang)), list,
-    el(doc, 'div', 'lbl', t('panel.inRoom', lang)),
-    el(doc, 'div', null, t('panel.usage', lang, { minutes: model.minutes, tokens: model.tokens })),
   );
+  if (model.usage != null) root.append(el(doc, 'div', 'lbl', model.usageLabel), el(doc, 'div', null, model.usage));
+
+  if (model.block?.readOnly) {
+    root.append(readOnlyBlock(doc, model.block, lang));
+    return;
+  }
 
   const done = el(doc, 'div');
   if (model.block) {
@@ -116,6 +148,27 @@ export function renderPanel(root, model, onAnswer, { lang = 'en', portrait = nul
     root.append(stuck);
   }
   root.append(done);
+}
+
+// Agent text stays verbatim here: a command's backticks are not markup.
+function readOnlyBlock(doc, block, lang) {
+  const stuck = el(doc, 'div', 'stuck');
+  const head = el(doc, 'div', null);
+  head.append(el(doc, 'b', null, t('panel.blocked', lang)));
+  if (block.intro) head.append(doc.createTextNode(' ' + block.intro));
+  stuck.append(head);
+  if (block.reason) stuck.append(el(doc, 'div', block.intro ? 'cmd' : 'q', block.reason));
+  for (const q of block.questions) {
+    if (q.text) stuck.append(el(doc, 'div', 'q', q.text));
+    for (const o of q.options) {
+      const row = el(doc, 'div', 'ro');
+      row.append(el(doc, 'span', 'k', o.key), doc.createTextNode(o.text));
+      if (o.detail) row.append(el(doc, 'small', null, o.detail));
+      stuck.append(row);
+    }
+  }
+  stuck.append(el(doc, 'div', 'note', block.note));
+  return stuck;
 }
 
 export const MUSIC_STYLES = ['off', 'jazz', 'house'];

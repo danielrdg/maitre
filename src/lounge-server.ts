@@ -1,6 +1,6 @@
-import { createServer, type Server } from 'node:http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 
@@ -24,7 +24,7 @@ const MIME: Record<string, string> = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
-const COOKIE = 'maitre_key';
+const COOKIE_PREFIX = 'maitre_key_';
 const MAX_PORT_TRIES = 21;
 
 function safeEqual(a: string, b: string): boolean {
@@ -33,10 +33,10 @@ function safeEqual(a: string, b: string): boolean {
   return ab.length === bb.length && timingSafeEqual(ab, bb);
 }
 
-function cookieValue(header: string | undefined): string | undefined {
+function cookieValue(header: string | undefined, name: string): string | undefined {
   for (const part of (header ?? '').split(';')) {
     const [k, ...v] = part.trim().split('=');
-    if (k === COOKIE) return v.join('=');
+    if (k === name) return v.join('=');
   }
   return undefined;
 }
@@ -57,8 +57,11 @@ export async function startLoungeServer(opts: {
   port: number;
   token: string;
   host?: '127.0.0.1';
+  routes?: (req: IncomingMessage, res: ServerResponse, url: URL) => boolean | Promise<boolean>;
 }): Promise<LoungeServer> {
   const root = resolve(opts.root);
+  let realRoot: string | undefined;
+  let boundPort = opts.port;
   const host = opts.host ?? '127.0.0.1';
 
   const server = createServer(async (req, res) => {
@@ -67,17 +70,36 @@ export async function startLoungeServer(opts: {
       res.end(status === 403 ? 'Forbidden' : 'Not found');
     };
     try {
-      if (req.method !== 'GET' && req.method !== 'HEAD') return deny(403);
+      const hostHeader = req.headers.host;
+      if (hostHeader !== `127.0.0.1:${boundPort}` && hostHeader !== `localhost:${boundPort}`) return deny(403);
+      const origin = req.headers.origin;
+      if (origin !== undefined && origin !== `http://127.0.0.1:${boundPort}` && origin !== `http://localhost:${boundPort}`) {
+        return deny(403);
+      }
+      const cookieName = COOKIE_PREFIX + boundPort;
       const raw = req.url ?? '/';
+      if (!raw.startsWith('/')) return deny(403);
       const q = raw.indexOf('?');
       const rawPath = q === -1 ? raw : raw.slice(0, q);
       const params = new URLSearchParams(q === -1 ? '' : raw.slice(q + 1));
 
       const queryKey = params.get('key');
-      const cookieKey = cookieValue(req.headers.cookie);
+      const cookieKey = cookieValue(req.headers.cookie, cookieName);
       const viaQuery = queryKey !== null && safeEqual(queryKey, opts.token);
       const viaCookie = cookieKey !== undefined && safeEqual(cookieKey, opts.token);
       if (!viaQuery && !viaCookie) return deny(403);
+
+      if (opts.routes) {
+        let url: URL;
+        try {
+          // Concatenate, never resolve: new URL('//evil/x', base) would make "evil" the host.
+          url = new URL(`http://127.0.0.1:${boundPort}${raw}`);
+        } catch {
+          return deny(403);
+        }
+        if (await opts.routes(req, res, url)) return;
+      }
+      if (req.method !== 'GET' && req.method !== 'HEAD') return deny(403);
 
       let decoded: string;
       try {
@@ -92,7 +114,10 @@ export async function startLoungeServer(opts: {
 
       let body: Buffer;
       try {
-        body = await readFile(file);
+        realRoot ??= await realpath(root);
+        const real = await realpath(file);
+        if (!real.startsWith(realRoot + sep)) return deny(403);
+        body = await readFile(real);
       } catch {
         return deny(404);
       }
@@ -101,11 +126,12 @@ export async function startLoungeServer(opts: {
         'cache-control': 'no-store',
         'x-content-type-options': 'nosniff',
       };
-      if (viaQuery) headers['set-cookie'] = `${COOKIE}=${opts.token}; HttpOnly; SameSite=Strict; Path=/`;
+      if (viaQuery) headers['set-cookie'] = `${cookieName}=${opts.token}; HttpOnly; SameSite=Strict; Path=/`;
       res.writeHead(200, headers);
       res.end(req.method === 'HEAD' ? undefined : body);
     } catch {
-      deny(404);
+      if (res.headersSent) res.destroy();
+      else deny(404);
     }
   });
 
@@ -121,6 +147,7 @@ export async function startLoungeServer(opts: {
   }
 
   const address = server.address() as AddressInfo;
+  boundPort = address.port;
   return {
     url: `http://${host}:${address.port}/?key=${opts.token}`,
     port: address.port,

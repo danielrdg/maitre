@@ -4,6 +4,7 @@ import { request } from 'node:http';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadConfig, type UiLang } from './config.js';
 import { cleanEnv } from './env.js';
 import { liveLounge, probeLounge, type LoungeInfo } from './lounge-file.js';
 import { maitreHome } from './paths.js';
@@ -147,9 +148,22 @@ function requestTicket(info: LoungeInfo): Promise<string> {
   });
 }
 
-export async function ticketUrl(info: LoungeInfo, path: '/' | '/prompt.html'): Promise<string> {
+export async function ticketUrl(info: LoungeInfo, path: '/' | '/prompt.html', lang: UiLang = 'en'): Promise<string> {
   if (!(await probeLounge(info))) throw new Error('the lounge is not running');
-  return `http://127.0.0.1:${info.port}${path}?ticket=${await requestTicket(info)}`;
+  const url = `http://127.0.0.1:${info.port}${path}?ticket=${await requestTicket(info)}`;
+  return lang === 'en' ? url : `${url}&lang=${lang}`;
+}
+
+export function uiLang(env: NodeJS.ProcessEnv = process.env): UiLang {
+  let configured: UiLang | undefined;
+  try {
+    configured = loadConfig(env).lang;
+  } catch {
+    configured = undefined;
+  }
+  if (configured !== undefined) return configured;
+  const locale = env.LC_ALL || env.LC_MESSAGES || env.LANG || '';
+  return /^pt([_.@-]|$)/i.test(locale) ? 'pt-BR' : 'en';
 }
 
 export function unitFile(env: NodeJS.ProcessEnv): string {

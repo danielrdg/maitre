@@ -163,3 +163,16 @@ test('maitre index --root refuses a root that does not exist, saving nothing', (
     assert.equal(existsSync(join(home, 'state', 'projects.json')), false);
   });
 });
+
+test('config keeps a valid lang through a load and save, and drops an unknown one', () => {
+  withTmp((dir) => {
+    const env = { MAITRE_HOME: join(dir, 'home') };
+    saveConfig({ roots: ['/x'], projects: {}, lang: 'pt-BR' }, env);
+    const cfg = loadConfig(env);
+    assert.equal(cfg.lang, 'pt-BR');
+    saveConfig({ ...cfg, roots: ['/x', '/y'] }, env);
+    assert.equal(loadConfig(env).lang, 'pt-BR');
+    writeFileSync(join(dir, 'home', 'config.json'), JSON.stringify({ roots: [], projects: {}, lang: 'fr' }));
+    assert.deepEqual(loadConfig(env), { roots: [], projects: {} });
+  });
+});

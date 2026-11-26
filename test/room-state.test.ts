@@ -771,3 +771,17 @@ test('a starting block from maître clears on the room\'s SessionStart; a declar
   const replaced = fold([ev('MaitreStatus', { session: '', status: 'blocked', text: 's', starting: true }), declare('blocked', 'Merge now?')]);
   assert.equal(reduce(replaced, ev('SessionStart', {})).state, 'blocked', 'a later declared block is not a starting one');
 });
+
+test('Stop keeps the last reply; the next prompt clears it', () => {
+  const s1 = reduce(started(), ev('Stop', { last_message: 'São 14:52 de quinta.' }));
+  assert.equal(s1.reply, 'São 14:52 de quinta.');
+  assert.equal(reduce(s1, ev('Stop', { last_message: '   ' })).reply, 'São 14:52 de quinta.');
+  assert.equal(reduce(s1, ev('UserPromptSubmit', { prompt: 'e amanhã?' })).reply, undefined);
+  assert.equal(reduce(s1, ev('UserPromptSubmit', { prompt: '<task-notification>', synthetic: true })).reply, 'São 14:52 de quinta.');
+  const long = reduce(started(), ev('Stop', { last_message: `  \n${'x'.repeat(900)}` })).reply ?? '';
+  assert.equal(long.length, 500);
+  assert.ok(long.startsWith('x') && long.endsWith('…'));
+  assert.equal(reduce(started(), ev('Stop', { last_message: '  \nok\n' })).reply, 'ok');
+  assert.equal(reduce(started(), ev('Stop', { last_message: '😀'.repeat(600) })).reply, `${'😀'.repeat(499)}…`);
+  assert.equal(reduce(started(), ev('Stop', { agent_id: 'a1', last_message: 'from a subagent' })).reply, undefined);
+});

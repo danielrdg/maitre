@@ -19,7 +19,7 @@ import {
 } from './herdr.js';
 import { writeReceptionSettings } from './hook-settings.js';
 import { liveLounge, type LoungeInfo } from './lounge-file.js';
-import { openWindow, ticketUrl } from './open-app.js';
+import { openWindow, ticketUrl, uiLang } from './open-app.js';
 import { maitreHome } from './paths.js';
 import { closeLabeledTabs, closeRoomTabs, isRecord, liveness, markNotRunning, probeRoom, roomLabel } from './room-open.js';
 import { runForeground } from './room-run.js';
@@ -209,7 +209,7 @@ async function openStartedLounge(tabs: Tabs, env: NodeJS.ProcessEnv, result: Sta
   }
   tab.loungePid = info.pid;
   try {
-    const ticketed = await ticketUrl(info, '/');
+    const ticketed = await ticketUrl(info, '/', uiLang(env));
     (open ?? ((u: string) => void openWindow('lounge', u, env)))(ticketed);
   } catch (err) {
     result.warnings.push(`could not open the lounge window (${(err as Error).message}); open it with: maitre open`);

@@ -21,6 +21,7 @@ export function roomToAgents(room) {
   const id = String(room.room);
   const where = whereOf(room, id);
   const info = { task: room.task, steps: [...(room.steps || [])], where, since: room.since, live: true };
+  if (typeof room.reply === 'string' && room.reply) info.reply = room.reply;
   if (room.block) info.block = structuredClone(room.block);
   return {
     main: { id, label: id, model: colorKey(room.model), state: liveState(room.state), info },

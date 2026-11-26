@@ -25,6 +25,7 @@ export interface RoomState {
   updatedAt: number;
   task: string;
   steps: string[];
+  reply?: string;
   block?: Block;
   subagents: { id: string; type: string; model: ModelKey }[];
   prUrl?: string;
@@ -61,6 +62,7 @@ const MAX_PENDING = 20;
 const MAX_FINISHED = 50;
 const MAX_STEPS = 5;
 const TASK_MAX = 120;
+const REPLY_MAX = 500;
 const DETAIL_MAX = 200;
 const STEP_INPUT_MAX = 80;
 const DECLARED_TOOL = 'maitre status';
@@ -241,6 +243,7 @@ export function reduce(prev: RoomState | undefined, ev: HookLine): RoomState {
         let prompt = str(ev.prompt);
         if (prompt?.startsWith(BRIEF_HEADER)) prompt = prompt.slice(BRIEF_HEADER.length);
         if (s.task === '' && prompt !== undefined && prompt.trim() !== '') s.task = clip(prompt, TASK_MAX);
+        delete s.reply;
         dropAll();
         dropMainPending();
       }
@@ -304,13 +307,16 @@ export function reduce(prev: RoomState | undefined, ev: HookLine): RoomState {
       if (settle(id, s.block?.toolUseId !== undefined && s.block.toolUseId === id)) s.state = active();
       break;
 
-    case 'Stop':
+    case 'Stop': {
       if (!main) break;
+      const reply = [...(str(ev.last_message)?.trim() ?? '')];
+      if (reply.length > 0) s.reply = reply.length <= REPLY_MAX ? reply.join('') : `${reply.slice(0, REPLY_MAX - 1).join('').trimEnd()}…`;
       dropMainBlock();
       dropHookWait();
       dropMainPending();
       s.state = held() ?? (typeof ev.background_running === 'number' && ev.background_running > 0 ? 'work' : s.prUrl ? 'whisky' : 'ready');
       break;
+    }
 
     case 'StopFailure':
       if (!main) break;

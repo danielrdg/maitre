@@ -42,6 +42,8 @@ export interface HookLine {
   prompt?: string;
   synthetic?: boolean;
   status?: 'working' | 'waiting' | 'blocked';
+  // MaitreStatus written by maître while a room starts: the room's SessionStart clears it.
+  starting?: boolean;
   text?: string;
   options?: string[];
 }

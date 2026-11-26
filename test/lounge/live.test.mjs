@@ -450,3 +450,24 @@ test('the empty-lounge hint names the command in both languages', () => {
   assert.match(t('live.empty', 'pt-BR'), /`maitre room run <name>`/);
   assert.notEqual(t('live.empty', 'pt-BR'), t('live.empty', 'en'));
 });
+
+test('a registered room shows "<project> · <branch>" in the panel Where line, scratch as scratch', () => {
+  const where = over => {
+    const { main } = roomToAgents(room(over));
+    return panelModel({ ...main, look: { model: main.model } }, 'en', 1_000_000).where;
+  };
+  assert.equal(where({ project: 'backend', branch: 'maitre/nf-bug' }), 'backend · maitre/nf-bug');
+  assert.equal(where({ project: 'backend' }), 'backend');
+  assert.equal(where({ kind: 'scratch' }), 'scratch');
+  assert.equal(where({}), 'r1', 'no registry: the room id, as before');
+  const { subagents } = roomToAgents(room({ project: 'backend', branch: 'b', subagents: [{ id: 'a', type: 'Explore', model: 'haiku' }] }));
+  assert.equal(subagents[0].info.where, 'backend · b');
+});
+
+test('registry text reaches the panel as text nodes, never markup', () => {
+  const { main } = roomToAgents(room({ project: '<img src=x onerror=alert(1)>', branch: '<b>' }));
+  const m = panelModel({ ...main, look: { model: main.model } }, 'en', 1_000_000);
+  const { root } = fakeDoc();
+  renderPanel(root, m, () => {});
+  assert.ok(allText(root).includes('<img src=x onerror=alert(1)> · <b>'));
+});

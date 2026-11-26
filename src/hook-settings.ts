@@ -1,10 +1,14 @@
-import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HOOK_EVENTS } from './events.js';
 import { maitreHome } from './paths.js';
 
-const HOOK_SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'hooks', 'maitre-hook.mjs');
+const HOOKS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'hooks');
+const HOOK_SCRIPT = join(HOOKS_DIR, 'maitre-hook.mjs');
+const REQUEST_HOOK = join(HOOKS_DIR, 'reception-request.mjs');
+const GUARD_HOOK = join(HOOKS_DIR, 'reception-guard.mjs');
 
 function quote(path: string): string {
   if (/["$`\\]/.test(path)) throw new Error(`unsafe path for a hook command: ${path}`);
@@ -18,11 +22,39 @@ export function hookSettings(hookScriptPath: string, nodePath: string = process.
   return { hooks };
 }
 
-export function writeHookSettings(env: NodeJS.ProcessEnv = process.env): string {
-  const path = join(maitreHome(env), 'settings', 'room-hooks.json');
+function writeSettings(env: NodeJS.ProcessEnv, name: string, value: object): string {
+  const path = join(maitreHome(env), 'settings', name);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(hookSettings(HOOK_SCRIPT), null, 2) + '\n');
+  writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n');
   renameSync(tmp, path);
   return path;
+}
+
+export function writeHookSettings(env: NodeJS.ProcessEnv = process.env): string {
+  return writeSettings(env, 'room-hooks.json', hookSettings(HOOK_SCRIPT));
+}
+
+// `--setting-sources ""` drops the user's hooks, herdr's state hook with them; it is registered
+// again exactly as herdr installs it. The request hook also runs on SessionStart to leave the
+// started marker. `|| exit 2` makes a guard that cannot run (no node, no script) block, not allow.
+export function receptionSettings(opts: { requestHook: string; guardHook: string; herdrHook?: string; nodePath?: string }): object {
+  const node = quote(opts.nodePath ?? process.execPath);
+  const request = { type: 'command', command: `${node} ${quote(resolve(opts.requestHook))}` };
+  const sessionStart: unknown[] = [{ hooks: [request] }];
+  if (opts.herdrHook !== undefined) {
+    sessionStart.push({ matcher: '*', hooks: [{ type: 'command', command: `bash ${quote(opts.herdrHook)} session`, timeout: 10 }] });
+  }
+  const hooks = {
+    UserPromptSubmit: [{ hooks: [request] }],
+    PreToolUse: [{ hooks: [{ type: 'command', command: `${node} ${quote(resolve(opts.guardHook))} || exit 2` }] }],
+    SessionStart: sessionStart,
+  };
+  return { permissions: { allow: ['Bash(maitre:*)'] }, hooks };
+}
+
+export function writeReceptionSettings(env: NodeJS.ProcessEnv = process.env, userHome: string = homedir()): string {
+  const herdrHook = join(userHome, '.claude', 'hooks', 'herdr-agent-state.sh');
+  const settings = receptionSettings({ requestHook: REQUEST_HOOK, guardHook: GUARD_HOOK, ...(existsSync(herdrHook) ? { herdrHook } : {}) });
+  return writeSettings(env, 'reception.json', settings);
 }

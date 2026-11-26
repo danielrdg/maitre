@@ -346,6 +346,14 @@ test('the task is the first non-synthetic prompt, capped at 120 chars', () => {
   assert.ok(s.task.length <= 120);
 });
 
+test("the task skips the reception brief's header line", () => {
+  const s = fold([
+    ev('SessionStart'),
+    ev('UserPromptSubmit', { prompt: '# Brief from the maître reception\n\nadd a README line saying hello', synthetic: false }),
+  ]);
+  assert.equal(s.task, 'add a README line saying hello');
+});
+
 test('watch commands set smoke until their own PostToolUse', () => {
   const watch = { command: 'gh pr checks 12 --watch' };
   let s = reduce(started(), pre('w1', 'Bash', watch));
@@ -746,4 +754,20 @@ test("a subagent's hand-back prompt is synthetic: it keeps a declared wait", () 
   const after = reduce(deepFreeze(waiting), { ...handBack, session: 's-1', ts: clock + 10 });
   assert.equal(after.state, 'smoke');
   assert.equal(after.waitingOn, 'CI');
+});
+
+test('a starting block from maître clears on the room\'s SessionStart; a declared block does not', () => {
+  const starting = fold([ev('MaitreStatus', { session: '', status: 'blocked', text: 'Room is still starting — check its tab', options: [], starting: true })]);
+  assert.equal(starting.state, 'blocked');
+  const up = reduce(starting, ev('SessionStart', { model: 'claude-haiku-5-5' }));
+  assert.equal(up.state, 'coffee');
+  assert.equal(up.block, undefined);
+
+  const viaPrompt = reduce(starting, ev('UserPromptSubmit', { prompt: 'go', synthetic: false }));
+  assert.equal(viaPrompt.block, undefined);
+
+  const declared = fold([declare('blocked', 'Merge now?', ['Yes'])], started());
+  assert.equal(reduce(declared, ev('SessionStart', {})).state, 'blocked', 'only a starting block clears on SessionStart');
+  const replaced = fold([ev('MaitreStatus', { session: '', status: 'blocked', text: 's', starting: true }), declare('blocked', 'Merge now?')]);
+  assert.equal(reduce(replaced, ev('SessionStart', {})).state, 'blocked', 'a later declared block is not a starting one');
 });

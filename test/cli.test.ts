@@ -24,7 +24,7 @@ test('parseArgs parses lounge flags', () => {
 
 test('parseArgs defaults', () => {
   assert.deepEqual(parseArgs(['lounge']), { cmd: 'lounge', demo: false, port: 8737, open: true, lang: 'en' });
-  assert.equal(parseArgs([]).cmd, 'help');
+  assert.equal(parseArgs([]).cmd, 'start');
   assert.equal(parseArgs(['--version']).cmd, 'version');
 });
 
@@ -56,12 +56,56 @@ test('parseArgs parses room run with extra claude args after --', () => {
   });
   assert.deepEqual(parseArgs(['room', 'run', 'x']), { cmd: 'room-run', room: 'x', extra: [] });
   assert.deepEqual(parseArgs(['room', 'run', 'x', '--']), { cmd: 'room-run', room: 'x', extra: [] });
+  assert.deepEqual(parseArgs(['room', 'run', 'x', '--brief-file', '/b.md', '--', '--model', 'm']), {
+    cmd: 'room-run',
+    room: 'x',
+    extra: ['--model', 'm'],
+    briefFile: '/b.md',
+  });
+  assert.deepEqual(parseArgs(['room', 'run', 'x', '--brief-file', '/b.md']), { cmd: 'room-run', room: 'x', extra: [], briefFile: '/b.md' });
+});
+
+test('parseArgs parses room open, send, list and close', () => {
+  assert.deepEqual(parseArgs(['room', 'open', 'Nf Bug', '--project', 'api', '--model', 'opus', '--task', 'build', '--brief', '-x "y"']), {
+    cmd: 'room-open',
+    name: 'Nf Bug',
+    project: 'api',
+    model: 'opus',
+    taskType: 'build',
+    brief: '-x "y"',
+  });
+  assert.deepEqual(parseArgs(['room', 'open', 'x', '--brief-file', '/b', '--task', 'simple', '--model', 'haiku']), {
+    cmd: 'room-open',
+    name: 'x',
+    model: 'haiku',
+    taskType: 'simple',
+    briefFile: '/b',
+  });
+  assert.deepEqual(parseArgs(['room', 'send', 'x', '--model opus']), { cmd: 'room-send', room: 'x', text: '--model opus' });
+  assert.deepEqual(parseArgs(['room', 'list']), { cmd: 'room-list' });
+  assert.deepEqual(parseArgs(['room', 'close', 'x']), { cmd: 'room-close', room: 'x' });
 });
 
 test('parseArgs rejects malformed room commands', () => {
   for (const argv of [
     ['room'],
-    ['room', 'list'],
+    ['room', 'list', 'x'],
+    ['room', 'close'],
+    ['room', 'close', 'x', 'y'],
+    ['room', 'send', 'x'],
+    ['room', 'send', 'x', 'a', 'b'],
+    ['room', 'send', '-x', 'a'],
+    ['room', 'open', 'x', '--model', 'm', '--task', 't'],
+    ['room', 'open', 'x', '--model', 'm', '--task', 't', '--brief', 'b', '--brief-file', 'f'],
+    ['room', 'open', 'x', '--task', 't', '--brief', 'b'],
+    ['room', 'open', 'x', '--model', 'm', '--brief', 'b'],
+    ['room', 'open', 'x', '--model', 'm', '--task', 't', '--brief'],
+    ['room', 'open', 'x', '--model', 'm', '--task', 't', '--brief', 'b', '--color', 'red'],
+    ['room', 'open', 'x', '--model', 'm', '--model', 'n', '--task', 't', '--brief', 'b'],
+    ['room', 'open', '--model', 'm', '--task', 't', '--brief', 'b'],
+    ['room', 'run', 'x', '--brief-file'],
+    ['room', 'run', 'x', '--brief-file', '--', '--model', 'm'],
+    ['room', 'run', 'x', '--', '--agents', '{}'],
     ['room', 'run'],
     ['room', 'run', '--'],
     ['room', 'run', 'x', '--model', 'haiku'],

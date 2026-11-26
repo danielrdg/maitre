@@ -11,6 +11,7 @@ import { EventTail } from '../src/event-tail.js';
 import { LiveRooms, liveRoutes } from '../src/live-api.js';
 import { startLoungeServer, type LoungeServer } from '../src/lounge-server.js';
 import { roomDir } from '../src/paths.js';
+import { writeRoom as writeRoomRecord } from '../src/rooms.js';
 import { reduce, type RoomState } from '../src/room-state.js';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
@@ -386,4 +387,59 @@ test('a fresh start that replays files drops rooms that ended (SessionEnd or Mai
     c?.close();
     await d.stop();
   }
+});
+
+const REC = { room: 'r1', project: 'backend', kind: 'code', dir: '/w', branch: 'maitre/nf-bug', model: 'sonnet', taskType: 'bug', createdAt: 1 } as const;
+const START = (room: string): HookLine => ({ v: 1, ts: 1, room, session: 's', event: 'SessionStart' });
+
+test('LiveRooms: a registered room carries project and branch, and the registry model fills unknown', () => {
+  const home = tmp('maitre-live-reg-');
+  const env = { MAITRE_HOME: home };
+  writeRoomRecord({ ...REC }, env);
+  writeRoomRecord({ ...REC, room: 'plain' , project: undefined, branch: undefined, kind: 'scratch', model: 'opus' }, env);
+  const rooms = new LiveRooms(env);
+  const seen: RoomState[] = [];
+  rooms.on((r) => seen.push(r));
+  for (const room of ['r1', 'plain', 'none']) rooms.apply(START(room));
+  const by = Object.fromEntries(rooms.snapshot().map((r) => [r.room, r]));
+  assert.equal(by.r1?.project, 'backend');
+  assert.equal(by.r1?.branch, 'maitre/nf-bug');
+  assert.equal(by.r1?.model, 'sonnet');
+  assert.equal(by.plain?.kind, 'scratch');
+  assert.equal(by.plain?.project, undefined);
+  assert.equal(by.plain?.model, 'opus');
+  assert.equal(JSON.stringify(by.none), JSON.stringify(fold([JSON.stringify(START('none'))])), 'no registry: unchanged');
+  assert.equal(seen.find((r) => r.room === 'r1')?.project, 'backend', 'SSE room events are enriched too');
+});
+
+test('LiveRooms: the reducer model wins over the registry once known', () => {
+  const home = tmp('maitre-live-reg-');
+  const env = { MAITRE_HOME: home };
+  writeRoomRecord({ ...REC }, env);
+  const rooms = new LiveRooms(env);
+  rooms.apply({ ...START('r1'), model: 'claude-opus-4-7' });
+  assert.equal(rooms.snapshot()[0]?.model, 'opus');
+});
+
+test('LiveRooms: a corrupt or odd room.json never breaks the snapshot', () => {
+  const home = tmp('maitre-live-reg-');
+  const env = { MAITRE_HOME: home };
+  mkdirSync(roomDir('bad', env), { recursive: true });
+  writeFileSync(join(roomDir('bad', env), 'room.json'), '{nope');
+  mkdirSync(roomDir('odd', env), { recursive: true });
+  writeFileSync(join(roomDir('odd', env), 'room.json'), JSON.stringify({ project: 5, branch: {}, model: [] }));
+  const rooms = new LiveRooms(env);
+  for (const room of ['bad', 'odd']) rooms.apply(START(room));
+  const snap = rooms.snapshot();
+  assert.deepEqual(snap.map((r) => [r.room, r.project, r.branch, r.model]), [['bad', undefined, undefined, 'unknown'], ['odd', undefined, undefined, 'unknown']]);
+});
+
+test('LiveRooms: a registry written after the room first appeared shows up on the next change', () => {
+  const home = tmp('maitre-live-reg-');
+  const env = { MAITRE_HOME: home };
+  const rooms = new LiveRooms(env);
+  rooms.apply(START('r1'));
+  assert.equal(rooms.snapshot()[0]?.project, undefined);
+  writeRoomRecord({ ...REC }, env);
+  assert.equal(rooms.snapshot()[0]?.project, 'backend');
 });

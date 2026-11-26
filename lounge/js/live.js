@@ -12,16 +12,22 @@ const LIVE_STATES = ['coffee', 'work', 'smoke', 'blocked', 'ready', 'whisky', 'e
 const colorKey = model => (MODELS.includes(model) ? model : 'queued');
 const liveState = state => (LIVE_STATES.includes(state) ? state : 'work');
 
+const whereOf = (room, id) => {
+  if (typeof room.project === 'string' && room.project) return typeof room.branch === 'string' && room.branch ? `${room.project} · ${room.branch}` : room.project;
+  return room.kind === 'scratch' ? 'scratch' : id;
+};
+
 export function roomToAgents(room) {
   const id = String(room.room);
-  const info = { task: room.task, steps: [...(room.steps || [])], where: id, since: room.since, live: true };
+  const where = whereOf(room, id);
+  const info = { task: room.task, steps: [...(room.steps || [])], where, since: room.since, live: true };
   if (room.block) info.block = structuredClone(room.block);
   return {
     main: { id, label: id, model: colorKey(room.model), state: liveState(room.state), info },
     subagents: (room.subagents || []).map(s => {
       // A subagent seen only through its Agent tool result has no type yet.
       const type = s.type || 'subagent';
-      return { id: `${id}/${s.id}`, label: `${id} ↳ ${type}`, model: colorKey(s.model), state: 'slot', info: { task: type, steps: [], where: id, live: true } };
+      return { id: `${id}/${s.id}`, label: `${id} ↳ ${type}`, model: colorKey(s.model), state: 'slot', info: { task: type, steps: [], where, live: true } };
     }),
   };
 }

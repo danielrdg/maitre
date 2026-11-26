@@ -1,6 +1,8 @@
 import { isDeepStrictEqual } from 'node:util';
 import type { HookLine } from './events.js';
 
+export const BRIEF_HEADER = '# Brief from the maître reception';
+
 export type LiveState = 'coffee' | 'work' | 'smoke' | 'blocked' | 'ready' | 'whisky' | 'exit';
 export type ModelKey = 'haiku' | 'sonnet' | 'opus' | 'fable' | 'unknown';
 
@@ -27,6 +29,10 @@ export interface RoomState {
   subagents: { id: string; type: string; model: ModelKey }[];
   prUrl?: string;
   waitingOn?: string;
+  // Filled from the room registry by LiveRooms, never by the reducer.
+  project?: string;
+  branch?: string;
+  kind?: 'code' | 'scratch';
 }
 
 interface Pending {
@@ -41,6 +47,8 @@ interface Track {
   watchId?: string;
   // waitingOn came from `maitre status waiting`, not from a watch command.
   declaredWait?: boolean;
+  // The declared block came from maître while the room started (MaitreStatus starting).
+  startingBlock?: boolean;
   finished: string[];
 }
 
@@ -217,6 +225,8 @@ export function reduce(prev: RoomState | undefined, ev: HookLine): RoomState {
   switch (event) {
     case 'SessionStart':
       if (str(ev.model)) s.model = modelKey(str(ev.model));
+      if (track.startingBlock && isDeclaredBlock()) delete s.block;
+      delete track.startingBlock;
       dropMainBlock();
       dropHookWait();
       s.state = held() ?? 'coffee';
@@ -228,7 +238,8 @@ export function reduce(prev: RoomState | undefined, ev: HookLine): RoomState {
         dropMainBlock();
         dropHookWait();
       } else {
-        const prompt = str(ev.prompt);
+        let prompt = str(ev.prompt);
+        if (prompt?.startsWith(BRIEF_HEADER)) prompt = prompt.slice(BRIEF_HEADER.length);
         if (s.task === '' && prompt !== undefined && prompt.trim() !== '') s.task = clip(prompt, TASK_MAX);
         dropAll();
         dropMainPending();
@@ -333,7 +344,9 @@ export function reduce(prev: RoomState | undefined, ev: HookLine): RoomState {
       if (ev.status !== 'blocked' && ev.status !== 'waiting' && ev.status !== 'working') break;
       const text = str(ev.text) ?? '';
       dropDeclared();
+      delete track.startingBlock;
       if (ev.status === 'blocked') {
+        if (ev.starting === true) track.startingBlock = true;
         const raw: unknown[] = Array.isArray(ev.options) ? ev.options : [];
         const options = raw.filter((o): o is string => typeof o === 'string').map((label) => ({ label }));
         s.block = { kind: 'question', tool: DECLARED_TOOL, detail: clip(text, DETAIL_MAX), questions: [{ question: text, options }] };

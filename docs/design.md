@@ -271,7 +271,7 @@ The stuck agent's panel sends `POST /rooms/:id/answer` to the daemon. The daemon
 
 **Icon and identity.**
 - **The icon is the maître himself**, who becomes the project's mascot: a 16x16 pixel-art face with slicked grey hair, a moustache, a red bow tie and a tuxedo.
-  - File: a crisp-pixel SVG at `lounge/favicon.svg`, with 192/512 PNGs for the app window and the M2 `.desktop` file.
+  - File: a crisp-pixel SVG at `lounge/favicon.svg`, with 192/512 PNGs for the app window and the M2b `.desktop` file.
   - The same mascot appears in the README, in notifications and in the Super+M prompt.
   - The reference drawing is option C of the identity mockup.
 - **Tagline: "Your agents' lounge."**
@@ -298,7 +298,7 @@ The stuck agent's panel sends `POST /rooms/:id/answer` to the daemon. The daemon
 
 The terminal keeps working, but the user can use all of maître without opening one.
 
-1. **Clickable reception in the lounge (M2).**
+1. **Clickable reception in the lounge (M2b).**
    - Clicking the maître at the lobby desk opens a pixel text box.
    - The request goes via `POST /reception` to the daemon, which runs the same `maitre route` and the same flow as section 6.2.
    - The reception's answer shows up in a maître speech balloon.
@@ -307,7 +307,7 @@ The terminal keeps working, but the user can use all of maître without opening 
    - The agent panel gets a "conversation" tab with the room's latest messages (read with `herdr agent read`) and a field to send (delivered with `herdr agent prompt`).
    - The "open tab" button focuses the room's herdr tab, for whoever wants the terminal.
    - Text read from the room is always rendered as text.
-3. **Icon and global shortcut (M2).**
+3. **Icon and global shortcut (M2b).**
    - `maitre setup` installs:
      - a "maître" `.desktop` file that opens the lounge as an app;
      - the daemon as a `systemd --user` service that starts at login and restarts by itself.
@@ -321,10 +321,10 @@ A subset of the README's [maître vs firstmate](../README.md#maître-vs-firstmat
 
 | | firstmate | maître |
 |---|---|---|
-| Who you talk to | One liaison, the first mate, which dispatches and supervises the crew ([README](https://github.com/kunchenguid/firstmate/blob/64254de47a2989add6412949e98c36e3964b24aa/README.md?plain=1#L44)) | A reception that sends each topic to its own named room; any room can be talked to directly (M2) |
+| Who you talk to | One liaison, the first mate, which dispatches and supervises the crew ([README](https://github.com/kunchenguid/firstmate/blob/64254de47a2989add6412949e98c36e3964b24aa/README.md?plain=1#L44)) | A reception that sends each topic to its own named room; any room can be talked to directly (M2a) |
 | Cleaning up | Teardown after a task ships or reports, refusing dirty worktrees and unlanded work ([architecture](https://github.com/kunchenguid/firstmate/blob/64254de47a2989add6412949e98c36e3964b24aa/docs/architecture.md?plain=1#L469)) | The same never-lose-work rule, plus a janitor that closes rooms idle for 4 h with nothing pending and writes minutes (M3) |
-| Choosing a model | A static crew harness or dispatch profiles, with an optional typed resolver ([architecture](https://github.com/kunchenguid/firstmate/blob/64254de47a2989add6412949e98c36e3964b24aa/docs/architecture.md?plain=1#L367-L371)) | A routing table applied by code, with each room's outcome fed back to the router (M2, M5) |
-| Always-loaded instructions | `AGENTS.md`, imported by `CLAUDE.md` ([CLAUDE.md](https://github.com/kunchenguid/firstmate/blob/64254de47a2989add6412949e98c36e3964b24aa/CLAUDE.md?plain=1#L2)): about 7,350 words | A reception contract capped at 1,500 words (M2) |
+| Choosing a model | A static crew harness or dispatch profiles, with an optional typed resolver ([architecture](https://github.com/kunchenguid/firstmate/blob/64254de47a2989add6412949e98c36e3964b24aa/docs/architecture.md?plain=1#L367-L371)) | A routing table applied by code, with each room's outcome fed back to the router (M2a, M5) |
+| Always-loaded instructions | `AGENTS.md`, imported by `CLAUDE.md` ([CLAUDE.md](https://github.com/kunchenguid/firstmate/blob/64254de47a2989add6412949e98c36e3964b24aa/CLAUDE.md?plain=1#L2)): about 7,350 words | A reception contract capped at 1,500 words (M2a) |
 | Watching the agents | The session backend's panes; shipmate, a separate project, adds a dashboard refreshed every 30 seconds where you can also answer decisions and queue tasks ([shipmate](https://github.com/bpsanti/shipmate/blob/78f90de2cb78f00cf482326ba9a15ef9ef229439/README.md?plain=1#L7-L8)) | A built-in lounge updated live over SSE (M1) |
 
 ## 7. Milestones
@@ -333,7 +333,9 @@ A subset of the README's [maître vs firstmate](../README.md#maître-vs-firstmat
   - The README is at firstmate's level: a hero with the lounge GIF, "what is it", features, quick start (clone, `./setup`, `maitre`), how it works with a diagram, the state map illustrated with the sprites, configuration (routing, capacity, janitor, project roots), FAQ and an honest comparison with firstmate.
   - Demo room names are generic.
 - **M1 · Events (done):** hook, daemon with SSE, and the lounge reading the real state of a room opened by hand (`maitre room run`, `maitre status`).
-- **M2 · Rooms:** `maitre` opens herdr, `room open|send` with a worktree, reception + `route` with Haiku.
+- **M2 · Rooms**, split in two by the owner on 25-11-2026:
+  - **M2a · Reception and rooms (done):** `maitre` opens the herdr session with the reception and the lounge; `maitre index` builds the project index; the guarded reception captures each request to a file and runs only id-based `maitre route`/`dispatch`; Haiku classifies, code picks the model from `config/routing.json`; `room open|send|list|close` with a worktree per room; the trust dialog answered on screen, never by editing `~/.claude.json`; the lounge shows each room's project and branch.
+  - **M2b · The doors:** `./setup`, the clickable reception in the lounge, the `.desktop` app icon, the daemon as a `systemd --user` service, and the Super+M quick prompt (§6.8.1).
 - **M3 · Doorman and janitor:** queue, capacity, cleanup with minutes in the vault.
 - **M4 · Building:** facade, floors, terrace, elevator.
 - **M5 · Answer from the lounge** and routing that learns.
@@ -349,7 +351,7 @@ A subset of the README's [maître vs firstmate](../README.md#maître-vs-firstmat
 - **Room without code:** on close, the files in its scratch folder move to `memory/rooms/<room>/`, never deleted.
 - **Multi-repo room:** a room can have more than one worktree (1:N). It shows on the main project's floor, with a small sign for the others.
 - **The user's global rules apply in rooms**, because they are the user's own Claude Code. `room-AGENTS.md` only pins what belongs to maître: use the worktree and branch maître created, do not create another, and declare waits and blocks with `maitre status`.
-- **The 5k-token target** applies to the `route` call. The reception runs isolated from personal configuration (spike 0), and the 1,500-word ceiling applies to its contract.
+- **The 5k-token target** applies to the `route` call. The reception runs with setting sources off (spike 0), so personal settings, hooks and plugins stay out; Claude Code still loads the user's and organization's `CLAUDE.md`, and the guard hook keeps it to the `maitre` allowlist. The 1,500-word ceiling applies to its contract.
 - **The building gets its own mockup before M4:** facade, elevator, lobby with sidewalk, and terrace. It is approved before code.
 
 ## 8. Left to whoever builds it

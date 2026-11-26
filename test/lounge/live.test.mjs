@@ -472,3 +472,22 @@ test('registry text reaches the panel as text nodes, never markup', () => {
   renderPanel(root, m, () => {});
   assert.ok(allText(root).includes('<img src=x onerror=alert(1)> · <b>'));
 });
+
+test('roomToAgents carries the last reply to the main agent only', () => {
+  const { main, subagents } = roomToAgents(room({ reply: 'Done: 3 files', subagents: [{ id: 'a1', type: 'Explore', model: 'haiku' }] }));
+  assert.equal(main.info.reply, 'Done: 3 files');
+  assert.equal(subagents[0].info.reply, undefined);
+  assert.equal(roomToAgents(room({ reply: 42 })).main.info.reply, undefined);
+});
+
+test('the panel shows the last reply as text, in both languages', () => {
+  const agent = { id: 'r1', label: 'r1', state: 'ready', look: { model: 'haiku' }, info: { live: true, task: 't', steps: [], reply: '<b>oi</b>' } };
+  const model = panelModel(agent, 'pt-BR');
+  assert.equal(model.reply, '<b>oi</b>');
+  const { doc, root } = fakeDoc();
+  renderPanel(root, model, () => {}, { lang: 'pt-BR' });
+  assert.ok(allText(root).includes(t('panel.lastReply', 'pt-BR')));
+  assert.ok(allText(root).includes('<b>oi</b>'));
+  assert.ok(!doc.made.some(n => n.tag === 'b' && n.textContent === 'oi'));
+  assert.equal(panelModel({ ...agent, info: { ...agent.info, reply: '' } }, 'en').reply, undefined);
+});

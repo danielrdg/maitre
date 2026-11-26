@@ -7,9 +7,12 @@ export interface ProjectOverride {
   branchPrefix?: string;
 }
 
+export type UiLang = 'en' | 'pt-BR';
+
 export interface MaitreConfig {
   roots: string[];
   projects: Record<string, ProjectOverride>;
+  lang?: UiLang;
 }
 
 export function writeJsonAtomic(path: string, value: unknown): void {
@@ -36,7 +39,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MaitreConfig {
   const raw = readJson(configPath(env)) as Partial<MaitreConfig> | undefined;
   const roots = Array.isArray(raw?.roots) ? raw.roots.filter((r): r is string => typeof r === 'string') : [];
   const projects = raw?.projects && typeof raw.projects === 'object' && !Array.isArray(raw.projects) ? raw.projects : {};
-  return { roots, projects };
+  return raw?.lang === 'en' || raw?.lang === 'pt-BR' ? { roots, projects, lang: raw.lang } : { roots, projects };
 }
 
 export function saveConfig(cfg: MaitreConfig, env: NodeJS.ProcessEnv = process.env): void {

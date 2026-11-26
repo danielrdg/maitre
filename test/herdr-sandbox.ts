@@ -39,6 +39,8 @@ export function herdrSandbox(): HerdrSandbox {
   const log = join(dir, 'argv.log');
   const stateFile = join(dir, 'herdr-state.json');
   for (const k of Object.keys(process.env)) if (FAKE_KEYS.test(k)) delete process.env[k];
+  // Window URLs carry the locale's language: tests must not depend on the machine's.
+  for (const k of ['LC_ALL', 'LC_MESSAGES', 'LANG']) delete process.env[k];
   const vars = { FAKE_HERDR_LOG: log, FAKE_HERDR_STATE: stateFile, MAITRE_HOME: home, MAITRE_HERDR_SESSION: 'maitre-test' };
   Object.assign(process.env, vars, { PATH: `${bin}${delimiter}${saved.PATH}` });
   const env: NodeJS.ProcessEnv = { ...vars, PATH: [bin, dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter) };

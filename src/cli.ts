@@ -8,7 +8,7 @@ import { LiveRooms, liveRoutes } from './live-api.js';
 import { ReceptionQueue, receptionRoutes } from './lounge-reception.js';
 import { claimLounge, liveLounge, loungeToken, releaseLounge } from './lounge-file.js';
 import { startLoungeServer, TicketStore } from './lounge-server.js';
-import { ensureLounge, hasDisplay, notifyDesktop, openWindow, ticketUrl } from './open-app.js';
+import { ensureLounge, hasDisplay, notifyDesktop, openWindow, ticketUrl, uiLang } from './open-app.js';
 import { loadConfig, saveConfig } from './config.js';
 import { maitreHome, roomSlug } from './paths.js';
 import { readIndex, scanProjects, writeIndex } from './projects.js';
@@ -252,7 +252,7 @@ async function openDoor(cmd: 'open' | 'prompt', env: NodeJS.ProcessEnv = process
   try {
     const ms = Number(env.MAITRE_LOUNGE_WAIT_MS);
     const info = await ensureLounge(env, Number.isFinite(ms) && ms > 0 ? { timeoutMs: ms } : {});
-    const url = await ticketUrl(info, cmd === 'open' ? '/' : '/prompt.html');
+    const url = await ticketUrl(info, cmd === 'open' ? '/' : '/prompt.html', uiLang(env));
     if (openWindow(cmd === 'open' ? 'lounge' : 'prompt', url, env)) return 0;
     const why = hasDisplay(env) ? 'no browser found (google-chrome or xdg-open)' : 'no display for a window';
     console.error(`maitre: ${why}; open ${url} within a minute`);

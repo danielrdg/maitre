@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loungeFile, readLoungeInfo, type LoungeInfo } from '../src/lounge-file.js';
-import { ensureLounge, openWindow, screenSize, ticketUrl } from '../src/open-app.js';
+import { ensureLounge, openWindow, screenSize, ticketUrl, uiLang } from '../src/open-app.js';
 import { fakeBin, type FakeBin } from './fake-bin.js';
 
 const MAITRE = fileURLToPath(new URL('../../bin/maitre', import.meta.url));
@@ -258,4 +258,31 @@ test('ensureLounge reports where to look when the lounge does not come up', asyn
   await assert.rejects(ensureLounge(env, { timeoutMs: 300, pollMs: 20 }), {
     message: 'the lounge did not start; see journalctl --user -u maitre',
   });
+});
+
+test('uiLang follows the config, else the locale, else English', () => {
+  const home = mkdtempSync(join(tmpdir(), 'maitre-lang-'));
+  try {
+    const env = { MAITRE_HOME: home, LANG: 'pt_BR.UTF-8' };
+    assert.equal(uiLang(env), 'pt-BR');
+    assert.equal(uiLang({ MAITRE_HOME: home, LANG: 'en_US.UTF-8' }), 'en');
+    assert.equal(uiLang({ MAITRE_HOME: home, LC_ALL: 'pt_PT.UTF-8', LANG: 'en_US.UTF-8' }), 'pt-BR');
+    assert.equal(uiLang({ MAITRE_HOME: home }), 'en');
+    writeFileSync(join(home, 'config.json'), JSON.stringify({ roots: [], projects: {}, lang: 'en' }));
+    assert.equal(uiLang(env), 'en');
+    writeFileSync(join(home, 'config.json'), JSON.stringify({ roots: [], projects: {}, lang: 'fr' }));
+    assert.equal(uiLang(env), 'pt-BR');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('ticketUrl adds the language only when it is not English', async () => {
+  const s = await fakeLounge();
+  try {
+    assert.equal(await ticketUrl(s.info, '/prompt.html', 'pt-BR'), `http://127.0.0.1:${s.info.port}/prompt.html?ticket=${TICKET}&lang=pt-BR`);
+    assert.equal(await ticketUrl(s.info, '/', 'en'), `http://127.0.0.1:${s.info.port}/?ticket=${TICKET}`);
+  } finally {
+    await s.close();
+  }
 });

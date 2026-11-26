@@ -48,6 +48,7 @@ export function panelModel(agent, lang = 'en', now = Date.now()) {
     task: info.task || '—',
     where: info.where || '—',
     steps: [...(info.steps || [])],
+    ...(typeof info.reply === 'string' && info.reply.trim() ? { reply: info.reply } : {}),
     minutes: info.minutes ?? 0,
     tokens: info.tokens ?? '—',
     ...usageFor(info, lang, now),
@@ -130,6 +131,7 @@ export function renderPanel(root, model, onAnswer, { lang = 'en', portrait = nul
     el(doc, 'div', 'lbl', t('panel.where', lang)), el(doc, 'div', null, model.where),
     el(doc, 'div', 'lbl', t('panel.steps', lang)), list,
   );
+  if (model.reply) root.append(el(doc, 'div', 'lbl', t('panel.lastReply', lang)), el(doc, 'div', 'reply', model.reply));
   if (model.usage != null) root.append(el(doc, 'div', 'lbl', model.usageLabel), el(doc, 'div', null, model.usage));
   if (model.terminal && onTerminal) root.append(terminalRow(doc, lang, onTerminal, terminalError));
 

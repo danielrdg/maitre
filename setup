@@ -1,0 +1,26 @@
+#!/bin/sh
+# One-step setup: builds maître when needed, then runs `maitre setup` with these arguments
+# (--roots <a,b>, --shortcut <accel>, --no-shortcut, --no-service, --yes, --dry-run, --uninstall).
+set -eu
+
+repo=$(cd "$(dirname "$0")" && pwd)
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "setup: maître needs Node.js 20 or newer; node was not found on PATH" >&2
+  exit 1
+fi
+major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)
+case $major in '' | *[!0-9]*) major=0 ;; esac
+if [ "$major" -lt 20 ]; then
+  echo "setup: maître needs Node.js 20 or newer; found $(node --version)" >&2
+  exit 1
+fi
+
+if [ ! -d "$repo/node_modules" ]; then
+  (cd "$repo" && npm ci)
+fi
+if [ ! -f "$repo/dist/src/cli.js" ] || [ -n "$(find "$repo/src" -name '*.ts' -newer "$repo/dist/src/cli.js")" ]; then
+  (cd "$repo" && npm run build)
+fi
+
+exec node "$repo/bin/maitre" setup "$@"

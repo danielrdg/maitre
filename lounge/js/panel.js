@@ -33,6 +33,8 @@ export function panelModel(agent, lang = 'en', now = Date.now()) {
   const info = agent.info || {};
   const modelKey = MODEL[agent.look.model] && agent.look.model !== 'tux' ? agent.look.model : 'queued';
   const b = agent.state === 'blocked' ? info.block : undefined;
+  // Only a live room's main agent has a terminal; a subagent's id is `<room>/<id>`.
+  const room = info.live && !String(agent.id).includes('/') ? String(agent.id) : undefined;
   const block = !b ? undefined : b.kind ? liveBlock(b, lang) : {
     reason: b.reason,
     options: b.options.map((o, i) => ({ key: 'ABC'[i], text: o.text, detail: o.detail, recommended: !!o.recommended })),
@@ -49,6 +51,7 @@ export function panelModel(agent, lang = 'en', now = Date.now()) {
     minutes: info.minutes ?? 0,
     tokens: info.tokens ?? '—',
     ...usageFor(info, lang, now),
+    ...(room === undefined ? {} : { terminal: true, room }),
     block,
   };
 }
@@ -78,7 +81,28 @@ function appendTemplate(doc, parent, template, vars) {
   }
 }
 
-export function renderPanel(root, model, onAnswer, { lang = 'en', portrait = null, onClose = null } = {}) {
+// onTerminal() resolves to null when the terminal opened, else to the error message.
+function terminalRow(doc, lang, onTerminal, error) {
+  const row = el(doc, 'div', 'term');
+  const btn = el(doc, 'button', 'opt', t('panel.openTerminal', lang));
+  const err = el(doc, 'div', 'termerr');
+  const showError = message => {
+    err.textContent = message ? t('panel.terminalFailed', lang, { message }) : '';
+    err.style.display = message ? '' : 'none';
+  };
+  showError(error);
+  btn.addEventListener('click', () => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    new Promise(r => r(onTerminal()))
+      .then(showError, e => showError(String(e?.message ?? e)))
+      .finally(() => { btn.disabled = false; });
+  });
+  row.append(btn, err);
+  return row;
+}
+
+export function renderPanel(root, model, onAnswer, { lang = 'en', portrait = null, onClose = null, onTerminal = null, terminalError = null } = {}) {
   const doc = root.ownerDocument;
   root.replaceChildren();
 
@@ -107,6 +131,7 @@ export function renderPanel(root, model, onAnswer, { lang = 'en', portrait = nul
     el(doc, 'div', 'lbl', t('panel.steps', lang)), list,
   );
   if (model.usage != null) root.append(el(doc, 'div', 'lbl', model.usageLabel), el(doc, 'div', null, model.usage));
+  if (model.terminal && onTerminal) root.append(terminalRow(doc, lang, onTerminal, terminalError));
 
   if (model.block?.readOnly) {
     root.append(readOnlyBlock(doc, model.block, lang));

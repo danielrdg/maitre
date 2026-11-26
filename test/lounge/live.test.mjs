@@ -445,9 +445,10 @@ test('LiveSource hands snapshots and room events to its callbacks and ignores ju
   assert.ok(es.closed);
 });
 
-test('the empty-lounge hint names the command in both languages', () => {
-  assert.equal(t('live.empty', 'en'), 'No rooms yet — run `maitre room run <name>`');
-  assert.match(t('live.empty', 'pt-BR'), /`maitre room run <name>`/);
+test('the empty-lounge hint points to the maître and the reception in both languages', () => {
+  assert.equal(t('live.empty', 'en'), 'No rooms yet — click the maître at the desk, or run `maitre` in a terminal');
+  assert.match(t('live.empty', 'pt-BR'), /maître.*`maitre`/);
+  for (const lang of ['en', 'pt-BR']) assert.doesNotMatch(t('live.empty', lang), /room run/);
   assert.notEqual(t('live.empty', 'pt-BR'), t('live.empty', 'en'));
 });
 

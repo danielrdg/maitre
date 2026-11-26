@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { HookLine } from './events.js';
+import type { LoungeAuth, TicketStore } from './lounge-server.js';
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { roomDir } from './paths.js';
@@ -93,12 +94,30 @@ function notAllowed(res: ServerResponse, allow: string): true {
   return true;
 }
 
-export function liveRoutes(
-  rooms: LiveRooms,
-  opts: { pingMs?: number } = {},
-): (req: IncomingMessage, res: ServerResponse, url: URL) => boolean {
+type Routes = (req: IncomingMessage, res: ServerResponse, url: URL, auth?: LoungeAuth) => boolean;
+
+export function liveRoutes(rooms: LiveRooms, opts: { pingMs?: number; tickets?: TicketStore; reception?: Routes } = {}): Routes {
   const pingMs = opts.pingMs ?? PING_MS;
-  return (req, res, url) => {
+  const tickets = opts.tickets;
+  const reception = opts.reception;
+  return (req, res, url, auth) => {
+    if (url.pathname === '/api/ticket' && tickets) {
+      if (req.method !== 'POST') return notAllowed(res, 'POST');
+      req.resume();
+      if (auth !== 'header') {
+        res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end('Forbidden');
+        return true;
+      }
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+      });
+      res.end(JSON.stringify({ ticket: tickets.issue() }));
+      return true;
+    }
+
     if (url.pathname === '/api/state') {
       if (req.method !== 'GET' && req.method !== 'HEAD') return notAllowed(res, 'GET, HEAD');
       res.writeHead(200, {
@@ -133,6 +152,6 @@ export function liveRoutes(
       return true;
     }
 
-    return false;
+    return reception ? reception(req, res, url, auth) : false;
   };
 }

@@ -74,7 +74,9 @@ export const STRINGS = {
     'panel.minutes': '{minutes} min',
     'panel.permission': 'Asking permission to use {tool}',
     'panel.answerInTerminal': "Answer in the room's terminal",
-    'live.empty': 'No rooms yet — run `maitre room run <name>`',
+    'panel.openTerminal': 'Open in terminal',
+    'panel.terminalFailed': 'Could not open the terminal: {message}',
+    'live.empty': 'No rooms yet — click the maître at the desk, or run `maitre` in a terminal',
     'live.disconnected': 'Disconnected — reopen the lounge from the terminal',
 
     'npc.maitre': 'maître',
@@ -96,6 +98,13 @@ export const STRINGS = {
     'music.jazz': 'Jazz (calm)',
     'music.house': 'House',
     'music.volume': 'VOLUME',
+
+    'reception.placeholder': 'What do you need? Enter sends, Esc closes',
+    'reception.thinking': '…',
+    'reception.offline': 'The lounge is not answering. Is maître running?',
+    'reception.badReply': 'The lounge sent an unexpected answer (HTTP {status}).',
+    'prompt.title': 'maître · reception',
+    'prompt.done': 'Sent. You can close this window.',
   },
   'pt-BR': {
     'state.queue': 'Na fila, esperando vaga',
@@ -165,7 +174,9 @@ export const STRINGS = {
     'panel.minutes': '{minutes} min',
     'panel.permission': 'Pedindo permissão pra usar {tool}',
     'panel.answerInTerminal': 'Responda no terminal da sala',
-    'live.empty': 'Nenhuma sala ainda — rode `maitre room run <name>`',
+    'panel.openTerminal': 'Abrir no terminal',
+    'panel.terminalFailed': 'Não deu pra abrir o terminal: {message}',
+    'live.empty': 'Nenhuma sala ainda — clique no maître no balcão, ou rode `maitre` num terminal',
     'live.disconnected': 'Desconectado — abra o lounge de novo pelo terminal',
 
     'npc.maitre': 'maître',
@@ -187,6 +198,13 @@ export const STRINGS = {
     'music.jazz': 'Jazz (calmo)',
     'music.house': 'House',
     'music.volume': 'VOLUME',
+
+    'reception.placeholder': 'Do que você precisa? Enter envia, Esc fecha',
+    'reception.thinking': '…',
+    'reception.offline': 'O lounge não responde. O maître está rodando?',
+    'reception.badReply': 'O lounge mandou uma resposta inesperada (HTTP {status}).',
+    'prompt.title': 'maître · recepção',
+    'prompt.done': 'Enviado. Pode fechar esta janela.',
   },
 };
 

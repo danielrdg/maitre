@@ -5,19 +5,22 @@ import { dirname, join, resolve } from 'node:path';
 import { VERSION } from './version.js';
 import { EventTail } from './event-tail.js';
 import { LiveRooms, liveRoutes } from './live-api.js';
-import { startLoungeServer } from './lounge-server.js';
-import { openApp } from './open-app.js';
+import { ReceptionQueue, receptionRoutes } from './lounge-reception.js';
+import { claimLounge, liveLounge, loungeToken, releaseLounge } from './lounge-file.js';
+import { startLoungeServer, TicketStore } from './lounge-server.js';
+import { ensureLounge, hasDisplay, notifyDesktop, openWindow, ticketUrl } from './open-app.js';
 import { loadConfig, saveConfig } from './config.js';
 import { maitreHome, roomSlug } from './paths.js';
 import { readIndex, scanProjects, writeIndex } from './projects.js';
 import { closeRoom, deliverToRoom, describeDelivery, describeOpen, listRoomRows, openRoom, type RoomRow } from './room-open.js';
 import { attach, runReception, startMaitre } from './reception.js';
+import { parseSetupArgs, runSetup, type SetupOptions } from './setup.js';
 import { reservedFlag, runRoom } from './room-run.js';
 import { describeRoute, dispatchRoute, isRequestId, routeRequests } from './router.js';
 import { STATUSES, runStatus, type RoomStatus } from './status.js';
 
 export interface LoungeArgs {
-  cmd: 'lounge' | 'help' | 'version';
+  cmd: 'lounge' | 'serve' | 'help' | 'version';
   demo: boolean;
   port: number;
   open: boolean;
@@ -38,6 +41,9 @@ export type CliArgs =
   | { cmd: 'dispatch'; id: string }
   | { cmd: 'start' }
   | { cmd: 'reception' }
+  | { cmd: 'open' }
+  | { cmd: 'prompt' }
+  | { cmd: 'setup'; opts: SetupOptions }
   | { cmd: 'usage'; error: string };
 
 const ROOM_RUN_USAGE = 'usage: maitre room run <name> [--brief-file <path>] [-- <claude args>]';
@@ -146,6 +152,11 @@ function parseRoute(argv: string[]): CliArgs {
 export function parseArgs(argv: string[]): CliArgs {
   if (argv.length === 0) return { cmd: 'start' };
   if (argv[0] === 'reception') return argv.length === 1 ? { cmd: 'reception' } : usage('usage: maitre reception');
+  if (argv[0] === 'open' || argv[0] === 'prompt') return argv.length === 1 ? { cmd: argv[0] } : usage(`usage: maitre ${argv[0]}`);
+  if (argv[0] === 'setup') {
+    const opts = parseSetupArgs(argv.slice(1));
+    return 'error' in opts ? usage(opts.error) : { cmd: 'setup', opts };
+  }
   // Subcommands with free-form arguments parse positionally, so their text is never read as a flag.
   if (argv[0] === 'room') return parseRoom(argv.slice(1));
   if (argv[0] === 'status') return parseStatus(argv.slice(1));
@@ -157,6 +168,7 @@ export function parseArgs(argv: string[]): CliArgs {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === 'lounge') out.cmd = 'lounge';
+    else if (a === 'serve') out.cmd = 'serve';
     else if (a === '--version' || a === '-v') out.cmd = 'version';
     else if (a === '--help' || a === '-h') out.cmd = 'help';
     else if (a === '--demo') out.demo = true;
@@ -169,6 +181,10 @@ export function parseArgs(argv: string[]): CliArgs {
       if (l === 'en' || l === 'pt-BR') out.lang = l;
     }
   }
+  if (out.cmd === 'serve') {
+    out.demo = false;
+    out.open = false;
+  }
   return out;
 }
 
@@ -177,6 +193,10 @@ export const HELP = `maitre ${VERSION}
 Usage:
   maitre
   maitre lounge [--demo] [--port <n>] [--no-open] [--lang en|pt-BR]
+  maitre serve [--port <n>]
+  maitre open
+  maitre prompt
+  maitre setup [--roots <a,b>] [--shortcut <accel>] [--no-shortcut] [--no-service] [--yes] [--dry-run] [--uninstall]
   maitre room open <name> [--project <p>] --model <m> --task <type> (--brief "<text>" | --brief-file <path>)
   maitre room send <room> "<text>"
   maitre room list
@@ -193,6 +213,10 @@ Usage:
 Commands:
   (none)        Open the maître herdr session (reception and lounge) and attach to it
   lounge        Watch your rooms live in the lounge (--demo: simulated agents)
+  serve         Run the live lounge without opening a window (for the login service)
+  open          Open the lounge window, starting the lounge first if needed
+  prompt        Open the small prompt window, starting the lounge first if needed
+  setup         Install the command, the login service, the app icon and the GNOME shortcut (--uninstall undoes it)
   room open     Open a room in its own herdr tab (a git worktree with --project, else a scratch dir)
   room send     Send a message to a running room without waiting for its turn
   room list     List rooms with their herdr status and lounge state
@@ -221,6 +245,24 @@ function formatRows(rows: RoomRow[]): string[] {
 function sendConfirm(): { confirmMs?: number } {
   const ms = Number(process.env.MAITRE_SEND_CONFIRM_MS);
   return Number.isFinite(ms) && ms > 0 ? { confirmMs: ms } : {};
+}
+
+// Usually run from an app icon or a shortcut, with no terminal to read stderr: failures also notify.
+async function openDoor(cmd: 'open' | 'prompt', env: NodeJS.ProcessEnv = process.env): Promise<number> {
+  try {
+    const ms = Number(env.MAITRE_LOUNGE_WAIT_MS);
+    const info = await ensureLounge(env, Number.isFinite(ms) && ms > 0 ? { timeoutMs: ms } : {});
+    const url = await ticketUrl(info, cmd === 'open' ? '/' : '/prompt.html');
+    if (openWindow(cmd === 'open' ? 'lounge' : 'prompt', url, env)) return 0;
+    const why = hasDisplay(env) ? 'no browser found (google-chrome or xdg-open)' : 'no display for a window';
+    console.error(`maitre: ${why}; open ${url} within a minute`);
+    notifyDesktop(why, env);
+  } catch (err) {
+    const message = (err as Error).message;
+    console.error(`maitre: ${message}`);
+    notifyDesktop(message, env);
+  }
+  return 1;
 }
 
 async function roomCommand(args: Extract<CliArgs, { cmd: 'room-open' | 'room-send' | 'room-list' | 'room-close' }>): Promise<void> {
@@ -266,6 +308,7 @@ export async function main(argv: string[]): Promise<void> {
     try {
       const ms = Number(process.env.MAITRE_TRUST_TIMEOUT_MS);
       const r = await startMaitre(process.env, Number.isFinite(ms) && ms > 0 ? { trustTimeoutMs: ms } : {});
+      for (const n of r.notes) console.log(n);
       for (const w of r.warnings) console.error(`maitre: warning: ${w}`);
     } catch (err) {
       console.error(`maitre: ${(err as Error).message}`);
@@ -273,6 +316,14 @@ export async function main(argv: string[]): Promise<void> {
       return;
     }
     process.exit(await attach(process.env));
+  }
+  if (args.cmd === 'open' || args.cmd === 'prompt') {
+    process.exitCode = await openDoor(args.cmd);
+    return;
+  }
+  if (args.cmd === 'setup') {
+    process.exitCode = await runSetup(args.opts);
+    return;
   }
   if (args.cmd === 'reception') {
     let code: number;
@@ -377,22 +428,41 @@ export async function main(argv: string[]): Promise<void> {
     process.exit(code);
   }
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'lounge');
-  const token = randomBytes(32).toString('hex');
-  const rooms = args.demo ? undefined : new LiveRooms();
-  const server = await startLoungeServer({ root, port: args.port, token, routes: rooms && liveRoutes(rooms) });
+  const live = !args.demo;
+  if (live) {
+    const running = await liveLounge();
+    if (running) {
+      console.error(`maitre: a lounge is already running on port ${running.port}`);
+      // serve exits 0 so the unit's Restart=on-failure does not loop while a terminal lounge runs.
+      process.exitCode = args.cmd === 'serve' ? 0 : 1;
+      return;
+    }
+  }
+  const token = live ? loungeToken() : randomBytes(32).toString('hex');
+  const rooms = live ? new LiveRooms() : undefined;
+  const tickets = new TicketStore();
+  const reception = live ? receptionRoutes({ queue: new ReceptionQueue(), env: process.env }) : undefined;
+  const server = await startLoungeServer({ root, port: args.port, token, tickets, routes: rooms && liveRoutes(rooms, { tickets, reception }) });
+  if (live) claimLounge(server.port);
   const tail = rooms && new EventTail(join(maitreHome(), 'state'), (line) => rooms.apply(line));
   // The first scan is synchronous: existing rooms are replayed before the URL is printed.
   tail?.start();
-  let url = server.url;
-  if (args.demo) url += '&demo=1';
-  if (args.lang !== 'en') url += `&lang=${args.lang}`;
-  console.log(`maitre lounge: ${url}`);
-  if (args.open) openApp(url);
-  console.log('Press Ctrl+C to stop.');
   const stop = () => {
     tail?.stop();
+    if (live) releaseLounge();
     void server.close().then(() => process.exit(0));
   };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
+  if (args.cmd === 'serve') {
+    console.log(`maitre serve: http://127.0.0.1:${server.port}/`);
+  } else {
+    let query = '';
+    if (args.demo) query += '&demo=1';
+    if (args.lang !== 'en') query += `&lang=${args.lang}`;
+    console.log(`maitre lounge: ${server.url}${query}`);
+    // The window gets a one-time ticket: the key URL above is for this terminal only.
+    if (args.open) openWindow('lounge', `http://127.0.0.1:${server.port}/?ticket=${tickets.issue()}${query}`);
+    console.log('Press Ctrl+C to stop.');
+  }
 }

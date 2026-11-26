@@ -29,3 +29,15 @@ test('t interpolates and falls back to English', () => {
   assert.equal(t('state.work', 'xx'), 'Working');
   assert.match(t('queue.many', 'en', { n: 3 }), /3/);
 });
+
+test('the reception, prompt and terminal strings exist in both languages', () => {
+  const keys = ['reception.placeholder', 'reception.thinking', 'reception.offline', 'prompt.title', 'prompt.done', 'panel.openTerminal', 'panel.terminalFailed'];
+  for (const lang of ['en', 'pt-BR']) {
+    for (const k of keys) {
+      assert.equal(typeof STRINGS[lang][k], 'string', `${lang} ${k}`);
+      assert.ok(STRINGS[lang][k].trim().length > 0, `${lang} ${k}`);
+    }
+  }
+  assert.match(t('panel.terminalFailed', 'en', { message: 'boom' }), /boom/);
+  assert.match(t('panel.terminalFailed', 'pt-BR', { message: 'boom' }), /boom/);
+});

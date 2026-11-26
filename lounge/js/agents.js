@@ -32,11 +32,16 @@ export function hasFreeSpot(agents, agent, state) {
   return !!list && list.some((_, i) => occupants(agents, agent, state, i) === 0);
 }
 
+export const STACK_DX = 9;
+
 // Takes the first free spot. When every spot is taken it shares the least crowded one
-// (ties go to the last) and sets agent.overflow so the caller can tell.
+// (ties go to the last) and sets agent.overflow so the caller can tell. An agent with `stacks`
+// set stands agent.tier * STACK_DX px to the right on a shared spot, at least STACK_DX px from
+// every other agent in that state, so a later-drawn neighbour never covers its whole hitbox.
 export function takeSpot(agents, agent, state) {
   const list = SPOTS[state];
   agent.overflow = false;
+  if (agent.stacks) agent.tier = 0;
   if (!list) return [agent.x, agent.y];
   const counts = list.map((_, i) => occupants(agents, agent, state, i));
   let best = counts.indexOf(0);
@@ -46,7 +51,16 @@ export function takeSpot(agents, agent, state) {
     agent.overflow = true;
   }
   agent.spot = best;
-  return list[best];
+  if (!agent.stacks) return list[best];
+  const [x0, y0] = list[best];
+  // Measured against where the others stand or are heading (tx), not a count: a place freed by a
+  // leaver is reused, and a tier never lands on the next spot over.
+  const taken = agent.overflow ? agents.filter(b => b !== agent && b.state === state).map(b => b.tx ?? b.x) : [];
+  let k = 0;
+  while (taken.some(x => Math.abs(x0 + STACK_DX * k - x) < STACK_DX)) k++;
+  agent.tier = k;
+  agent.tx = x0 + STACK_DX * k;
+  return [agent.tx, y0];
 }
 
 // A blocked agent goes back to the table, or waits at the bar when every seat is taken.
@@ -189,13 +203,14 @@ export function npcPose(n, t, ringUntil = 0, beat = null) {
   return { pose, bob, flip };
 }
 
-export function addAgent(agents, { id, state, look, info, label }, rng = Math.random) {
+export function addAgent(agents, { id, state, look, info, label, stacks }, rng = Math.random) {
   const uid = agents.reduce((m, b) => Math.max(m, b.uid), -1) + 1;
   const a = {
     uid, id, label: label || id, state,
     look: structuredClone(look), info: structuredClone(info || {}),
     x: 0, y: 0, path: [], spot: -1, off: rng() * 10, habit: assignHabit(rng), walking: false, dir: 1, after: null,
   };
+  if (stacks) a.stacks = true;
   const [x, y] = takeSpot(agents, a, state);
   a.x = x; a.y = y;
   agents.push(a);

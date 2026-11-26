@@ -20,13 +20,13 @@
 </p>
 
 > [!NOTE]
-> **maître is early.** What runs today is **M0: the lounge in demo mode**, with simulated agents. The orchestrator described below (reception, rooms, routing, janitor) is the design being built next. Sections below mark what is planned, and the [Roadmap](#roadmap) tracks it.
+> **maître is early.** What runs today is **M1: the lounge watching real Claude Code rooms** that you open by hand with `maitre room run`, plus the demo mode with simulated agents. The orchestrator described below (reception, rooms in their own worktrees, routing, janitor) is the design being built next. Sections below mark what is planned, and the [Roadmap](#roadmap) tracks it.
 
 ## What is it
 
 <img alt="The maître mascot: grey slicked hair, moustache, red bow tie and tuxedo" src="lounge/favicon.svg" width="96" align="right" />
 
-This is what maître is being built to do. Today you can try the lounge; the rest arrives milestone by milestone.
+This is what maître is being built to do. Today you can watch your own Claude Code sessions in the lounge; the rest arrives milestone by milestone.
 
 Running one coding agent is easy. Running five is a juggling act: which tab had the failing test, which conversation was about the login bug, which worktree is safe to delete.
 
@@ -40,15 +40,15 @@ maître runs the room for you, like the maître d' of a busy lounge.
 
 ## Features
 
-What you can run today is marked **today**; **today (demo)** means it runs in the demo lounge, driven by simulated agents. Everything else is the design, tagged with the milestone that brings it.
+What you can run today is marked **today**: it works with real rooms as well as in the demo. Everything else is the design, tagged with the milestone that brings it.
 
 | | Feature | When |
 |---|---|---|
-| <img src="docs/assets/sprites/cards.png" width="48" alt="A working agent at the card table" /> | **Card table.** A working agent plays cards, one card per tool it uses. | **today (demo)** |
-| <img src="docs/assets/sprites/slots.png" width="48" alt="A subagent at the slot machines" /> | **Slot machines.** A subagent reading files pulls the lever. The lever is yours to pull too, jackpot included. | **today (demo)** |
+| <img src="docs/assets/sprites/cards.png" width="48" alt="A working agent at the card table" /> | **Card table.** A working agent plays cards while it uses its tools. | **today** |
+| <img src="docs/assets/sprites/slots.png" width="48" alt="A subagent at the slot machines" /> | **Slot machines.** A subagent pulls the lever while it works. The lever is yours to pull too, jackpot included. | **today** |
 | <img src="docs/assets/sprites/musician.png" width="48" alt="The musician with his saxophone" /> | **The musician.** Click him for live, generative **jazz** (walking bass, swung ride, ii-V-I, a synth sax) or **house** (four-on-the-floor, off-beat hats, chord stabs). Made with WebAudio, no recordings. | **today** |
-| <img src="docs/assets/sprites/bell.png" width="48" alt="An agent with a red exclamation mark, calling you" /> | **The bell.** An agent that needs you goes to the reception desk with a red "!" and a sound. Click it to see the reason and the options, with the recommended one marked. | **today (demo)**, answers are simulated |
-| <img src="docs/assets/sprites/ready.png" width="48" alt="An agent with a drink and a green check" /> | **Ready, quietly.** An agent that finished its turn without asking anything waits at the bar with a green check. No sound. | **today (demo)** |
+| <img src="docs/assets/sprites/bell.png" width="48" alt="An agent with a red exclamation mark, calling you" /> | **The bell.** An agent that needs you goes to the reception desk with a red "!" and a sound. Click it to see the reason and the options (in the demo, with the recommended one marked). | **today**; you answer in the room's terminal (from the lounge in M5) |
+| <img src="docs/assets/sprites/ready.png" width="48" alt="An agent with a drink and a green check" /> | **Ready, quietly.** An agent that finished its turn without asking anything waits at the bar with a green check. No sound. | **today** |
 | <img src="docs/assets/sprites/reception.png" width="48" alt="The maître at the reception desk" /> | **Reception and rooms.** One request box, one room per topic, automatic names, and the project found from an index of your repos. | M2 |
 | <img src="docs/assets/sprites/routing.png" width="48" alt="Fable, the house advisor, with a cigar" /> | **Model routing** by task type, applied by code, with outcomes that feed back into the router. | M2, learning in M5 |
 | <img src="docs/assets/sprites/doorman.png" width="48" alt="The doorman in sunglasses" /> | **Doorman.** At most 6 active rooms at once (configurable); the rest queue on the sidewalk. | M3 |
@@ -63,7 +63,8 @@ What you can run today is marked **today**; **today (demo)** means it runs in th
 - **Node.js 20 or newer.**
 - **Linux.** macOS is planned, and nothing in the design blocks it.
 - **Chrome or Chromium** (optional): the lounge opens as an app window with `--app`. Without it, maître falls back to your default browser.
-- **For the orchestrator (roadmap, M2):** [herdr](https://herdr.dev) and [Claude Code](https://docs.anthropic.com/en/docs/claude-code), plus the GitHub CLI (`gh`), authenticated.
+- **For real rooms:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code), with `claude` on your `PATH`.
+- **For the orchestrator (roadmap, M2):** [herdr](https://herdr.dev), plus the GitHub CLI (`gh`), authenticated.
 
 ### Run the demo lounge (works today)
 
@@ -79,6 +80,8 @@ maître starts a small server on `127.0.0.1`, prints the lounge URL with its acc
 
 ```text
 maitre lounge [--demo] [--port <n>] [--no-open] [--lang en|pt-BR]
+maitre room run <name> [-- <claude args>]
+maitre status <working|waiting|blocked> "<text>" [--option <o>]...
 
   --demo        Run the lounge with simulated agents
   --port <n>    Preferred port (default 8737; falls back to the next free one)
@@ -91,6 +94,32 @@ Want `maitre` on your `PATH`? Run `npm link` once from the clone.
 `npm install` reports dev-only advisories in `extract-zip`, which `puppeteer-core` uses only to download a browser; the asset script uses your system Chrome instead, so that path never runs. Do not run `npm audit fix --force`: it downgrades `puppeteer-core` and breaks `npm run assets`.
 
 In the demo, the **demo** menu in the corner lets you block an agent, merge a PR and send a new room to the queue. Click any agent for its panel, pull a slot lever, and click the musician for music. Sound starts after your first click, as browsers require.
+
+### Watch a real room (works today)
+
+Run the lounge without `--demo` in one terminal, and open a room in another, from the folder you want Claude Code to work in:
+
+```sh
+maitre lounge                                         # terminal 1: the lounge, live
+maitre room run fix-login -- --permission-mode auto   # terminal 2: Claude Code, as a room
+```
+
+Both commands use `maitre` from your `PATH` (`npm link`, above), because the room runs in your project's folder, not in the clone.
+
+`maitre room run <name>` starts your own `claude` with maître's hooks for that session only (passed with `--settings`; your global Claude Code settings are not touched) and a short note in the system prompt. Anything after `--` goes to `claude`, except `--settings` and the `--append-system-prompt` flags, which maître sets itself. The room walks in with a coffee, plays cards while it works, sends its subagents to the slot machines, rings the bell when a permission or a question waits for you, and waits at the bar when its turn ends. It switches to whisky when it opens a PR and walks out when you leave Claude Code. You answer in the room's terminal; answering from the lounge comes in M5. Open as many rooms as you like, each with its own name: two rooms open at the same time must not share one, and names that differ only in case or punctuation (`Fix Login`, `fix-login`) count as the same.
+
+Inside a room, the agent can say what it is doing with `maitre status`, which maître puts on the room's `PATH`. The system prompt asks it to run `maitre status waiting "<what>"` when it waits on something outside its control (CI, a build, a review bot), which sends it to the terrace, and `maitre status working "<what>"` when it resumes. `maitre status blocked "<question>" --option <a> --option <b>` rings the bell with that question and its options. The command only works inside a room: it reads the room name from `MAITRE_ROOM`, which `maitre room run` sets.
+
+Rooms write their events to `~/.maitre/state/rooms/<room>/events.jsonl`, and the lounge reads them from there. Set `MAITRE_HOME` to use another folder; the lounge and the rooms must use the same one. To see a room without starting Claude Code, replay the recorded hook events into a running lounge. Always set `MAITRE_HOME` for both commands (the replay script refuses to run without it), so the replayed room never lands in your real `~/.maitre`:
+
+```sh
+MAITRE_HOME=/tmp/maitre-try node bin/maitre lounge     # terminal 1
+MAITRE_HOME=/tmp/maitre-try node scripts/replay-events.mjs test/fixtures/hook-events.jsonl --room replay --delay 800   # terminal 2
+```
+
+A room's `events.jsonl` holds what its hooks saw: the start of each prompt, tool inputs (shell commands, file paths, snippets of edited files), questions and their answers, and the last assistant message. It stays on your machine, readable only by you (mode 0600); the lounge serves only the room state it derives from it, on 127.0.0.1 and behind its token. To clean up, delete a room's folder (`$MAITRE_HOME/state/rooms/<room>`, where `MAITRE_HOME` is `~/.maitre` unless you set it) or the whole `$MAITRE_HOME/state`.
+
+A room leaves the lounge when Claude Code ends, even after a crash, because `maitre room run` reports the exit. If `maitre room run` dies too (a reboot, an out-of-memory kill, `kill -9` on its process group), nothing reports it and the room stays in the lounge: delete `$MAITRE_HOME/state/rooms/<room>` and restart the lounge, or run a room with the same name again.
 
 ### The full orchestrator (coming in M2)
 
@@ -105,7 +134,7 @@ maitre                # opens herdr, the reception and the lounge
 
 ## How it works
 
-This is the target design (M1 to M5; the dashed answer path is M5). Today only the **Lounge** box exists, fed by the demo simulator instead of the daemon.
+This is the target design (M1 to M5; the dashed answer path is M5). Today (M1) the hooks and the lounge exist, and the daemon is the part of `maitre lounge` that reads the rooms' events and streams them over SSE. You open rooms by hand with `maitre room run`: there is no herdr session, worktree, reception, router or janitor yet.
 
 ```mermaid
 flowchart LR
@@ -140,7 +169,7 @@ The full design, including the open spikes, is in [docs/design.md](docs/design.m
 
 The lounge is the point. It is pixel art drawn entirely by code: no sprite sheets, no third-party assets. It uses the [Pixelify Sans](https://fonts.google.com/specimen/Pixelify+Sans) and [Silkscreen](https://fonts.google.com/specimen/Silkscreen) fonts, both under the SIL Open Font License.
 
-**Today (M0)** there is one floor in the house style, a lacquered Chinese hall under red lanterns:
+**Today** there is one floor in the house style, a lacquered Chinese hall under red lanterns:
 
 - a **sidewalk queue** behind a velvet rope, watched by the doorman;
 - the **card table**, the **slot machines**, and the **bar**, with coffee for newcomers and whisky for deliveries;
@@ -164,7 +193,7 @@ The interface stays out of the way. The stage fills the window; a corner holds *
 
 ## States
 
-**The place tells the state.** You never read a status line: you look at where the agent is. Today the demo plays every state with simulated agents; from M1 on, real rooms drive them.
+**The place tells the state.** You never read a status line: you look at where the agent is. The demo plays every state with simulated agents. Real rooms drive the coffee, the cards, the slots, the terrace, the bell, the bar, the whisky and the exit; the other places arrive with the orchestrator.
 
 <p align="center">
   <img alt="The lounge states, one character each: queued, coffee, cards, slots, smoking, visiting Fable, the house advisor, the bell, ready, whisky, dancing and napping" src="docs/assets/states.png" width="100%" />
@@ -175,12 +204,12 @@ The interface stays out of the way. The stage fills the window; a corner holds *
 | Queued, waiting for a seat | Sidewalk | Waits behind the rope for the doorman | |
 | New room, planning | Bar | Drinks coffee | |
 | Working | Card table | Plays cards, one per tool used | |
-| Subagent reading files | Slot machines | Pulls the lever on every read | |
+| Subagent at work | Slot machines | Pulls the lever | |
 | Waiting on something outside | Terrace | Smokes while CI, a build or a bot runs | |
 | Consulting Fable | Moon gate | Talks to the house advisor | |
 | House advisor | Moon gate | Fable himself, with a cigar | |
 | **Needs you** | Reception desk | Rings the bell, with a red "!" overhead | **bell** |
-| Ready for you to look | Bar counter | A colorful drink and a green check (from M1, clicking shows the room's last message) | none, on purpose |
+| Ready for you to look | Bar counter | A colorful drink and a green check (clicking shows the room's task and last steps) | none, on purpose |
 | Delivered, waiting for merge | Bar | Whisky | |
 | Merged! Celebrating | Dance floor | Dances under fireworks, then leaves | fanfare |
 | Parked with a pending item | Couch | Naps until the loose end is resolved | |
@@ -188,11 +217,11 @@ The interface stays out of the way. The stage fills the window; a corner holds *
 
 Outside the terrace, smoke is only atmosphere: each agent has a random smoking habit and lights up now and then in the queue, at the table or on the couch. It never changes the state. On the terrace, everyone smokes.
 
-The bell rings only for a real block: a pending permission, a question with options, or a room that declares itself blocked. Rooms run with Claude Code's `--permission-mode auto`, so routine actions go through and only risky ones ring the bell.
+The bell rings only for a real block: a pending permission, a question with options, or a room that declares itself blocked. Start rooms with Claude Code's `--permission-mode auto` (after `--`), so routine actions go through and only risky ones and questions ring the bell.
 
 ## Configuration
 
-**Today** the only settings are the CLI flags in [Quick start](#quick-start).
+**Today** the settings are the CLI flags in [Quick start](#quick-start) and `MAITRE_HOME` (default `~/.maitre`), the folder where rooms write their events and the lounge reads them.
 
 **Planned.** Everything below is the design for M2 to M4. Defaults will live in `config/`, tracked in git; anything personal (`state/`, `memory/`, `config/*.local.*`) stays out of git.
 
@@ -234,11 +263,11 @@ Every firstmate cell below comes from firstmate's (or, for the dashboard, shipma
 | Cleaning up | Teardown after a task ships or reports, refusing dirty worktrees and unlanded work ([architecture][fm-teardown]) | The same never-lose-work rule, plus a janitor that closes rooms idle for 4 h with nothing pending and writes minutes (*planned, M3*) |
 | Choosing a model | A static crew harness or dispatch profiles, with an optional typed resolver ([architecture][fm-dispatch]) | A routing table applied by code, with each room's outcome (model, tokens, time, redo, merged or not) fed back to the router (*planned, M2 and M5*) |
 | Always-loaded instructions | `AGENTS.md`, imported by `CLAUDE.md` ([CLAUDE.md][fm-claude]): about 7,350 words at the checked commit | A reception contract capped at 1,500 words (*planned, M2*) |
-| Watching the agents | The session backend's panes; shipmate, a separate project, adds a dashboard refreshed every 30 seconds where you can also answer decisions and queue tasks ([shipmate][sm]) | A built-in lounge updated live over SSE (*planned, M1*; a demo today) |
+| Watching the agents | The session backend's panes; shipmate, a separate project, adds a dashboard refreshed every 30 seconds where you can also answer decisions and queue tasks ([shipmate][sm]) | A built-in lounge updated live over SSE (M1) |
 | Harnesses | Claude Code, Grok, Pi, Codex, OpenCode, Cursor and more ([README][fm-req]) | Claude Code only |
 | Session backends | tmux by default, herdr, and experimental ones such as Zellij, cmux and Orca ([README][fm-crew], [backends][fm-backends]) | herdr only (*planned*) |
 | Platforms | macOS and Linux ([README][fm-top]) | Linux; macOS later |
-| Maturity | Shipping today, with a large [test suite][fm-tests] | Early: the demo lounge (M0) |
+| Maturity | Shipping today, with a large [test suite][fm-tests] | Early: the lounge watching rooms opened by hand (M1) |
 
 If you need many harnesses, many backends, macOS, or a mature tool today, use firstmate. If you live in Claude Code and herdr and want each topic in its own room with a lounge to watch, maître is being built for you.
 
@@ -256,7 +285,7 @@ If you need many harnesses, many backends, macOS, or a mature tool today, use fi
 ## FAQ
 
 **Does it work today?**
-The lounge does, in demo mode, with simulated agents. The orchestrator (reception, rooms, routing, janitor) is the roadmap, starting with M1.
+The lounge does: it shows the Claude Code sessions you open with `maitre room run`, live, and it has a demo mode with simulated agents. The orchestrator (reception, automatic rooms, routing, janitor) is the roadmap, starting with M2.
 
 **Why herdr and not tmux?**
 herdr gives each room a real tab you can walk into, plus the `agent prompt`, `send-keys` and `read` commands that should let the lounge answer a stuck room (spike 2 in the [design](docs/design.md) checks this). v1 targets one session manager to stay small.
@@ -279,7 +308,7 @@ The maître d' greets you at the door, finds you the right table and keeps the r
 ## Roadmap
 
 - [x] **M0 · The lounge:** repo, CLI with a token-gated local server, the pixel lounge in demo mode, music, agent panel, slot machines, English and Portuguese.
-- [ ] **M1 · Events:** the Claude Code hook, the daemon, and the lounge showing a real room over SSE.
+- [x] **M1 · Events:** the Claude Code hook, `maitre room run` and `maitre status`, the daemon, and the lounge showing real rooms over SSE.
 - [ ] **M2 · Rooms:** `./setup` and `maitre`; rooms in herdr with their own worktrees; the reception and the Haiku router; a clickable reception in the lounge; the app icon and the Super+M quick prompt.
 - [ ] **M3 · Doorman and janitor:** the queue and the 6-room cap, cleanup with minutes, and the markdown vault.
 - [ ] **M4 · The building:** the facade, themed floors, lobby, terrace and elevator.

@@ -10,10 +10,11 @@ export class DingScheduler {
   constructor(intervalSec = 22) {
     this.interval = intervalSec;
     this.last = -Infinity;
+    this.muted = false;
   }
 
   shouldRing(nowSec, blockedCount) {
-    if (blockedCount <= 0) return false;
+    if (this.muted || blockedCount <= 0) return false;
     if (nowSec - this.last < this.interval) return false;
     this.last = nowSec;
     return true;

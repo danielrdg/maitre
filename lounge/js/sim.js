@@ -7,8 +7,8 @@ import { DingScheduler } from './timing.js';
 import { BLOCKS, NEW_ROOM_NAMES, NEW_ROOM_INFO, STEPS, createNpcs } from './demo.js';
 
 export const STEP = 1 / 30;
-const HAIR_STYLES = ['short', 'bob', 'long', 'spiky', 'bun'];
-const OUTFITS = ['shirt', 'jacket', 'dress'];
+export const HAIR_STYLES = ['short', 'bob', 'long', 'spiky', 'bun'];
+export const OUTFITS = ['shirt', 'jacket', 'dress'];
 
 const QUIET = { ding() {}, noise() {}, thunk() {}, tick() {}, jackpot() {}, lose() {}, fanfare() {} };
 

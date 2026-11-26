@@ -2,14 +2,15 @@ import { t, normalizeLang } from './i18n.js';
 import { clampDt } from './timing.js';
 import { W, H, drawStatic } from './scene-static.js';
 import { renderFrame, portrait } from './scene.js';
-import { moveTo, stateAfterAnswer } from './agents.js';
+import { moveTo, stateAfterAnswer, STACK_DX } from './agents.js';
 import { startSpin, isSpinning } from './slots.js';
 import { createSfx } from './sfx.js';
-import { panelModel, renderPanel, musicMenuModel, renderMusicMenu } from './panel.js';
+import { panelModel, renderPanel, musicMenuModel, renderMusicMenu, appendMarked } from './panel.js';
 import { MusicController } from './music.js';
 import { hudModel, renderHud, renderHelp } from './hud.js';
 import { STEPS } from './demo.js';
 import { STEP, makeRngs, createWorld, stepWorld, ringNow, demoActions } from './sim.js';
+import { createLiveCast, createBell, titleFor, LiveSource } from './live.js';
 
 // ?capture=1 is for README art: no overlays, no sound, and a clock that counts
 // simulation steps instead of wall time. A script that sets window.__maitreManualClock
@@ -20,6 +21,7 @@ export function boot(doc = document) {
   const lang = normalizeLang(params.get('lang') || 'en');
   const demo = params.get('demo') === '1';
   const capture = params.get('capture') === '1';
+  const live = !demo && !capture;
   const manualClock = capture && win.__maitreManualClock === true;
   const { rng, fxRng } = makeRngs(params.get('seed'));
   const tr = (key, vars) => t(key, lang, vars);
@@ -70,7 +72,7 @@ export function boot(doc = document) {
       el.className = 'tag' + (alert ? ' alert' : a.state === 'boss' ? ' gold' : '');
       el.textContent = alert ? tr('tag.needsYou', { name: a.label }) : a.label;
       const stag = (a.state === 'work' && (a.spot % 2 || a.spot === 4)) || (a.state === 'smoke' && a.spot === 1) || (a.state === 'coffee' && a.spot === 1) || (a.state === 'dance' && a.spot === 1) || (a.state === 'ready' && !a.walking) ? 9 : 0;
-      el.style.left = pct(a.x, W); el.style.top = pct(a.y - 33 - stag, H);
+      el.style.left = pct(a.x, W); el.style.top = pct(a.y - 33 - stag - STACK_DX * (a.tier || 0), H);
     }
     queueTag.textContent = tr(q === 1 ? 'queue.one' : 'queue.many', { n: q });
     queueTag.style.left = pct(40, W); queueTag.style.top = pct(262, H);
@@ -212,6 +214,30 @@ export function boot(doc = document) {
   }
   musicMenu.addEventListener('click', e => { e.stopPropagation(); arm(); });
 
+  // ---------- live rooms ----------
+  function startLive() {
+    const cast = createLiveCast(world);
+    // Shares world.ding with the render loop, so a visible tab never rings twice.
+    const bell = createBell({ ding: world.ding, ring: () => { world.ringUntil = nowSec() + 1; sfx.ding(); } });
+    win.setInterval(() => bell.tick(nowSec()), 1000);
+    const empty = doc.createElement('div'); empty.className = 'empty'; empty.style.display = 'none';
+    appendMarked(doc, empty, tr('live.empty'));
+    stage.appendChild(empty);
+    const offline = doc.createElement('div'); offline.className = 'notice'; offline.style.display = 'none';
+    offline.textContent = tr('live.disconnected');
+    stage.appendChild(offline);
+    const refresh = touched => {
+      empty.style.display = cast.ids().length || bell.disconnected ? 'none' : '';
+      offline.style.display = bell.disconnected ? '' : 'none';
+      doc.title = titleFor(bell.count, lang, { disconnected: bell.disconnected });
+      if (panelFor && touched.includes(panelFor)) openPanel(panelFor);
+    };
+    new LiveSource('api/events',
+      rooms => { bell.snapshot(rooms, nowSec()); refresh(cast.snapshot(rooms)); },
+      room => { bell.room(room, nowSec()); refresh(cast.room(room)); },
+      { onClosed: () => { bell.disconnect(); refresh([]); } }).start();
+  }
+
   // ---------- corner controls ----------
   const hud = renderHud($('hud'), hudModel({ demo }), lang);
   const helpEl = $('help');
@@ -252,6 +278,7 @@ export function boot(doc = document) {
     };
     if (manualClock) captureTick(); else win.requestAnimationFrame(captureLoop);
   } else win.requestAnimationFrame(loop);
+  if (live) startLive();
   if (!demo) return;
 
   hud.actions.block.addEventListener('click', () => { arm(); actions.block(nowSec()); });

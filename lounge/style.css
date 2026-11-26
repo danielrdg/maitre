@@ -45,6 +45,11 @@ body { margin: 0; overflow: hidden; display: grid; place-items: center; backgrou
                  70% { opacity: 1; } 100% { transform: translate(-50%, -110%) scale(1); opacity: 0; } }
 .hint { position: absolute; left: 50%; bottom: calc(8 * var(--px)); transform: translateX(-50%); font: 600 max(10px, calc(12 * var(--px)))/1 var(--font-pixel);
         color: #f7e7c6; background: rgba(20,11,8,.85); border: 2px solid var(--gold); padding: calc(5 * var(--px)) calc(9 * var(--px)); pointer-events: none; }
+.empty { position: absolute; left: 50%; top: 46%; transform: translate(-50%, -50%); font: 600 max(10px, calc(14 * var(--px)))/1.2 var(--font-pixel);
+         color: #f7e7c6; background: rgba(20,11,8,.85); border: 2px solid var(--gold); padding: calc(6 * var(--px)) calc(10 * var(--px)); pointer-events: none; white-space: nowrap; }
+.empty b { color: #ffd45c; }
+.notice { position: absolute; left: 50%; top: 4%; transform: translateX(-50%); font: 600 max(10px, calc(14 * var(--px)))/1.2 var(--font-pixel);
+          color: #ffd7cf; background: rgba(74,15,12,.92); border: 2px solid #ff5a4a; padding: calc(6 * var(--px)) calc(10 * var(--px)); pointer-events: none; white-space: nowrap; }
 
 /* Pixel panels: agent details, music menu, help overlay. */
 .panel { position: absolute; z-index: 2; right: 1.5%; top: 3%; width: calc(430 * var(--px)); max-height: 92%; overflow: auto; display: none;
@@ -71,6 +76,12 @@ body { margin: 0; overflow: hidden; display: grid; place-items: center; backgrou
 .panel .other { display: flex; gap: calc(6 * var(--px)); margin-top: calc(8 * var(--px)); }
 .panel .other input { flex: 1; min-width: 0; font: 400 max(11px, calc(14 * var(--px))) var(--font-pixel); background: var(--ink); color: #f7e7c6;
                       border: 2px solid #6b3a22; padding: calc(5 * var(--px)) calc(7 * var(--px)); }
+.panel .stuck .cmd { margin-top: calc(6 * var(--px)); padding: calc(5 * var(--px)) calc(7 * var(--px)); background: var(--ink); font-family: monospace; overflow-wrap: anywhere; }
+.panel .stuck .q { margin-top: calc(8 * var(--px)); font-weight: 700; }
+.panel .stuck .ro { margin-top: calc(4 * var(--px)); padding: calc(5 * var(--px)) calc(9 * var(--px)); border: 2px solid #7a1c16; }
+.panel .stuck .ro .k { display: inline-block; width: 1.4em; font-weight: 700; color: #ffd45c; }
+.panel .stuck .ro small { display: block; opacity: .75; margin: 2px 0 0 1.4em; font-size: max(10px, calc(12 * var(--px))); line-height: 1.2; }
+.panel .stuck .note { margin-top: calc(8 * var(--px)); color: #ffd45c; font-size: max(10px, calc(12 * var(--px))); }
 .panel .done { margin-top: calc(10 * var(--px)); padding: calc(8 * var(--px)) calc(10 * var(--px)); border: 2px solid #5fd39a; color: #c9f5dc; background: #10301f; }
 
 .panel.music { right: auto; top: auto; left: 20%; bottom: 30%; width: calc(340 * var(--px)); }

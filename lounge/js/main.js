@@ -11,6 +11,7 @@ import { hudModel, renderHud, renderHelp } from './hud.js';
 import { STEPS } from './demo.js';
 import { STEP, makeRngs, createWorld, stepWorld, ringNow, demoActions } from './sim.js';
 import { createLiveCast, createBell, titleFor, LiveSource } from './live.js';
+import { receptionSession, openTerminal, loungePlacement } from './reception.js';
 
 // ?capture=1 is for README art: no overlays, no sound, and a clock that counts
 // simulation steps instead of wall time. A script that sets window.__maitreManualClock
@@ -32,6 +33,12 @@ export function boot(doc = document) {
 
   doc.documentElement.lang = lang;
   doc.title = tr('page.title');
+  if (!capture) {
+    try {
+      const place = loungePlacement(win, win.screen);
+      if (place) { win.resizeTo(place.w, place.h); win.moveTo(place.x, place.y); }
+    } catch { /* an unplaced window still works */ }
+  }
   for (const el of doc.querySelectorAll('[data-i18n]')) el.textContent = tr(el.dataset.i18n);
 
   const $ = id => doc.getElementById(id);
@@ -80,12 +87,14 @@ export function boot(doc = document) {
   }
 
   // In capture mode the pop animation is scrubbed to simulation time instead of playing.
+  // A held popup is a balloon that stays until the returned function removes it.
   const pops = new Set();
-  function popup(x, y, text, small) {
-    const el = doc.createElement('div'); el.className = 'pop' + (small ? ' small' : ''); el.textContent = text;
+  function popup(x, y, text, small, hold = false) {
+    const el = doc.createElement('div'); el.className = 'pop' + (small ? ' small' : '') + (hold ? ' say' : ''); el.textContent = text;
     el.style.left = pct(x, W); el.style.top = pct(y, H);
-    if (capture) { el.style.animationPlayState = 'paused'; el.dataset.born = String(simTime); pops.add(el); }
     stage.appendChild(el);
+    if (hold) return () => el.remove();
+    if (capture) { el.style.animationPlayState = 'paused'; el.dataset.born = String(simTime); pops.add(el); }
     later(() => { el.remove(); pops.delete(el); }, 1.9);
   }
   const scrubPops = () => { for (const el of pops) el.style.animationDelay = `${-(simTime - Number(el.dataset.born))}s`; };
@@ -143,6 +152,49 @@ export function boot(doc = document) {
     win.requestAnimationFrame(captureLoop);
   }
 
+  // ---------- reception: in a live lounge the maître takes requests ----------
+  function receptionBox(npc) {
+    const box = doc.createElement('div'); box.className = 'ask'; box.style.display = 'none';
+    box.style.left = pct(npc.x, W); box.style.top = pct(npc.y - 38, H);
+    const input = doc.createElement('input');
+    input.type = 'text'; input.autocomplete = 'off'; input.spellcheck = false;
+    input.placeholder = tr('reception.placeholder');
+    input.setAttribute('aria-label', tr('npc.maitre'));
+    box.append(input);
+    stage.appendChild(box);
+    const session = receptionSession({ lang });
+    let balloon = null, closeTimer = null;
+    const say = text => { balloon?.(); balloon = popup(npc.x, npc.y - 64, text, true, true); };
+    const stopTimer = () => { win.clearTimeout(closeTimer); closeTimer = null; };
+    const open = () => { stopTimer(); box.style.display = ''; input.focus(); };
+    // A request in flight keeps its question id: the reply reopens the box.
+    const close = () => {
+      stopTimer(); box.style.display = 'none'; balloon?.(); balloon = null;
+      if (!session.busy) session.reset();
+    };
+    input.addEventListener('keydown', async e => {
+      stopTimer();
+      if (e.key === 'Escape') { close(); return; }
+      if (e.key !== 'Enter' || e.isComposing) return;
+      e.preventDefault();
+      if (session.busy || !input.value.trim()) return;
+      input.disabled = true;
+      sfx.send();
+      say(tr('reception.thinking'));
+      const done = await session.submit(input.value);
+      input.disabled = false;
+      if (!done) return;
+      if (done.kind !== 'error') input.value = '';
+      box.style.display = '';
+      say(done.view.balloon);
+      if (done.view.closeAfterMs) closeTimer = win.setTimeout(close, done.view.closeAfterMs);
+      else input.focus();
+    });
+    return { open, close };
+  }
+  const desk = world.npcs.find(n => n.kind === 'maitre');
+  const reception = live && desk ? receptionBox(desk) : null;
+
   // ---------- interaction ----------
   const toCanvas = e => { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H]; };
   function hitAt(x, y) {
@@ -181,17 +233,30 @@ export function boot(doc = document) {
     if (h.kind === 'lever') { if (!isSpinning(h.ref)) { startSpin(h.ref, nowSec(), true, rng); sfx.thunk(); } return; }
     sfx.pop();
     if (h.kind === 'npc' && h.ref.kind === 'sax') { openMusic(); return; }
+    if (h.kind === 'npc' && h.ref.kind === 'maitre' && reception) { reception.open(); return; }
     if (h.kind === 'npc') { popup(h.ref.x, h.ref.y - 40, tr(`quip.${h.ref.kind}`), true); return; }
     openPanel(h.ref);
   });
   stage.addEventListener('click', arm);
 
   let panelFor = null;
-  function closePanel() { panel.style.display = 'none'; panelFor = null; }
+  // Kept here, not in the panel DOM: a room event re-renders the panel and re-enables its button.
+  let termError = null, termBusy = false;
+  function closePanel() { panel.style.display = 'none'; panelFor = null; termError = null; }
+  async function terminalFor(a) {
+    if (termBusy) return termError?.agent === a ? termError.message : null;
+    termBusy = true;
+    let r;
+    try { r = await openTerminal(a.id, undefined, lang); } finally { termBusy = false; }
+    termError = r.ok ? null : { agent: a, message: r.message };
+    if (termError && panelFor === a) openPanel(a);
+    return r.ok ? null : r.message;
+  }
   function openPanel(a) {
     panelFor = a;
     renderPanel(panel, panelModel(a, lang), ({ text }) => answer(a, text), {
       lang, portrait: portrait(a, makeCanvas), onClose: closePanel,
+      ...(live ? { onTerminal: () => terminalFor(a), terminalError: termError?.agent === a ? termError.message : null } : {}),
     });
     panel.style.display = 'block';
   }
@@ -258,7 +323,7 @@ export function boot(doc = document) {
     if (hud.demo && !hud.demo.parentNode.contains(e.target)) setDemoMenu(false);
     if (!helpEl.contains(e.target) && !hud.help.contains(e.target)) closeHelp();
   });
-  doc.addEventListener('keydown', e => { if (e.key === 'Escape') { setDemoMenu(false); closeHelp(); closeMusic(); } });
+  doc.addEventListener('keydown', e => { if (e.key === 'Escape') { setDemoMenu(false); closeHelp(); closeMusic(); reception?.close(); } });
 
   const bSound = hud.sound;
   const soundLabel = () => { bSound.textContent = tr(sfx.on ? 'btn.sound.on' : 'btn.sound.off'); bSound.classList.toggle('off', !sfx.on); };

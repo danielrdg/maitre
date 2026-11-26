@@ -117,6 +117,9 @@ function call(
 ): Promise<{ status: number; headers: IncomingMessage['headers']; body: string }> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = opts.key === false ? {} : { cookie: `maitre_key_${port}=${TOKEN}` };
+    if (opts.method !== undefined && opts.method !== 'GET' && opts.method !== 'HEAD') {
+      Object.assign(headers, { origin: `http://127.0.0.1:${port}`, 'x-maitre-request': '1' });
+    }
     const r = request({ host: '127.0.0.1', port, path, method: opts.method ?? 'GET', headers }, (res) => {
       let body = '';
       res.setEncoding('utf8');

@@ -97,6 +97,21 @@ body { margin: 0; overflow: hidden; display: grid; place-items: center; backgrou
 .panel.help .sw { display: inline-block; width: calc(12 * var(--px)); height: calc(12 * var(--px)); min-width: 8px; min-height: 8px; border: 2px solid var(--ink); outline: 1px solid #6b5a4a; }
 .panel.help .hintline { color: #ffd45c; font-size: max(10px, calc(12 * var(--px))); border-top: 2px solid #3a160f; padding-top: calc(8 * var(--px)); }
 
+/* Live reception: the maître's text box by the desk and his balloons. */
+.ask { position: absolute; z-index: 2; transform: translate(-50%, -100%); width: calc(300 * var(--px)); display: flex;
+       padding: calc(4 * var(--px)); background: #24100b; border: 3px solid var(--gold); outline: 3px solid var(--ink);
+       box-shadow: calc(6 * var(--px)) calc(6 * var(--px)) 0 rgba(0,0,0,.55); }
+.ask input { flex: 1; min-width: 0; font: 400 max(11px, calc(14 * var(--px))) var(--font-pixel); background: var(--ink); color: #f7e7c6;
+             border: 2px solid #6b3a22; padding: calc(5 * var(--px)) calc(7 * var(--px)); outline: none; user-select: text; }
+.ask input:focus { border-color: var(--gold); }
+.ask input:disabled { opacity: .6; }
+.pop.say { transform: translate(-50%, -100%); width: max-content; max-width: calc(380 * var(--px)); white-space: pre-line; text-align: center;
+           overflow-wrap: anywhere; font: 600 max(10px, calc(13 * var(--px)))/1.3 var(--font-pixel); color: var(--ink); text-shadow: none;
+           background: #f7e7c6; border: 2px solid var(--ink); padding: calc(5 * var(--px)) calc(8 * var(--px)); animation: say .2s ease-out forwards; }
+@keyframes say { 0% { transform: translate(-50%, -100%) scale(.6); opacity: 0; } 100% { transform: translate(-50%, -100%) scale(1); opacity: 1; } }
+.panel .term .opt { text-align: center; }
+.panel .termerr { margin-top: calc(6 * var(--px)); color: #ff9a8a; font-size: max(10px, calc(12 * var(--px))); overflow-wrap: anywhere; }
+
 /* Corner controls over the stage. */
 .hud { position: absolute; z-index: 3; left: 1.2%; top: 2.2%; display: flex; gap: calc(6 * var(--px)); align-items: flex-start; }
 .hud button, .panel .other button { font: 600 max(10px, calc(12 * var(--px)))/1 var(--font-pixel); cursor: pointer;
@@ -118,3 +133,14 @@ body { margin: 0; overflow: hidden; display: grid; place-items: center; backgrou
 /* ?capture=1: the bare scene, for README art. */
 .stage.capture .hint, .stage.capture .hud, .stage.capture .panel, .stage.capture .tip { display: none !important; }
 .stage.capture .tag { font-size: max(6px, calc(10 * var(--px))); }
+
+/* prompt.html: the quick-prompt window, about 560x180. No stage here, so sizes are plain px. */
+body.prompt { display: block; place-items: normal; overflow: hidden; background: #24100b; }
+.prompt-box { box-sizing: border-box; height: 100%; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px;
+              border: 3px solid var(--gold); outline: 3px solid var(--ink); outline-offset: -6px; }
+.prompt-box input { font: 400 18px var(--font-pixel); background: var(--ink); color: #f7e7c6; border: 2px solid var(--gold);
+                    padding: 8px 10px; outline: none; }
+.prompt-box input:disabled { opacity: .6; }
+.prompt-box .say { flex: 1; min-height: 0; overflow: auto; white-space: pre-line; overflow-wrap: anywhere; font: 400 15px/1.3 var(--font-pixel); color: #f7e7c6; }
+.prompt-box .say.thinking, .prompt-box .say.question { color: #ffd45c; }
+.prompt-box .say.error { color: #ff9a8a; }

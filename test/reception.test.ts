@@ -13,6 +13,7 @@ import { receptionSettings, writeReceptionSettings } from '../src/hook-settings.
 import { buildReceptionCommand, startMaitre } from '../src/reception.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
 import { trustScope } from '../src/trust.js';
+import { fakeBin } from './fake-bin.js';
 import { herdrSandbox, type HerdrSandbox } from './herdr-sandbox.js';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
@@ -22,6 +23,8 @@ const REQUEST = join(ROOT, 'hooks', 'reception-request.mjs');
 const PROMPT = readFileSync(join(ROOT, 'reception', 'PROMPT.md'), 'utf8');
 const FAST = { trustTimeoutMs: 120_000, pollMs: 10, loungeWaitMs: 120_000 };
 const KEY = 'ab'.repeat(32);
+const TICKET = 'cd'.repeat(32);
+const SERVICE_NOTE = 'lounge: run maitre open or use the maître icon';
 const MARKERS = ['CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_ENTRYPOINT'];
 
 interface Hook {
@@ -196,16 +199,31 @@ test('parseArgs: no arguments is the entrypoint, reception is the pane command',
 let sb: HerdrSandbox;
 let server: Server;
 let loungeUrl: string;
+let ticketUrl: string;
+let loungeInfo: { port: number; token: string; pid: number };
 
+// Stands in for the lounge a `lounge` tab starts: the fake herdr claims lounge.json with loungeInfo.
 beforeEach(async () => {
   sb = herdrSandbox();
   server = createServer((req, res) => {
-    res.writeHead(req.url === `/?key=${KEY}` ? 200 : 403);
-    res.end();
+    if (req.url === '/api/ping') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ app: 'maitre', pid: process.pid }));
+    } else if (req.url === '/api/ticket' && req.method === 'POST' && req.headers['x-maitre-token'] === KEY) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ticket: TICKET }));
+    } else {
+      res.writeHead(403);
+      res.end();
+    }
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
-  loungeUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/?key=${KEY}`;
+  const port = (server.address() as AddressInfo).port;
+  loungeUrl = `http://127.0.0.1:${port}/?key=${KEY}`;
+  ticketUrl = `http://127.0.0.1:${port}/?ticket=${TICKET}`;
+  loungeInfo = { port, token: KEY, pid: process.pid };
   process.env.FAKE_HERDR_LOUNGE_URL = loungeUrl;
+  process.env.FAKE_HERDR_LOUNGE_INFO = JSON.stringify(loungeInfo);
 });
 
 afterEach(async () => {
@@ -222,7 +240,8 @@ test('maitre: creates the reception and the lounge once, quoted tokens only, and
   const r = await startMaitre(process.env, { ...FAST, open: (u) => opened.push(u) });
   assert.deepEqual(r.created, ['reception', 'lounge']);
   assert.equal(r.url, loungeUrl);
-  assert.deepEqual(opened, [loungeUrl]);
+  assert.deepEqual(opened, [ticketUrl]);
+  assert.deepEqual(r.notes, []);
   assert.deepEqual(labels(), ['lounge', 'reception']);
 
   const dir = join(sb.home, 'reception');
@@ -244,7 +263,8 @@ test('maitre: creates the reception and the lounge once, quoted tokens only, and
   assert.deepEqual(labels(), ['lounge', 'reception']);
   const later = sb.calls().slice(before);
   for (const c of later) assert.ok(!['create', 'close', 'run', 'send-keys'].includes(c[1]!), JSON.stringify(c));
-  assert.deepEqual(opened, [loungeUrl], 'a running lounge is not opened again');
+  assert.deepEqual(opened, [ticketUrl], 'a running lounge is not opened again');
+  assert.deepEqual(again.notes, []);
 });
 
 test('maitre: the test-only model override reaches the reception pane', async () => {
@@ -261,6 +281,8 @@ test('maitre: a restored bare-shell reception and a dead lounge are closed and r
   st.panes = { 'w7:p1': { ws: 'w7', agent: 'shell' }, 'w8:p1': { ws: 'w8', agent: 'shell' }, 'w9:p1': { ws: 'w9', agent: 'idle' } };
   st.next = 10;
   sb.setState(st);
+  // The lounge died with herdr's restart and released lounge.json.
+  writeFileSync(join(sb.home, 'lounge.json'), JSON.stringify({ ...loungeInfo, pid: 0 }));
   const r = await startMaitre(process.env, { ...FAST, open: () => {} });
   assert.deepEqual(r.created, ['reception', 'lounge']);
   assert.deepEqual(Object.keys(sb.state().workspaces).sort(), ['w10', 'w11', 'w9']);
@@ -333,8 +355,10 @@ test('maitre: a live reception tab is kept even when tabs.json is missing or sta
 
   writeFileSync(join(sb.home, 'reception', 'tabs.json'), JSON.stringify({ session: 'maitre-test', reception: { workspaceId: 'w1', paneId: 'w1:p1' } }));
   const again = await startMaitre(process.env, { ...FAST, open: () => {} });
-  assert.deepEqual(again.created, ['lounge']);
+  assert.deepEqual(again.created, []);
   assert.equal(sb.state().workspaces.w4?.label, 'reception');
+  assert.equal(sb.state().workspaces.w5, undefined, 'a lounge tab without a recorded lounge pid is closed');
+  assert.deepEqual(again.notes, [SERVICE_NOTE]);
 });
 
 test('maitre: the reception settles on its own SessionStart marker, and a stale marker never counts', async () => {
@@ -375,4 +399,75 @@ test('bin/maitre with no arguments sets everything up, then attaches and exits w
   const calls = sb.calls();
   assert.deepEqual(calls.at(-1), []);
   assert.deepEqual(labels(), ['lounge', 'reception']);
+});
+
+// The window opener, with a display and a fake google-chrome as the only browser on PATH.
+function withChrome(): { env: NodeJS.ProcessEnv; chrome: () => Promise<string[][]>; cleanup: () => void } {
+  const fb = fakeBin();
+  fb.add('google-chrome');
+  return {
+    env: { ...process.env, DISPLAY: ':99', PATH: `${fb.bin}${delimiter}${sb.bin}` },
+    chrome: async () => {
+      await new Promise((r) => setTimeout(r, 300));
+      return fb.calls('google-chrome');
+    },
+    cleanup: fb.cleanup,
+  };
+}
+
+test('maitre: the window it opens for the lounge it started carries a ticket, never the key', async () => {
+  const w = withChrome();
+  try {
+    const r = await startMaitre(w.env, FAST);
+    assert.deepEqual(r.created, ['reception', 'lounge']);
+    const calls = await w.chrome();
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0]!.includes(`--app=${ticketUrl}`), JSON.stringify(calls));
+    assert.ok(!calls[0]!.join(' ').includes(KEY), 'no token in argv');
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('maitre: with a lounge already running (the service), no lounge tab and no window, just a note', async () => {
+  writeFileSync(join(sb.home, 'lounge.json'), JSON.stringify(loungeInfo), { mode: 0o600 });
+  mkdirSync(join(sb.home, 'reception'), { recursive: true });
+  // A leftover tab on the very port the service now serves (both default to 8737), from a lounge that exited.
+  writeFileSync(join(sb.home, 'reception', 'tabs.json'), JSON.stringify({ session: 'maitre-test', lounge: { workspaceId: 'w3', paneId: 'w3:p1', url: loungeUrl, loungePid: process.ppid } }));
+  sb.setState({ next: 5, workspaces: { w3: { label: 'lounge' } }, panes: { 'w3:p1': { ws: 'w3', agent: 'shell' } } });
+  const w = withChrome();
+  try {
+    const r = await startMaitre(w.env, FAST);
+    assert.deepEqual(r.created, ['reception']);
+    assert.deepEqual(labels(), ['reception'], 'the leftover lounge tab is closed');
+    assert.equal(r.url, undefined);
+    assert.deepEqual(r.notes, [SERVICE_NOTE]);
+    assert.deepEqual(await w.chrome(), []);
+    assert.equal(JSON.parse(readFileSync(join(sb.home, 'reception', 'tabs.json'), 'utf8')).lounge, undefined);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('maitre: a second run keeps only the lounge tab whose recorded lounge pid owns lounge.json', async () => {
+  const opened: string[] = [];
+  await startMaitre(process.env, { ...FAST, open: (u) => opened.push(u) });
+  const tabs = JSON.parse(readFileSync(join(sb.home, 'reception', 'tabs.json'), 'utf8'));
+  assert.equal(tabs.lounge.loungePid, process.pid, 'the pid found in lounge.json once the URL showed');
+  const st = sb.state();
+  const owner = tabs.lounge.workspaceId as string;
+  st.workspaces.w8 = { label: 'lounge' };
+  st.panes['w8:p1'] = { ws: 'w8', agent: 'shell', screen: `maitre lounge: ${loungeUrl}\nPress Ctrl+C to stop.\n` };
+  st.workspaces.w9 = { label: 'lounge' };
+  st.panes['w9:p1'] = { ws: 'w9', agent: 'shell' };
+  st.next = 10;
+  sb.setState(st);
+  const r = await startMaitre(process.env, { ...FAST, open: (u) => opened.push(u) });
+  assert.deepEqual(r.created, []);
+  assert.deepEqual(r.notes, []);
+  const ws = sb.state().workspaces;
+  assert.equal(ws[owner]?.label, 'lounge', 'the owner is kept');
+  assert.equal(ws.w8, undefined, 'a tab showing the same port but not recorded is closed');
+  assert.equal(ws.w9, undefined, 'a restored bare shell is closed');
+  assert.deepEqual(opened, [ticketUrl]);
 });

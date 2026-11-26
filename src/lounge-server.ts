@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { readFile, realpath } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
-import { timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 
 export interface LoungeServer {
   url: string;
@@ -23,6 +23,32 @@ const MIME: Record<string, string> = {
   '.svg': 'image/svg+xml',
   '.txt': 'text/plain; charset=utf-8',
 };
+
+export type LoungeAuth = 'header' | 'key' | 'cookie' | 'ticket';
+
+export class TicketStore {
+  private readonly expiries = new Map<string, number>();
+
+  constructor(
+    private readonly ttlMs = 60_000,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  issue(): string {
+    const now = this.now();
+    for (const [t, exp] of this.expiries) if (exp < now) this.expiries.delete(t);
+    const ticket = randomBytes(32).toString('hex');
+    this.expiries.set(ticket, now + this.ttlMs);
+    return ticket;
+  }
+
+  consume(ticket: string): boolean {
+    const exp = this.expiries.get(ticket);
+    if (exp === undefined) return false;
+    this.expiries.delete(ticket);
+    return this.now() <= exp;
+  }
+}
 
 const COOKIE_PREFIX = 'maitre_key_';
 const MAX_PORT_TRIES = 21;
@@ -57,7 +83,8 @@ export async function startLoungeServer(opts: {
   port: number;
   token: string;
   host?: '127.0.0.1';
-  routes?: (req: IncomingMessage, res: ServerResponse, url: URL) => boolean | Promise<boolean>;
+  tickets?: TicketStore;
+  routes?: (req: IncomingMessage, res: ServerResponse, url: URL, auth: LoungeAuth) => boolean | Promise<boolean>;
 }): Promise<LoungeServer> {
   const root = resolve(opts.root);
   let realRoot: string | undefined;
@@ -83,11 +110,34 @@ export async function startLoungeServer(opts: {
       const rawPath = q === -1 ? raw : raw.slice(0, q);
       const params = new URLSearchParams(q === -1 ? '' : raw.slice(q + 1));
 
+      if (rawPath === '/api/ping' && (req.method === 'GET' || req.method === 'HEAD')) {
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+        });
+        res.end(req.method === 'HEAD' ? undefined : JSON.stringify({ app: 'maitre', pid: process.pid }));
+        return;
+      }
+
+      const headerToken = req.headers['x-maitre-token'];
+      let auth: LoungeAuth | undefined;
+      if (headerToken !== undefined) {
+        if (typeof headerToken !== 'string' || !safeEqual(headerToken, opts.token)) return deny(403);
+        auth = 'header';
+      }
+      if (auth === undefined && req.method !== 'GET' && req.method !== 'HEAD') {
+        const sameOrigin = origin === `http://127.0.0.1:${boundPort}` || origin === `http://localhost:${boundPort}`;
+        if (!sameOrigin || req.headers['x-maitre-request'] !== '1') return deny(403);
+      }
       const queryKey = params.get('key');
+      const ticket = params.get('ticket');
       const cookieKey = cookieValue(req.headers.cookie, cookieName);
-      const viaQuery = queryKey !== null && safeEqual(queryKey, opts.token);
-      const viaCookie = cookieKey !== undefined && safeEqual(cookieKey, opts.token);
-      if (!viaQuery && !viaCookie) return deny(403);
+      if (ticket !== null && opts.tickets?.consume(ticket)) auth ??= 'ticket';
+      if (queryKey !== null && safeEqual(queryKey, opts.token)) auth ??= 'key';
+      if (cookieKey !== undefined && safeEqual(cookieKey, opts.token)) auth ??= 'cookie';
+      if (auth === undefined) return deny(403);
+      if (auth === 'key' || auth === 'ticket') res.setHeader('set-cookie', `${cookieName}=${opts.token}; HttpOnly; SameSite=Strict; Path=/`);
 
       if (opts.routes) {
         let url: URL;
@@ -97,7 +147,7 @@ export async function startLoungeServer(opts: {
         } catch {
           return deny(403);
         }
-        if (await opts.routes(req, res, url)) return;
+        if (await opts.routes(req, res, url, auth)) return;
       }
       if (req.method !== 'GET' && req.method !== 'HEAD') return deny(403);
 
@@ -126,7 +176,6 @@ export async function startLoungeServer(opts: {
         'cache-control': 'no-store',
         'x-content-type-options': 'nosniff',
       };
-      if (viaQuery) headers['set-cookie'] = `${cookieName}=${opts.token}; HttpOnly; SameSite=Strict; Path=/`;
       res.writeHead(200, headers);
       res.end(req.method === 'HEAD' ? undefined : body);
     } catch {

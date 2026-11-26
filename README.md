@@ -20,7 +20,7 @@
 </p>
 
 > [!NOTE]
-> **maître is early.** What runs today is **M2a: type `maitre` and you get a herdr session with a reception and the live lounge.** The reception routes each request to a room, a Claude Code session in its own git worktree and herdr tab, on the model the task calls for. The demo mode and rooms opened by hand with `maitre room run` still work. The doorman, the janitor, the building and answering from the lounge are the design being built next. Sections below mark what is planned, and the [Roadmap](#roadmap) tracks it.
+> **maître is early.** What runs today is **M2b: run `./setup` once, then press Super+M or click the maître in the lounge, type a request, and watch the room walk in.** Each request goes to a room, a Claude Code session in its own git worktree and herdr tab, on the model the task calls for. `maitre` in a terminal still opens herdr with the reception and the lounge, and the demo mode and rooms opened by hand with `maitre room run` still work. The doorman, the janitor, the building and answering from the lounge are the design being built next. Sections below mark what is planned, and the [Roadmap](#roadmap) tracks it.
 
 ## What is it
 
@@ -47,9 +47,9 @@ What you can run today is marked **today**: it works with real rooms as well as 
 | <img src="docs/assets/sprites/cards.png" width="48" alt="A working agent at the card table" /> | **Card table.** A working agent plays cards while it uses its tools. | **today** |
 | <img src="docs/assets/sprites/slots.png" width="48" alt="A subagent at the slot machines" /> | **Slot machines.** A subagent pulls the lever while it works. The lever is yours to pull too, jackpot included. | **today** |
 | <img src="docs/assets/sprites/musician.png" width="48" alt="The musician with his saxophone" /> | **The musician.** Click him for live, generative **jazz** (walking bass, swung ride, ii-V-I, a synth sax) or **house** (four-on-the-floor, off-beat hats, chord stabs). Made with WebAudio, no recordings. | **today** |
-| <img src="docs/assets/sprites/bell.png" width="48" alt="An agent with a red exclamation mark, calling you" /> | **The bell.** An agent that needs you goes to the reception desk with a red "!" and a sound. Click it to see the reason and the options (in the demo, with the recommended one marked). | **today**; you answer in the room's terminal (from the lounge in M5) |
+| <img src="docs/assets/sprites/bell.png" width="48" alt="An agent with a red exclamation mark, calling you" /> | **The bell.** An agent that needs you goes to the reception desk with a red "!" and a sound. Click it to see the reason and the options (in the demo, with the recommended one marked). | **today**; you answer in the room's terminal (the panel's **Open in terminal** button takes you there), and from the lounge in M5 |
 | <img src="docs/assets/sprites/ready.png" width="48" alt="An agent with a drink and a green check" /> | **Ready, quietly.** An agent that finished its turn without asking anything waits at the bar with a green check. No sound. | **today** |
-| <img src="docs/assets/sprites/reception.png" width="48" alt="The maître at the reception desk" /> | **Reception and rooms.** One request box, one room per topic, automatic names, and the project found from an index of your repos. | **today** in the terminal; a clickable reception in the lounge in M2b |
+| <img src="docs/assets/sprites/reception.png" width="48" alt="The maître at the reception desk" /> | **Reception and rooms.** One request box, one room per topic, automatic names, and the project found from an index of your repos. | **today**, in the terminal, by clicking the maître in the lounge, or with the Super+M prompt |
 | <img src="docs/assets/sprites/routing.png" width="48" alt="Fable, the house advisor, with a cigar" /> | **Model routing** by task type, applied by code, with outcomes that feed back into the router. | **today** by task type; learning in M5 |
 | <img src="docs/assets/sprites/doorman.png" width="48" alt="The doorman in sunglasses" /> | **Doorman.** At most 6 active rooms at once (configurable); the rest queue on the sidewalk. | M3 |
 | <img src="docs/assets/sprites/janitor.png" width="48" alt="The waiter with a tray" /> | **Janitor.** Closes idle rooms with nothing pending and writes minutes to an Obsidian-compatible vault. | M3 |
@@ -62,10 +62,10 @@ What you can run today is marked **today**: it works with real rooms as well as 
 
 - **Node.js 20 or newer.**
 - **Linux.** macOS is planned, and nothing in the design blocks it.
-- **Chrome or Chromium** (optional): the lounge opens as an app window with `--app`. Without it, maître falls back to your default browser.
+- **Google Chrome** (optional): the lounge and the quick prompt open as app windows, with maître's own Chrome profile. Chromium is not used: on Ubuntu it is a snap, which cannot use a profile in maître's hidden folder. Without Google Chrome, the lounge opens as a tab in your default browser and the prompt is a normal tab, not a small window.
 - **For real rooms:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code), with `claude` on your `PATH`.
 - **For the reception and rooms:** [herdr](https://herdr.dev) (tested with 0.8.2), Claude Code (tested with 2.1), and `git`. Your projects are local clones with an `origin` remote.
-- **Claude Code auth:** whatever already works for `claude` works in maître. API keys, gateways (`ANTHROPIC_BASE_URL`), Bedrock, Vertex and `CLAUDE_CONFIG_DIR` pass through to herdr, the reception and the rooms; only the session markers of a Claude Code you launch `maitre` from are dropped.
+- **Claude Code auth:** whatever already works for `claude` works in maître. API keys, gateways (`ANTHROPIC_BASE_URL`), Bedrock, Vertex and `CLAUDE_CONFIG_DIR` pass through to herdr, the reception and the rooms; only the session markers of a Claude Code you launch `maitre` from are dropped. The login service is different: see [The service](#one-step-setup-works-today).
 
 ### Run the demo lounge (works today)
 
@@ -81,6 +81,10 @@ maître starts a small server on `127.0.0.1`, prints the lounge URL with its acc
 
 ```text
 maitre                                   open the reception and the lounge in herdr
+maitre open                              open the lounge window, starting the lounge if needed
+maitre prompt                            open the small prompt window, starting the lounge if needed
+maitre serve [--port <n>]                run the live lounge with no window (what the login service runs)
+maitre setup [--dry-run] [--uninstall]   install the command, the service, the icon and the shortcut
 maitre index [--root <dir>]...           scan your repos for the project index
 maitre projects                          list the indexed projects
 maitre room list                         rooms, their herdr status and lounge state
@@ -115,7 +119,7 @@ maitre projects                # what it found: name, base branch, path
 maitre                         # opens herdr with the reception and the lounge
 ```
 
-`maitre` starts a herdr session named `maitre` with two tabs, **reception** and **lounge**, opens the lounge window and attaches you to herdr, on the reception. Detach with herdr's detach key (`Ctrl+B` then `Q` by default): everything keeps running. Run `maitre` again to come back; it reuses the tabs that are alive and creates only what is missing. The lounge window opens only when the lounge itself (re)starts, so after closing it, open the lounge tab's URL by hand.
+`maitre` starts a herdr session named `maitre` with two tabs, **reception** and **lounge**, opens the lounge window and attaches you to herdr, on the reception. Detach with herdr's detach key (`Ctrl+B` then `Q` by default): everything keeps running. Run `maitre` again to come back; it reuses the tabs that are alive and creates only what is missing. The lounge window opens only when the lounge itself (re)starts; after closing it, `maitre open` brings it back. When the login service from [`./setup`](#one-step-setup-works-today) is running, `maitre` uses its lounge and does not create a **lounge** tab.
 
 **The first launch.** Claude Code asks whether you trust a folder the first time it starts there. maître answers that dialog on screen only for its own folders: the reception's folder (`$MAITRE_HOME/reception`) and the scratch folders. It never answers for a room worktree, because Claude Code records a worktree's trust under the project's main clone (as of Claude Code 2.1), and that choice is yours. When a new worktree room shows the dialog, the room still opens, `maitre dispatch` and `maitre room open` say "answer the folder-trust question in its tab", and the lounge rings until you answer it there. Once you trust a project, its later rooms start without asking. maître never edits Claude Code's config files itself.
 
@@ -165,20 +169,60 @@ A room's `events.jsonl` holds what its hooks saw: the start of each prompt, tool
 
 A room leaves the lounge when Claude Code ends, even after a crash, because `maitre room run` reports the exit. If `maitre room run` dies too (a reboot, an out-of-memory kill, `kill -9` on its process group), nothing reports it and the room stays in the lounge: delete `$MAITRE_HOME/state/rooms/<room>` and restart the lounge, or run a room with the same name again.
 
-### One-step setup (coming in M2b)
-
-This is where the quick start is headed. It does **not** work yet:
+### One-step setup (works today)
 
 ```sh
 git clone https://github.com/danielrdg/maitre
 cd maitre
-./setup               # asks where your repos live, installs the app icon and the Super+M prompt
-maitre                # opens herdr, the reception and the lounge
+./setup               # builds maître, asks where your repos live, installs the service, the app icon and the Super+M prompt
+```
+
+`./setup` needs Node.js 20 or newer. It runs `npm ci` and `npm run build` when needed, then `maitre setup`, which:
+
+1. **Asks where your repos live** (comma-separated; the default is the roots you already configured, or else the folder that holds the maître clone), saves them in `$MAITRE_HOME/config.json` and indexes them. With `--yes` and no roots configured, it indexes the folder that holds the clone without asking; pass `--roots` to pick others.
+2. **Installs the command.** `$MAITRE_HOME/bin/maitre` is a small wrapper with the full path of your Node, because the app icon, the shortcut and systemd do not load nvm. Run `./setup` again after you remove that Node version or move the clone; until then the wrapper only says so (on the terminal, and as a desktop notification for the icon and the shortcut). A copy goes to `~/.local/bin/maitre` for your terminal, so you don't need `npm link`; if a file setup did not write is already there, it is left alone.
+3. **Installs the lounge as a login service:** a `systemd --user` unit named `maitre` that runs `maitre serve` (the live lounge, with no window) when your desktop session starts and restarts it if it fails. It waits for the desktop (`graphical-session.target`) so the rooms it starts can open a browser; after a login with no desktop (SSH) or on a desktop that never reaches that target, `maitre open` and `maitre prompt` start the service when you need it. The unit keeps the `PATH` you had when you ran setup, so it finds `claude`, `herdr` and `git`. Stopping or restarting the service leaves your rooms and herdr running.
+4. **Installs the app icon:** "maître" in your app list opens the lounge window; right-click it for **Open in terminal**, which runs `maitre`.
+5. **Registers Super+M on GNOME** to open the quick prompt. GNOME uses Super+M (and Super+V) to show the notification list; setup takes Super+M out of that GNOME shortcut, tells you, and `--uninstall` puts it back. If another shortcut already holds the key, setup skips this step and says which one; pick another with `--shortcut '<Super><Shift>m'`.
+
+Every file setup writes carries the line `# Managed by maitre setup`, and setup never overwrites a file without it. Run it again whenever you like (after a `git pull`, say): it updates its own files and restarts the service. Other flags: `--roots <a,b>`, `--no-shortcut`, `--no-service`, `--yes` (ask nothing), and `--dry-run`, which prints every file, command and setting it would touch and changes nothing.
+
+maître's windows, the quick prompt and the terminal button are tested on Ubuntu with GNOME 46 on X11, and the shortcut step is written for GNOME. On other desktops setup installs everything except the shortcut and prints the command to bind by hand (see [Without a terminal](#without-a-terminal-works-today)). Wayland sessions are not tested; there the prompt window may not center itself.
+
+**The service.** `systemctl --user status maitre` shows it, and it logs with `journalctl --user -u maitre`. Without the service (`--no-service`, or no setup at all), `maitre open` and `maitre prompt` start `maitre serve` in the background themselves and it logs to `$MAITRE_HOME/serve.log`. One lounge runs per `MAITRE_HOME`: a second `maitre serve` sees the first, says so and exits without an error.
+
+The service does not read your shell profile. It gets the `PATH` and `MAITRE_HOME` that setup recorded, plus what your desktop session gives every user service. A login saved by `claude` itself (in your home folder) works there. A variable you export only in your shell profile, such as an API key, `ANTHROPIC_BASE_URL` or `CLAUDE_CONFIG_DIR`, does not reach the router call for requests from Super+M or the lounge, nor the rooms when the service is the one that started herdr.
+
+**The access token.** The lounge keeps its port, a random token and its process id in `$MAITRE_HOME/lounge.json`, readable only by you. The token never changes by itself, so open windows keep working across restarts. To rotate it, stop the lounge (`systemctl --user stop maitre`), delete `$MAITRE_HOME/lounge.json`, and start it again. The token is not in a window's URL: `maitre open`, `maitre prompt` and `maitre` ask the lounge for a ticket that works once, within 60 seconds, put it in the window's command line, and the page trades it for the token as the usual cookie.
+
+**Who maître trusts.** maître assumes a single-user desktop: nobody else has an account on the machine. On a shared machine, another local user can read a window's ticket from the process list while Chrome starts and redeem it first, or take the lounge's old port after a restart moved the lounge and receive an open window's cookie. Either way they get the token, which lets them open rooms that run as you, and it stays valid until you rotate it as above.
+
+**Uninstall.** `./setup --uninstall` stops and disables the service, removes the files setup wrote (it leaves any you changed, and says so), removes its shortcut and gives Super+M back to GNOME. It keeps maître's data in `$MAITRE_HOME`: the config, the project index, rooms, requests and worktrees; delete that folder by hand if you want it gone. If a setting cannot be undone right now (no `gsettings`, for example), it keeps `$MAITRE_HOME/installed.json`, says what is left, and you can run `./setup --uninstall` again later.
+
+### Without a terminal (works today)
+
+After `./setup` you can use maître without opening a terminal:
+
+- **Super+M** opens a small prompt in the middle of the screen. Type a request and press Enter; Esc closes it. The answer shows in the window, which closes itself 3 seconds after the request reaches a room. It stays open when the maître asks you a question (type the answer and press Enter), when the room needs you (below), or on an error.
+- **Click the maître** at the reception desk in the lounge for the same thing in a pixel text box. His answer shows in a speech balloon, and a new room walks in through the door.
+- **Open in terminal.** Click a room in the lounge, then **Open in terminal**: a terminal opens on the herdr session, on that room's tab. It uses `x-terminal-emulator`, or `gnome-terminal`.
+- **The icon** opens the lounge; its **Open in terminal** action opens herdr with the reception and all the rooms, like `maitre` does.
+
+The prompt and the maître in the lounge send your request straight to the router and to `maitre dispatch`, the same code the terminal reception runs, so requests from all three share one numbering. When the router asks a question, your answer is routed together with everything said before it. Unlike the terminal reception, they only route requests: they cannot list rooms or close one ("close fix-login" works in the terminal reception or with `maitre room close fix-login`). One request runs at a time; up to three wait, and more get "the maître is busy, try again". The prompt and the windows opened from the icon or the shortcut are in English for now.
+
+**A new project's first room.** Claude Code asks whether you trust the folder the first time a project gets a room, and maître never answers that for you (see [The first launch](#your-first-reception-works-today)). The answer in the prompt or the balloon then ends with "answer the folder-trust question in its tab", and the room rings the bell in the lounge. Click the room, press **Open in terminal**, and answer it there (a lounge window opened while the prompt is still up starts at the prompt's size and grows itself to full size). Later rooms of that project start without asking.
+
+If the lounge cannot start or no window can open, the icon and the shortcut show a desktop notification with the reason.
+
+**Other desktops.** Setup registers the shortcut only on GNOME. Elsewhere, bind this command to a key in your desktop's keyboard settings (setup prints it with your full path):
+
+```sh
+~/.maitre/bin/maitre prompt     # $MAITRE_HOME/bin/maitre prompt if you set MAITRE_HOME
 ```
 
 ## How it works
 
-This is the target design (M1 to M5; the dashed answer path is M5). Today (M2a) the reception, the router, rooms in herdr with their own worktrees, the hooks and the lounge exist (highlighted below); the daemon is the part of `maitre lounge` that reads the rooms' events and streams them over SSE. The doorman and the janitor come in M3.
+This is the target design (M1 to M5; the dashed answer path is M5). Today (M2b) the reception, the router, rooms in herdr with their own worktrees, the hooks and the lounge exist (highlighted below); the daemon is `maitre serve`, the login service (or `maitre lounge` in a terminal), which reads the rooms' events, streams them over SSE and takes requests from the lounge and the quick prompt. The doorman and the janitor come in M3.
 
 ```mermaid
 flowchart LR
@@ -193,19 +237,20 @@ flowchart LR
   end
   roomA & roomB -->|"Claude Code hooks"| daemon[("Daemon<br/>127.0.0.1 · janitor")]
   daemon -->|"SSE"| lounge["Lounge<br/>pixel art"]
+  lounge -->|"request: click the maître or Super+M"| router
   lounge -.->|"answer a stuck room"| daemon
   daemon -.->|"herdr agent prompt"| roomA
   classDef now fill:#3a130f,stroke:#ff5fa2,stroke-width:3px,color:#ffe0ef
   class rec,router,roomA,roomB,lounge now
 ```
 
-1. **You write in the reception**, a Sonnet session in herdr. It cannot do the work itself: its tools are restricted and a hook denies anything that is not a `maitre` command.
+1. **You write in the reception**, a Sonnet session in herdr. It cannot do the work itself: its tools are restricted and a hook denies anything that is not a `maitre` command. A request typed in the lounge or the quick prompt skips the reception and goes to the daemon, which runs the same route and dispatch code.
 2. **`maitre route` asks Haiku** where the request belongs, given the project index and the open rooms (recent minutes and past routing outcomes join in M3 and M5). Haiku picks the project, the room and the task type; code picks the model from `config/routing.json`.
 3. **A known topic goes to its room.** A new topic gets a new room: a worktree on a `maitre/<room>` branch, a herdr tab, and `claude` started with a short brief. From M3, if six rooms are already active, it waits in line.
 4. **Every room reports through Claude Code hooks.** One small hook forwards each event to the daemon and never blocks the agent. Rooms can also declare `maitre status waiting|blocked`.
 5. **The daemon pushes state to the lounge over SSE.** Answers you give in the lounge go back to the room through herdr.
 
-The lounge server listens on `127.0.0.1` only and requires a random token. Text coming from agents is always rendered as text, never as HTML.
+The lounge server listens on `127.0.0.1` only and requires a random token. Windows open with a one-time ticket that the page trades for the token as a cookie, and a request that opens a room or a terminal must come from the lounge's own page (its `Origin` and a custom header are checked), so another website cannot send one. Text coming from agents is always rendered as text, never as HTML. maître assumes no other people have accounts on your machine; see [Who maître trusts](#one-step-setup-works-today).
 
 The full design, including the open spikes, is in [docs/design.md](docs/design.md).
 
@@ -267,7 +312,7 @@ The bell rings only for a real block: a pending permission, a question with opti
 
 **Today** the settings are the CLI flags in [Quick start](#quick-start), a few environment variables and one config file:
 
-- `MAITRE_HOME` (default `~/.maitre`): where maître keeps everything it writes: the config, the project index, room events, briefs, worktrees and scratch folders. The lounge, the reception and the rooms must use the same one.
+- `MAITRE_HOME` (default `~/.maitre`): where maître keeps everything it writes: the config, the project index, room events, briefs, worktrees and scratch folders. The lounge, the reception and the rooms must use the same one. Set it before `./setup` and setup bakes it into the wrapper, the service, the icon and the shortcut.
 - `MAITRE_HERDR_SESSION` (default `maitre`): the herdr session `maitre` opens.
 - `MAITRE_RECEPTION_MODEL` (default `sonnet`): the reception's model, read when the reception tab is created.
 - `$MAITRE_HOME/config.json`: your project roots (`maitre index --root <dir>` adds them) and per-project overrides, as below.
@@ -277,7 +322,7 @@ The bell rings only for a real block: a pending permission, a question with opti
 | Setting | Default | What it does | Milestone |
 |---|---|---|---|
 | Routing table | `config/routing.json` | Maps each task type to a model. Code applies it; a follow-up goes to its room as it is, on the room's model. | **today** |
-| Project roots | none | `roots` in `$MAITRE_HOME/config.json`: folders `maitre index` scans for repos. `./setup` will ask for them in M2b. | **today** |
+| Project roots | none | `roots` in `$MAITRE_HOME/config.json`: folders `maitre index` scans for repos. `./setup` asks for them. | **today** |
 | Base branch | the remote's `HEAD` | Per project, e.g. `"projects": { "backend": { "base": "dev" } }`. Worktrees branch from it. | **today** |
 | Branch prefix | `maitre/` | Per project, `"branchPrefix"`, to match each repo's convention. | **today** |
 | Doorman cap | `6` active rooms | Rooms on the couch or waiting for merge don't count. | M3 |
@@ -313,7 +358,7 @@ Every firstmate cell below comes from firstmate's (or, for the dashboard, shipma
 | Harnesses | Claude Code, Grok, Pi, Codex, OpenCode, Cursor and more ([README][fm-req]) | Claude Code only |
 | Session backends | tmux by default, herdr, and experimental ones such as Zellij, cmux and Orca ([README][fm-crew], [backends][fm-backends]) | herdr only |
 | Platforms | macOS and Linux ([README][fm-top]) | Linux; macOS later |
-| Maturity | Shipping today, with a large [test suite][fm-tests] | Early: the reception, rooms in worktrees and the lounge (M2a) |
+| Maturity | Shipping today, with a large [test suite][fm-tests] | Early: the reception, rooms in worktrees and the lounge (M2a), the setup, login service and quick prompt (M2b) |
 
 If you need many harnesses, many backends, macOS, or a mature tool today, use firstmate. If you live in Claude Code and herdr and want each topic in its own room with a lounge to watch, maître is being built for you.
 
@@ -331,7 +376,7 @@ If you need many harnesses, many backends, macOS, or a mature tool today, use fi
 ## FAQ
 
 **Does it work today?**
-Yes, in the terminal: `maitre` opens the reception, which routes your requests to rooms in their own worktrees, and the lounge shows them live. It also has a demo mode with simulated agents. The one-step setup and a clickable reception (M2b), the doorman and janitor (M3), the building (M4) and answering from the lounge (M5) are the roadmap.
+Yes. After `./setup`, Super+M or a click on the maître in the lounge sends a request to a room in its own worktree, and the lounge shows the rooms live; in a terminal, `maitre` opens the reception in herdr. It also has a demo mode with simulated agents. The doorman and janitor (M3), the building (M4) and answering from the lounge (M5) are the roadmap.
 
 **Why herdr and not tmux?**
 herdr gives each room a real tab you can walk into, plus the `agent prompt`, `send-keys` and `read` commands that should let the lounge answer a stuck room (spike 2 in the [design](docs/design.md) checks this). v1 targets one session manager to stay small.
@@ -343,7 +388,7 @@ Rooms are your own Claude Code sessions: your skills, plugins and global rules k
 No. A room closes only when it has no uncommitted change, no unpushed commit, no open PR and no open question. The worktree is removed with `git worktree remove`, never `--force`, and the branch stays. Anything else goes to the couch, with the reason shown.
 
 **Does the lounge load anything from the internet?**
-No. The server binds to `127.0.0.1`, the lounge needs the token printed at startup (kept in a same-site cookie after the first load), and the art and music are generated by code in your browser.
+No. The server binds to `127.0.0.1`, the lounge needs its token (a window gets a one-time ticket that becomes a same-site cookie), and the art and music are generated by code in your browser.
 
 **Where does the music come from?**
 It is generated live with WebAudio: chords, bass lines and the sax solo are composed on the fly. No recordings, so no copyright.
@@ -356,7 +401,7 @@ The maître d' greets you at the door, finds you the right table and keeps the r
 - [x] **M0 · The lounge:** repo, CLI with a token-gated local server, the pixel lounge in demo mode, music, agent panel, slot machines, English and Portuguese.
 - [x] **M1 · Events:** the Claude Code hook, `maitre room run` and `maitre status`, the daemon, and the lounge showing real rooms over SSE.
 - [x] **M2a · Reception and rooms:** `maitre` and `maitre index`; the guarded reception and the Haiku router; rooms in herdr with their own worktrees and the model their task calls for; each room's project and branch in the lounge.
-- [ ] **M2b · The doors:** `./setup`, a clickable reception in the lounge, the app icon, the daemon as a login service, and the Super+M quick prompt.
+- [x] **M2b · The doors:** `./setup`, a clickable maître in the lounge, the app icon, the lounge as a login service, the Super+M quick prompt, and an **Open in terminal** button on each room.
 - [ ] **M3 · Doorman and janitor:** the queue and the 6-room cap, cleanup with minutes, and the markdown vault.
 - [ ] **M4 · The building:** the facade, themed floors, lobby, terrace and elevator.
 - [ ] **M5 · Answer from the lounge:** reply to a stuck room from its panel, chat with a room, desktop notifications with action buttons, and routing that learns from outcomes.

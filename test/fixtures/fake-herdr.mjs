@@ -6,6 +6,7 @@
 // With $FAKE_HERDR_STATE set, workspaces, panes and agents live in that JSON file instead (see stateful()).
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
@@ -78,7 +79,8 @@ process.exit(code);
 // A started Claude (on run, or once the trust keys are accepted) fires its SessionStart hook: the room
 // hook for a room tab, the reception hook for the reception, unless FAKE_HERDR_SESSION_START=0.
 // A `lounge` command instead leaves a bare shell showing the lounge's URL line ($FAKE_HERDR_LOUNGE_URL,
-// cut every $FAKE_HERDR_WRAP columns when set). `agent prompt` runs the real room hook
+// cut every $FAKE_HERDR_WRAP columns when set) and, when $FAKE_HERDR_LOUNGE_INFO is set, claims the
+// tab's $MAITRE_HOME/lounge.json with it. `agent prompt` runs the real room hook
 // with a UserPromptSubmit payload unless FAKE_HERDR_PROMPT_HOOK=0.
 function runHook(script, payload, wenv) {
   execFileSync(process.execPath, [fileURLToPath(new URL(`../../hooks/${script}`, import.meta.url))], {
@@ -158,6 +160,9 @@ function stateful(file) {
         const shown = wrap > 0 ? line.match(new RegExp(`.{1,${wrap}}`, 'g')).join('\n') : line;
         p.agent = 'shell';
         p.screen = `$ ${rest[3]}\n${shown}\nPress Ctrl+C to stop.\n`;
+        const info = process.env.FAKE_HERDR_LOUNGE_INFO;
+        const home = st.workspaces[p.ws].env?.MAITRE_HOME;
+        if (info && home) writeFileSync(join(home, 'lounge.json'), info, { mode: 0o600 });
       } else if (on === 'trust') {
         p.agent = 'blocked';
         p.trust = true;

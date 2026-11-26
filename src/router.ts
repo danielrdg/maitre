@@ -283,6 +283,20 @@ export async function routeRequests(ids: string[], env: NodeJS.ProcessEnv = proc
   return { id, route: found, ...(warning !== undefined ? { warning } : {}) };
 }
 
+// The ids a stored route was made from, or undefined when there is none or it is unusable.
+export function storedRequestIds(id: string, env: NodeJS.ProcessEnv = process.env): string[] | undefined {
+  if (!isRequestId(id)) return undefined;
+  let raw: unknown;
+  try {
+    raw = readJson(routeFile(id, env));
+  } catch {
+    return undefined;
+  }
+  const ids = isObject(raw) ? raw.requestIds : undefined;
+  if (!Array.isArray(ids) || ids.length === 0 || !ids.every((x) => typeof x === 'string' && isRequestId(x))) return undefined;
+  return ids as string[];
+}
+
 export function describeRoute(id: string, r: Route): string {
   if (r.question !== undefined) return `route ${id} → question: ${r.question}`;
   const where = r.room.kind === 'existing' ? `existing room ${r.room.name}` : `new room ${r.room.name} in ${r.project ?? 'scratch'}`;
@@ -306,14 +320,24 @@ function loadStored(id: string, env: NodeJS.ProcessEnv): StoredRoute {
 }
 
 export async function dispatchRoute(id: string, env: NodeJS.ProcessEnv = process.env, opts: { confirmMs?: number } = {}): Promise<string[]> {
+  return (await dispatchRouteDetailed(id, env, opts)).lines;
+}
+
+// needsYou: the room waits on the user (folder-trust question) or the dispatch produced a warning.
+export async function dispatchRouteDetailed(
+  id: string,
+  env: NodeJS.ProcessEnv = process.env,
+  opts: { confirmMs?: number } = {},
+): Promise<{ room: string; lines: string[]; needsYou: boolean }> {
   if (!isRequestId(id)) throw new Error(`invalid request id ${JSON.stringify(id)}`);
   const { route: r, requestIds } = loadStored(id, env);
   if (r.question !== undefined) throw new Error(`route ${id} needs an answer first: ${r.question}`);
   const text = readRequests(requestIds, env);
   if (r.room.kind === 'existing') {
     const room = roomSlug(r.room.name);
-    return [describeDelivery(room, await deliverToRoom(room, text, env, opts))];
+    return { room, lines: [describeDelivery(room, await deliverToRoom(room, text, env, opts))], needsYou: false };
   }
   const rec = await openRoom({ name: r.room.name, ...(r.project !== null ? { project: r.project } : {}), model: r.model, taskType: r.taskType, brief: text }, env);
-  return [describeOpen(rec), ...rec.warnings.map((w) => `warning: ${w}`)];
+  const warnings = rec.warnings.map((w) => `warning: ${w}`);
+  return { room: rec.room, lines: [describeOpen(rec), ...warnings], needsYou: rec.needsTrust || warnings.length > 0 };
 }

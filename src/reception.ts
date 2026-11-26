@@ -18,7 +18,8 @@ import {
   shellQuote,
 } from './herdr.js';
 import { writeReceptionSettings } from './hook-settings.js';
-import { openApp } from './open-app.js';
+import { liveLounge, type LoungeInfo } from './lounge-file.js';
+import { openWindow, ticketUrl } from './open-app.js';
 import { maitreHome } from './paths.js';
 import { closeLabeledTabs, closeRoomTabs, isRecord, liveness, markNotRunning, probeRoom, roomLabel } from './room-open.js';
 import { runForeground } from './room-run.js';
@@ -36,8 +37,8 @@ const DEFAULT_MODEL = 'sonnet';
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,63}$/;
 const LOUNGE_URL = /^http:\/\/(?:127\.0\.0\.1|localhost):[0-9]{1,5}\/\?key=[0-9a-f]{64}$/;
 const LOUNGE_WAIT_MS = 10_000;
-const LOUNGE_PROBE_MS = 2_000;
 const POLL_MS = 100;
+export const SERVICE_NOTE = 'lounge: run maitre open or use the maître icon';
 
 type Workspaces = { id: string; label: string }[];
 interface Tab {
@@ -47,7 +48,7 @@ interface Tab {
 interface Tabs {
   session: string;
   reception?: Tab;
-  lounge?: Tab & { url?: string };
+  lounge?: Tab & { url?: string; loungePid?: number };
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -121,12 +122,10 @@ function readTabs(env: NodeJS.ProcessEnv): Tabs {
   if (isTab(t.lounge)) {
     out.lounge = { workspaceId: t.lounge.workspaceId, paneId: t.lounge.paneId };
     if (typeof t.lounge.url === 'string') out.lounge.url = t.lounge.url;
+    if (Number.isInteger(t.lounge.loungePid) && t.lounge.loungePid! > 0) out.lounge.loungePid = t.lounge.loungePid;
   }
   return out;
 }
-
-const hasTab = (tab: Tab | undefined, label: string, workspaces: Workspaces): tab is Tab =>
-  tab !== undefined && workspaces.some((w) => w.id === tab.workspaceId && w.label === label);
 
 // Any tab labelled `reception` with a live Claude counts; tabs.json only says which one to try first.
 async function liveReception(tabs: Tabs, workspaces: Workspaces): Promise<Tab | undefined> {
@@ -143,15 +142,6 @@ async function liveReception(tabs: Tabs, workspaces: Workspaces): Promise<Tab | 
     for (const paneId of panes) if (liveness(await agentInfo(paneId)) !== 'not running') return { workspaceId: w.id, paneId };
   }
   return undefined;
-}
-
-async function answers(url: string): Promise<boolean> {
-  try {
-    const res = await fetch(url, { method: 'HEAD', redirect: 'manual', signal: AbortSignal.timeout(LOUNGE_PROBE_MS) });
-    return res.status === 200;
-  } catch {
-    return false;
-  }
 }
 
 // The URL line can wrap in a narrow pane, and the URL itself never holds whitespace.
@@ -199,11 +189,39 @@ async function sweepRooms(env: NodeJS.ProcessEnv, warnings: string[]): Promise<s
   return closed;
 }
 
+// Only the tab whose own lounge claimed lounge.json is kept; ports cannot tell it apart, since every lounge starts at 8737.
+async function keepLiveLounge(running: LoungeInfo, tabs: Tabs, workspaces: Workspaces, result: StartResult): Promise<void> {
+  const rec = tabs.lounge;
+  const owner = rec?.loungePid === running.pid && workspaces.some((w) => w.id === rec.workspaceId && w.label === LOUNGE_LABEL) ? rec.workspaceId : undefined;
+  await closeLabeledTabs(LOUNGE_LABEL, workspaces, owner);
+  if (owner === undefined) {
+    delete tabs.lounge;
+    result.notes.push(SERVICE_NOTE);
+  }
+}
+
+async function openStartedLounge(tabs: Tabs, env: NodeJS.ProcessEnv, result: StartResult, open?: (url: string) => void): Promise<void> {
+  const tab = tabs.lounge!;
+  const info = await liveLounge(env);
+  if (info === undefined || info.port !== Number(new URL(tab.url!).port)) {
+    result.warnings.push('the lounge is not answering yet; open it later with: maitre open');
+    return;
+  }
+  tab.loungePid = info.pid;
+  try {
+    const ticketed = await ticketUrl(info, '/');
+    (open ?? ((u: string) => void openWindow('lounge', u, env)))(ticketed);
+  } catch (err) {
+    result.warnings.push(`could not open the lounge window (${(err as Error).message}); open it with: maitre open`);
+  }
+}
+
 export interface StartResult {
   created: ('reception' | 'lounge')[];
   url?: string;
   trust?: TrustResult;
   closedRooms: string[];
+  notes: string[];
   warnings: string[];
 }
 
@@ -215,7 +233,7 @@ export async function startMaitre(
   const session = herdrSession(env);
   const model = env.MAITRE_RECEPTION_MODEL ? receptionModel(env) : undefined;
   const dir = receptionDir(env);
-  const result: StartResult = { created: [], closedRooms: [], warnings: [] };
+  const result: StartResult = { created: [], closedRooms: [], notes: [], warnings: [] };
   const tabEnv = { MAITRE_HOME: home, MAITRE_HERDR_SESSION: session };
 
   await ensureServer(env);
@@ -242,10 +260,12 @@ export async function startMaitre(
     result.created.push('reception');
   }
 
-  const lounge = tabs.lounge;
-  const loungeUp = hasTab(lounge, LOUNGE_LABEL, workspaces) && lounge.url !== undefined && LOUNGE_URL.test(lounge.url) && (await answers(lounge.url));
-  await closeLabeledTabs(LOUNGE_LABEL, workspaces, loungeUp ? lounge!.workspaceId : undefined);
-  if (!loungeUp) {
+  const running = await liveLounge(env);
+  if (running !== undefined) {
+    await keepLiveLounge(running, tabs, workspaces, result);
+    save();
+  } else {
+    await closeLabeledTabs(LOUNGE_LABEL, workspaces);
     const tab = await openTab({ cwd: home, label: LOUNGE_LABEL, env: tabEnv, command: [MAITRE_BIN, 'lounge', '--no-open'] });
     tabs.lounge = tab;
     save();
@@ -255,9 +275,9 @@ export async function startMaitre(
       result.warnings.push('the lounge did not show its URL yet; see its tab');
     } else {
       tabs.lounge = { ...tab, url };
-      save();
       result.url = url;
-      (opts.open ?? ((u: string) => openApp(u, env)))(url);
+      await openStartedLounge(tabs, env, result, opts.open);
+      save();
     }
   }
 

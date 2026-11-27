@@ -349,6 +349,25 @@ test('a resume whose claude shows up in its tab only after 6 s is waited for: re
   assert.equal(runs().filter((r) => r.includes("'--brief-file'")).length, 1, 'no fresh start');
 });
 
+test('replayed text that quotes the failure messages, while the resume starts, is not a failure', async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'delayed';
+  process.env.FAKE_HERDR_APPEAR_MS = '1500';
+  process.env.FAKE_HERDR_RESUME_SCREEN = '> the regex matches "No conversation found with session ID: s1"\n> and "maitre: `claude` was not found on PATH" too\n';
+  const w = await wakeRoom('a', process.env, QUICK);
+  assert.deepEqual(w, { resumed: true, lines: ['woke a: resumed its session'], needsYou: false });
+});
+
+test("maitre room run's line that claude is not on PATH fails the resume at once", async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'no-claude';
+  const w = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 20_000 });
+  assert.equal(w.resumed, false);
+  assert.match(w.lines[0], /could not be resumed \(`claude` was not found on PATH\)/);
+});
+
 test("an exit line from another run (a tab the wake just closed) does not fail a slow resume", async () => {
   await open('a');
   parkByHand('a');

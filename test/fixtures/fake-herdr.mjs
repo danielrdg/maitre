@@ -109,7 +109,8 @@ function tokenAfter(cmd, flag) {
 // writes it), and herdr misses the agent for one look, the second. 'delayed': no agent until
 // $FAKE_HERDR_APPEAR_MS have passed (a slow start), then idle with its SessionStart. 'ended': the room's
 // command ends before Claude starts (a bare shell, and `maitre room run`'s MaitreExit line).
-// 'missing-unseen': "No conversation found" on screen before herdr ever saw Claude.
+// 'missing-unseen': "No conversation found" on screen before herdr ever saw Claude. 'no-claude': `maitre room
+// run`'s "claude not found on PATH" line on a bare shell. $FAKE_HERDR_RESUME_SCREEN: what a 'delayed' pane shows.
 function resume(p, id, wenv) {
   const mode = process.env.FAKE_HERDR_RESUME ?? 'ok';
   p.resume = id;
@@ -125,6 +126,7 @@ function resume(p, id, wenv) {
     p.agent = 'idle';
   } else if (mode === 'delayed') {
     p.agent = 'shell';
+    if (process.env.FAKE_HERDR_RESUME_SCREEN) p.screen = process.env.FAKE_HERDR_RESUME_SCREEN;
     p.appearAt = Date.now() + Number(process.env.FAKE_HERDR_APPEAR_MS ?? 8000);
   } else if (mode === 'ended') {
     p.agent = 'shell';
@@ -133,6 +135,9 @@ function resume(p, id, wenv) {
       const line = { v: 1, ts: Date.now(), room: wenv.MAITRE_ROOM, session: '', event: 'MaitreExit', ...(run !== undefined ? { run } : {}) };
       appendFileSync(join(wenv.MAITRE_HOME, 'state', 'rooms', wenv.MAITRE_ROOM, 'events.jsonl'), JSON.stringify(line) + '\n');
     }
+  } else if (mode === 'no-claude') {
+    p.agent = 'shell';
+    p.screen = 'maitre: `claude` was not found on PATH; install Claude Code first\n$ \n';
   } else if (mode === 'missing-unseen') {
     p.agent = 'shell';
     p.screen = `No conversation found with session ID: ${id}\n$ \n`;

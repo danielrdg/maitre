@@ -59,9 +59,10 @@ const DEFAULTS: Timing = { pollMs: 200, herdrMs: 1_000, resumeTimeoutMs: 15_000,
 // A session id as Claude Code writes it; anything else (a string starting with `-`, spaces) is never passed on.
 const SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 export const isSessionId = (s: unknown): s is string => typeof s === 'string' && SESSION.test(s);
-const NOT_FOUND = /No conversation found with session ID/;
+// Whole lines, as claude and `maitre room run` print them: a replayed turn that quotes them is no failure.
+const notFound = (session: string): RegExp => new RegExp(`^No conversation found with session ID: ${session.replace(/[.]/g, '\\.')}\\s*$`, 'm');
 // What `maitre room run` prints when it cannot start claude at all.
-const NO_CLAUDE = /`claude` was not found on PATH/;
+const NO_CLAUDE = /^maitre: `claude` was not found on PATH/m;
 const PICKER = /^[\s│|]*Resume session[\s│|]*$/m;
 const PICKER_BOX = /Search…|No sessions match/;
 const NOTES_BYTES = 20_000;
@@ -149,7 +150,7 @@ async function verdict(paneId: string, dir: string, from: { file: string; offset
       if (last === 'not running') {
         missed = seen ? missed + 1 : 0;
         const s = await screen(paneId);
-        if (NOT_FOUND.test(s)) return failed('its session was not found');
+        if (notFound(session).test(s)) return failed('its session was not found');
         if (NO_CLAUDE.test(s)) return failed('`claude` was not found on PATH');
         if (ended()) return failed(seen ? 'Claude exited' : 'its command ended before Claude started');
         if (missed >= 2) return failed('Claude exited');

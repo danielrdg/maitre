@@ -170,6 +170,16 @@ function upsertSubagent(list: RoomState['subagents'], id: string, patch: { type?
   return old ? list.map((a) => (a.id === id ? next : a)) : [...list, next];
 }
 
+// maître's own line while a room (re)starts: no sign that a Claude is there.
+export function isStartingNote(ev: Pick<HookLine, 'event' | 'status' | 'starting'>): boolean {
+  return ev.event === 'MaitreStatus' && ev.status === 'blocked' && ev.starting === true;
+}
+
+// Blocked by that note alone: a room whose Claude is gone has no question left to answer.
+export function startingOnly(s: RoomState): boolean {
+  return s.state === 'blocked' && s.block?.tool === DECLARED_TOOL && (s as Tracked)[TRACK]?.startingBlock === true;
+}
+
 export function reduce(prev: RoomState | undefined, ev: HookLine): RoomState {
   const event = str(ev.event) ?? '';
   const session = prev === undefined ? undefined : sessionOf(prev, ev, event);
@@ -177,7 +187,7 @@ export function reduce(prev: RoomState | undefined, ev: HookLine): RoomState {
   // An exited room never comes back for its own session's late lines. SessionStart only fires on a
   // real (re)start, so it reopens the room even with the same id (--resume); the other openers need a new id.
   // maître's starting note marks a (re)start too: a resume can stop on a question before its SessionStart.
-  const restarting = event === 'MaitreStatus' && ev.status === 'blocked' && ev.starting === true;
+  const restarting = isStartingNote(ev);
   const reopens =
     prev?.state === 'exit' &&
     (event === 'SessionStart' || restarting || (OPENS_SESSION.has(event) && (str(ev.session) ?? '') !== '' && ev.session !== prev.session));

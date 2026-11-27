@@ -226,6 +226,32 @@ test('a dead room with something pending is skipped and left untouched', async (
   assert.equal(readRoom('a')!.pending, undefined, 'dropped once nothing is pending');
 });
 
+test("a dead woken room left blocked by maître's starting note closes after the idle time, its worktree removed", async () => {
+  const p = project();
+  const rec = await open('a', 'proj');
+  event('a', 'SessionStart');
+  event('a', 'Stop');
+  event('a', 'MaitreStatus', { session: '', status: 'blocked', text: 'Room is still starting — check its tab', options: [], starting: true });
+  killTabs();
+  age('a', 5 * HOURS);
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'close', reasons: ['not running, nothing pending'] }]);
+  assert.equal(readRoom('a')!.closedBy, 'janitor');
+  assert.equal(existsSync(rec.dir), false, 'the check right before the removal does not count the note either');
+  assert.ok(branchExists(p.path, 'maitre/a'));
+});
+
+test('a dead room whose Claude died asking for a permission keeps waiting on you', async () => {
+  project();
+  const rec = await open('a', 'proj');
+  event('a', 'SessionStart');
+  event('a', 'PermissionRequest', { tool: 'Bash', input: { command: 'rm -rf build' } });
+  killTabs();
+  age('a', 5 * HOURS);
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'skip', reasons: ['waiting on you'] }]);
+  assert.equal(readRoom('a')!.closedBy, undefined);
+  assert.ok(existsSync(rec.dir));
+});
+
 test('git worktree remove failing: the room still closes, the branch and folder stay, the minutes say so', async () => {
   const p = project();
   const rec = await open('a', 'proj');

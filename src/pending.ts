@@ -334,11 +334,12 @@ async function checkCode(rec: RoomRecord, env: NodeJS.ProcessEnv, reasons: strin
 
 // A wrong "nothing pending" deletes someone's work: every check that fails is itself a reason.
 // `local`: only what lives in the worktree folder (no remote refs, no gh), for the check right before removal.
+// `running: false`: the caller knows its Claude is gone, so maître's own starting note asks nothing.
 export async function checkPending(
   rec: RoomRecord,
   activity: RoomActivity,
   env: NodeJS.ProcessEnv = process.env,
-  opts: { local?: boolean } = {},
+  opts: { local?: boolean; running?: boolean } = {},
 ): Promise<Pending> {
   const reasons: string[] = [];
   const ignoredGone: string[] = [];
@@ -349,6 +350,6 @@ export async function checkPending(
       reasons.push(`could not check: ${message(err)}`);
     }
   }
-  if (activity.state === 'blocked') reasons.push('waiting on you');
+  if (activity.state === 'blocked' && !(opts.running === false && activity.starting === true)) reasons.push('waiting on you');
   return { reasons, ignoredGone };
 }

@@ -423,6 +423,18 @@ test('blocked code room: waiting on you', async () => {
   });
 });
 
+test("a room that is not running, blocked only by maître's starting note: nobody can answer it", async () => {
+  await withRoom(async ({ env }) => {
+    const dir = createScratch('notes', env);
+    const rec: RoomRecord = { room: 'notes', kind: 'scratch', dir, model: 'opus', taskType: 'chat', createdAt: 0 };
+    const note = { state: 'blocked', starting: true } as const;
+    assert.deepEqual((await checkPending(rec, note, env, { running: false })).reasons, []);
+    assert.deepEqual((await checkPending(rec, note, env)).reasons, ['waiting on you'], 'a running room is asking in its tab');
+    assert.deepEqual((await checkPending(rec, note, env, { running: true })).reasons, ['waiting on you']);
+    assert.deepEqual((await checkPending(rec, { state: 'blocked' }, env, { running: false })).reasons, ['waiting on you'], 'a question Claude asked before it died');
+  });
+});
+
 test('detached HEAD: worktree not on its branch', async () => {
   await withRoom(async ({ rec, env, dir }) => {
     git(dir, 'checkout', '-q', '--detach');

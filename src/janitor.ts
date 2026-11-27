@@ -176,8 +176,9 @@ export async function closeWithMinutes(
     let worktreeRemoved = false;
     if (janitor && rec.kind === 'code') {
       if (dirThere) {
-        // Plain `git worktree remove` deletes ignored files (a new .env too): the local checks run once more right before.
-        const late = (await checkPending(rec, snapshot, env, { local: true })).reasons;
+        // Plain `git worktree remove` deletes ignored files (a new .env too): the local checks run once more right before,
+        // on a room whose tab is closed by now.
+        const late = (await checkPending(rec, snapshot, env, { local: true, running: false })).reasons;
         stillMine();
         const failed = late.length > 0 ? late.join('; ') : await removeWorktree(rec, ownedDir(rec, env), env);
         if (failed === undefined) worktreeRemoved = true;
@@ -347,7 +348,7 @@ async function closeIfClean(s: Seen, t: Tick, why: string, opts: { waitDead: boo
   let ignoredGone: string[] = [];
   if (exists(rec.dir)) {
     ownedDir(rec, env);
-    const pending = await checkPending(rec, activity, env);
+    const pending = await checkPending(rec, activity, env, { running });
     // `/exit` would be typed after a draft the user left in the room's input.
     const unsent = running ? await unsentInput(rec.herdr!.paneId) : undefined;
     const reasons = unsent !== undefined ? [...pending.reasons, unsent] : pending.reasons;

@@ -1,7 +1,7 @@
 import { countsAsActivity } from './events.js';
 import type { PrState } from './pr-state.js';
 import { readEventsTail, type RoomLiveness } from './room-open.js';
-import { reduce, type LiveState, type RoomState } from './room-state.js';
+import { reduce, startingOnly, type LiveState, type RoomState } from './room-state.js';
 import type { RoomRecord } from './rooms.js';
 
 export interface RoomActivity {
@@ -11,6 +11,8 @@ export interface RoomActivity {
   transcript?: string;
   // The reducer's current session: a late line from a session before /clear does not count.
   session?: string;
+  // Blocked only by maître's own starting note: no question Claude asked through its hooks.
+  starting?: true;
 }
 
 // Disk only, so the CLI and the lounge decide alike: the same bounded tail the lounge listing reads.
@@ -31,6 +33,7 @@ export function roomActivity(room: string, env: NodeJS.ProcessEnv = process.env)
     ...(state?.prUrl !== undefined ? { prUrl: state.prUrl } : {}),
     ...(transcript !== undefined ? { transcript } : {}),
     ...(state !== undefined && state.session !== '' ? { session: state.session } : {}),
+    ...(state !== undefined && startingOnly(state) ? { starting: true as const } : {}),
   };
 }
 

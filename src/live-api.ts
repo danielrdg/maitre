@@ -10,7 +10,7 @@ import { shownText } from './pending.js';
 import { patchPr, readPr, readsNotice, type PrState } from './pr-state.js';
 import { queueFile, readQueue, type QueueEntry } from './queue.js';
 import { couchHolds, parked, readRoom, type RoomRecord } from './rooms.js';
-import { modelKey, reduce, type RoomState } from './room-state.js';
+import { isStartingNote, modelKey, reduce, type RoomState } from './room-state.js';
 import { isSessionId } from './wake.js';
 
 const PING_MS = 15_000;
@@ -46,7 +46,7 @@ export class LiveRooms {
   private readonly rooms = new Map<string, RoomState>();
   private readonly listeners = new Set<(room: RoomState) => void>();
   // The newest hook line per room that counts as activity, as the janitor reads it: any after `couch.since`
-  // makes the couch stale.
+  // makes the couch stale. maître's starting note is left out: it says nothing about a Claude being there.
   private readonly lastEvent = new Map<string, number>();
   // What each room was last sent as, so refresh() sends only what changed.
   private readonly shown = new Map<string, { state: string; json: string }>();
@@ -237,7 +237,7 @@ export class LiveRooms {
   }
 
   apply(line: HookLine): RoomState {
-    if (typeof line.ts === 'number' && countsAsActivity(line)) this.lastEvent.set(line.room, Math.max(this.lastEvent.get(line.room) ?? -Infinity, line.ts));
+    if (typeof line.ts === 'number' && countsAsActivity(line) && !isStartingNote(line)) this.lastEvent.set(line.room, Math.max(this.lastEvent.get(line.room) ?? -Infinity, line.ts));
     this.promptSeen(line);
     const prev = this.rooms.get(line.room);
     const next = reduce(prev, line);

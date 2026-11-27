@@ -145,3 +145,16 @@ test('isQuiet: a Notification does not count as activity', () => {
     assert.equal(isQuiet(a, 'idle', 9_000_001, 60_000), true);
   });
 });
+
+test("roomActivity: a block from maître's starting note alone is marked starting; a real question is not", () => {
+  withHome((env) => {
+    const note: Partial<HookLine> = { ts: 30, event: 'MaitreStatus', session: '', status: 'blocked', text: 'Room is still starting — check its tab', options: [], starting: true };
+    write(env, 'r1', [start(10), stop(20), note]);
+    assert.deepEqual(roomActivity('r1', env), { state: 'blocked', lastEventAt: 30, session: 's1', starting: true });
+    write(env, 'r1', [{ ts: 40, event: 'PermissionRequest', tool: 'Bash', input: { command: 'ls' } }]);
+    assert.equal(roomActivity('r1', env).state, 'blocked');
+    assert.equal(roomActivity('r1', env).starting, undefined, 'a question Claude asked through its hooks');
+    write(env, 'r2', [start(10), { ts: 20, event: 'MaitreStatus', status: 'blocked', text: 'Merge now?', options: ['yes'] }]);
+    assert.equal(roomActivity('r2', env).starting, undefined, 'a block the agent declared');
+  });
+});

@@ -747,6 +747,19 @@ for (const [why, text] of [
   });
 }
 
+test("LiveRooms: a starting note newer than closedAt (a wake that failed after writing it) leaves the room parked, as room list shows it", () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-wake-fail-') };
+  writeRoomRecord({ ...REC, closedAt: 75 }, env);
+  const rooms = new LiveRooms(env);
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'Stop', 50));
+  rooms.apply(at('r1', 'SessionEnd', 70));
+  rooms.apply(at('r1', 'MaitreStatus', 100, { session: '', status: 'blocked', text: 'Room is still starting — check its tab', options: [], starting: true }));
+  assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.state]), [['r1', 'parked']]);
+  rooms.apply(at('r1', 'SessionStart', 120));
+  assert.equal(rooms.snapshot()[0]?.state, 'coffee', 'a real event after closedAt is the room alive again');
+});
+
 test('LiveRooms: a merged room dances until dance.until, parked or not, then sits where it was; closing walks it out', () => {
   const env = { MAITRE_HOME: tmp('maitre-live-dance-') };
   let now = 500;

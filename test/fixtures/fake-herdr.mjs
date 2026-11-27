@@ -110,7 +110,8 @@ function tokenAfter(cmd, flag) {
 // $FAKE_HERDR_APPEAR_MS have passed (a slow start), then idle with its SessionStart. 'ended': the room's
 // command ends before Claude starts (a bare shell, and `maitre room run`'s MaitreExit line).
 // 'missing-unseen': "No conversation found" on screen before herdr ever saw Claude. 'no-claude': `maitre room
-// run`'s "claude not found on PATH" line on a bare shell. $FAKE_HERDR_RESUME_SCREEN: what a 'delayed' pane shows.
+// run`'s "claude not found on PATH" line on a bare shell. 'flap2': idle, missed on looks 2 and 4. 'vanish': seen
+// once, then a bare shell with no text and no exit line. $FAKE_HERDR_RESUME_SCREEN: what a 'delayed' pane shows.
 function resume(p, id, wenv) {
   const mode = process.env.FAKE_HERDR_RESUME ?? 'ok';
   p.resume = id;
@@ -144,6 +145,13 @@ function resume(p, id, wenv) {
   } else if (mode === 'flap') {
     p.agent = 'idle';
     p.missAfter = 1;
+  } else if (mode === 'flap2') {
+    p.agent = 'idle';
+    p.missAt = [2, 4];
+    p.looks = 0;
+  } else if (mode === 'vanish') {
+    p.agent = 'idle';
+    p.exitAfter = 1;
   } else if (mode === 'trust') {
     p.agent = 'blocked';
     p.trust = true;
@@ -333,6 +341,11 @@ function stateful(file) {
         p.agent = 'idle';
         sessionStart(p, st.workspaces[p.ws].env ?? {});
         save();
+      }
+      if (p && p.missAt !== undefined) {
+        p.looks += 1;
+        save();
+        if (p.missAt.includes(p.looks)) return fail('agent_not_found');
       }
       // A Claude herdr misses for one look after `missAfter` looks.
       if (p && p.missAfter !== undefined) {

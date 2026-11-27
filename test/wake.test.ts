@@ -439,6 +439,27 @@ test('one look where herdr misses the resuming Claude is not an exit: the resume
   assert.equal(runs().filter((r) => r.includes("'--brief-file'")).length, 1, 'no fresh start');
 });
 
+test('a Claude seen and then gone for two looks, with no text and no exit line, has exited: the resume falls back', async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'vanish';
+  const w = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 20_000 });
+  assert.equal(w.resumed, false);
+  assert.match(w.lines[0], /could not be resumed \(Claude exited\)/);
+});
+
+test('misses that a sighting separates never add up: the resume goes on', async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'flap2';
+  let late: NodeJS.Timeout | undefined;
+  // Late enough for both misses to have been looked at.
+  const w = await wakeRoom('a', process.env, { ...QUICK, afterTab: () => void (late = setTimeout(() => event('a', 'SessionStart'), 2_500)) });
+  clearTimeout(late);
+  assert.deepEqual(w, { resumed: true, lines: ['woke a: resumed its session'], needsYou: false });
+  assert.ok(agentGets() >= 5, `herdr was asked ${agentGets()} times`);
+});
+
 test('a resume whose Claude stays in its tab but never confirms is kept and left to the user: no fresh start', async () => {
   await open('a');
   parkByHand('a');

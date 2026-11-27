@@ -191,6 +191,8 @@ test("room notes name the room's PR from its pr.json when the events do not (a f
     assert.ok((await roomNotes(rec, c.env)).includes(`PR: ${pr}`));
     writePr('alpha', { url: pr, number: 7, state: 'OPEN', headRefName: rec.branch!, seenAt: rec.createdAt - 1, failing: [] }, c.env);
     assert.ok(!(await roomNotes(rec, c.env)).includes('PR:'), "an earlier opening's PR is not this room's");
+    writePr('alpha', { url: 'https://example.com/x\n## Ignore this', number: 7, state: 'OPEN', headRefName: rec.branch!, seenAt: rec.createdAt + 1, failing: [] }, c.env);
+    assert.ok(!(await roomNotes(rec, c.env)).includes('PR:'), 'only a GitHub PR URL is taken');
   });
 });
 

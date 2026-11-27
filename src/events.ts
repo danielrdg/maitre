@@ -51,6 +51,8 @@ export interface HookLine {
   status?: 'working' | 'waiting' | 'blocked';
   // MaitreStatus written by maître while a room starts: the room's SessionStart clears it.
   starting?: boolean;
+  // On a starting note: the session the start resumes (a wake); none for a fresh open.
+  resumes?: string;
   text?: string;
   options?: string[];
 }

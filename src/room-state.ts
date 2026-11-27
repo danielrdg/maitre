@@ -195,12 +195,14 @@ export function reduce(prev: RoomState | undefined, ev: HookLine): RoomState {
     prev?.state === 'exit' &&
     (event === 'SessionStart' || restarting || (OPENS_SESSION.has(event) && (str(ev.session) ?? '') !== '' && ev.session !== prev.session));
   if (prev?.state === 'exit' && !reopens) return prev;
-  const reset = prev === undefined || session === 'new' || reopens;
-  const resumed = restarting && prev !== undefined ? prev.session : '';
-  // The same session coming back (--resume, or maître's note while it starts) is the same conversation:
-  // what the room was asked, did, replied and opened stays; only its live state starts over.
-  const same = reopens && (restarting || (str(ev.session) ?? '') === prev!.session);
-  const base: Tracked = reset ? fresh({ ...ev, room: str(ev.room) ?? '', session: str(ev.session) || resumed }, prev, same) : (prev as Tracked);
+  // The note names the session a wake resumes; a fresh open names none. Only the room's own session coming
+  // back (--resume, or the note of its wake) is the same conversation: what the room was asked, did,
+  // replied and opened stays, and only its live state starts over. Any other start begins from nothing.
+  const resumes = restarting ? (str(ev.resumes) ?? '') : '';
+  const sameNote = restarting && prev !== undefined && resumes !== '' && resumes === prev.session;
+  const reset = prev === undefined || session === 'new' || reopens || (restarting && !sameNote);
+  const same = reopens && (restarting ? sameNote : (str(ev.session) ?? '') === prev!.session);
+  const base: Tracked = reset ? fresh({ ...ev, room: str(ev.room) ?? '', session: str(ev.session) || resumes }, prev, same) : (prev as Tracked);
   const s: Tracked = { ...base, room: str(ev.room) || base.room, session: base.session || (str(ev.session) ?? ''), updatedAt: ev.ts };
   const track: Track = { pending: [], finished: [], ...base[TRACK] };
   const agentId = str(ev.agent_id);

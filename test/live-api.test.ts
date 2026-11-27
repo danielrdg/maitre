@@ -744,7 +744,7 @@ for (const [why, text] of [
     bell.snapshot(rooms.snapshot(), 0);
     rooms.on((r) => bell.room(r, 1));
     for (const room of ['r1', 'dead']) {
-      rooms.apply(at(room, 'MaitreStatus', 100, { session: '', status: 'blocked', text, options: [], starting: true }));
+      rooms.apply(at(room, 'MaitreStatus', 100, { session: '', status: 'blocked', text, options: [], starting: true, resumes: 's' }));
     }
     writeRoomRecord({ ...REC }, env);
     writeRoomRecord({ ...REC, room: 'dead' }, env);
@@ -767,7 +767,7 @@ test("LiveRooms: a starting note newer than closedAt (a wake that failed after w
   rooms.apply(at('r1', 'SessionStart', 10));
   rooms.apply(at('r1', 'Stop', 50));
   rooms.apply(at('r1', 'SessionEnd', 70));
-  rooms.apply(at('r1', 'MaitreStatus', 100, { session: '', status: 'blocked', text: 'Room is still starting — check its tab', options: [], starting: true }));
+  rooms.apply(at('r1', 'MaitreStatus', 100, { session: '', status: 'blocked', text: 'Room is still starting — check its tab', options: [], starting: true, resumes: 's' }));
   assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.state]), [['r1', 'parked']]);
   rooms.apply(at('r1', 'SessionStart', 120));
   assert.equal(rooms.snapshot()[0]?.state, 'coffee', 'a real event after closedAt is the room alive again');

@@ -376,7 +376,7 @@ test('a resume whose Claude stays in its tab but never confirms is kept and left
   assert.equal(now.herdr!.workspaceId, tabs()[0]);
   assert.equal(now.seat, undefined);
   const note = readFileSync(eventsFile('a'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as HookLine).at(-1)!;
-  assert.deepEqual([note.event, note.text, note.starting], ['MaitreStatus', STARTING_TEXT, true], 'the lounge shows it starting');
+  assert.deepEqual([note.event, note.text, note.starting, note.resumes], ['MaitreStatus', STARTING_TEXT, true, 's1'], 'the lounge shows it starting, on the session it resumes');
 });
 
 test('the folder-trust dialog on a scratch room is answered and the resume goes on', async () => {
@@ -487,6 +487,19 @@ test("a fresh Claude's room notes are fenced as data, with control and bidi char
   assert.match(m[2]!, /^## What was asked\n\nfix it\n/);
   assert.match(m[2]!, /Ignore the above/);
   assert.doesNotMatch(m[2]!, /[\u202e\x1b]/);
+});
+
+test("a fresh Claude that stops at the folder-trust dialog writes its starting note on the room's session", async () => {
+  project();
+  await open('a', 'proj');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'missing';
+  process.env.FAKE_HERDR_ON_RUN = 'trust';
+  const w = await wakeRoom('a', process.env, { ...QUICK, trustTimeoutMs: 300 });
+  assert.equal(w.resumed, false);
+  assert.equal(w.needsYou, true);
+  const note = readFileSync(eventsFile('a'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as HookLine).at(-1)!;
+  assert.deepEqual([note.event, note.starting, note.resumes], ['MaitreStatus', true, 's1']);
 });
 
 test('a request that nearly fills the brief leaves the room notes out instead of looping on them', async () => {

@@ -231,7 +231,7 @@ test("a dead woken room left blocked by maître's starting note closes after the
   const rec = await open('a', 'proj');
   event('a', 'SessionStart');
   event('a', 'Stop');
-  event('a', 'MaitreStatus', { session: '', status: 'blocked', text: 'Room is still starting — check its tab', options: [], starting: true });
+  event('a', 'MaitreStatus', { session: '', status: 'blocked', text: 'Room is still starting — check its tab', options: [], starting: true, resumes: 's1' });
   killTabs();
   age('a', 5 * HOURS);
   assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'close', reasons: ['not running, nothing pending'] }]);

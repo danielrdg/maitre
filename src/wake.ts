@@ -302,8 +302,8 @@ export async function wakeRoom(name: string, env: NodeJS.ProcessEnv = process.en
       await afterTab?.();
       const first = await verdict(ws.paneId, rec.dir, { file, offset }, session, t, env);
       const v: Settled = first.kind === 'resumed' ? await ready(ws.paneId, t) : first;
-      if (v.kind === 'needs-you') noteStarting(room, v.trust ? TRUST_BLOCKED_TEXT : STARTING_TEXT, env);
-      if (v.kind === 'starting') noteStarting(room, STARTING_TEXT, env);
+      if (v.kind === 'needs-you') noteStarting(room, v.trust ? TRUST_BLOCKED_TEXT : STARTING_TEXT, env, session);
+      if (v.kind === 'starting') noteStarting(room, STARTING_TEXT, env, session);
       if (v.kind !== 'failed') {
         record(rec, ws, env);
         kept = true;
@@ -325,6 +325,7 @@ export async function wakeRoom(name: string, env: NodeJS.ProcessEnv = process.en
       const trust = await startInTab(room, rec.dir, fresh.paneId, roomPaneCommand(room, rec.model, { briefPath }), env, {
         trustTimeoutMs: t.trustTimeoutMs,
         pollMs: deps.pollMs,
+        resumes: session,
       });
       record(rec, fresh, env);
       kept = true;

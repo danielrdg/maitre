@@ -212,7 +212,7 @@ export async function startInTab(
   paneId: string,
   command: string,
   env: NodeJS.ProcessEnv,
-  timing: { trustTimeoutMs?: number; pollMs?: number },
+  timing: { trustTimeoutMs?: number; pollMs?: number; resumes?: string },
 ): Promise<TrustResult> {
   const events = roomEventsFile(room, env);
   const offset = fileSize(events);
@@ -224,13 +224,14 @@ export async function startInTab(
     started: () => sessionStarted(events, offset),
   });
   if (trust === 'no-agent') throw new Error(`room ${room} did not start: no Claude appeared in its tab (is \`claude\` on PATH?)`);
-  if (trust === 'unresolved' || trust === 'needs-you') noteStarting(room, trust === 'needs-you' ? TRUST_BLOCKED_TEXT : STARTING_TEXT, env);
+  if (trust === 'unresolved' || trust === 'needs-you') noteStarting(room, trust === 'needs-you' ? TRUST_BLOCKED_TEXT : STARTING_TEXT, env, timing.resumes);
   return trust;
 }
 
-// Shown in the lounge until the room's SessionStart clears it.
-export function noteStarting(room: string, text: string, env: NodeJS.ProcessEnv): void {
-  appendRoomLine(room, 'MaitreStatus', { status: 'blocked', text, options: [], starting: true }, env);
+// Shown in the lounge until the room's SessionStart clears it. `resumes`: the session of the room a wake
+// starts again (its own --resume, or a fresh Claude in its place); a fresh open has none.
+export function noteStarting(room: string, text: string, env: NodeJS.ProcessEnv, resumes?: string): void {
+  appendRoomLine(room, 'MaitreStatus', { status: 'blocked', text, options: [], starting: true, ...(resumes !== undefined ? { resumes } : {}) }, env);
 }
 
 export const roomEventsFile = (room: string, env: NodeJS.ProcessEnv = process.env): string => join(roomDir(room, env), 'events.jsonl');

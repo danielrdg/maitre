@@ -773,6 +773,17 @@ test("LiveRooms: a starting note newer than closedAt (a wake that failed after w
   assert.equal(rooms.snapshot()[0]?.state, 'coffee', 'a real event after closedAt is the room alive again');
 });
 
+test("LiveRooms: a room whose session does not know its PR (a fresh Claude) shows the PR of its own pr.json", () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-prlink-') };
+  writeRoomRecord({ ...REC }, env);
+  writeRoomRecord({ ...REC, room: 'old' }, env);
+  writePr('r1', openPr(), env);
+  writePr('old', openPr({ seenAt: 0 }), env);
+  const rooms = new LiveRooms(env);
+  for (const room of ['r1', 'old']) rooms.apply(at(room, 'SessionStart', 10, { session: 's2' }));
+  assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.prUrl]), [['old', undefined], ['r1', PR]]);
+});
+
 test('LiveRooms: a merged room dances until dance.until, parked or not, then sits where it was; closing walks it out', () => {
   const env = { MAITRE_HOME: tmp('maitre-live-dance-') };
   let now = 500;

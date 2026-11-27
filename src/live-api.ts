@@ -179,6 +179,7 @@ export class LiveRooms {
     if (isParked) out.state = 'parked';
     if (out.state === 'exit') return out;
     const pr = this.prOf(rec);
+    if (out.prUrl === undefined && pr !== undefined && PR_LINK.test(pr.url)) out.prUrl = pr.url;
     const n = pr?.notice;
     if (n !== undefined && (this.lastPrompt.get(state.room) ?? -Infinity) <= n.since) {
       out.notice = { kind: n.kind, text: shownText(n.text, NOTICE_MAX), ...(PR_LINK.test(n.url) ? { url: n.url } : {}) };

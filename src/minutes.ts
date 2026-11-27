@@ -9,6 +9,7 @@ import { shownText } from './pending.js';
 import { readIndex } from './projects.js';
 import { MAX_BRIEF_BYTES, readEventsTail } from './room-open.js';
 import { roomSlug } from './paths.js';
+import { roomPr } from './pr-state.js';
 import { reduce, type RoomState } from './room-state.js';
 import type { RoomRecord } from './rooms.js';
 
@@ -149,6 +150,8 @@ function reduced(room: string, env: NodeJS.ProcessEnv): RoomState | undefined {
   return state;
 }
 
+const PR_LINK = /^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/pull\/\d+$/;
+
 const bullets = (items: string[]) => (items.length === 0 ? ['- none'] : items.map((i) => `- ${i.replace(/\s+/g, ' ').trim()}`));
 
 async function fallbackBody(rec: RoomRecord, env: NodeJS.ProcessEnv): Promise<string> {
@@ -171,7 +174,10 @@ export async function roomNotes(rec: RoomRecord, env: NodeJS.ProcessEnv = proces
   if (state?.reply !== undefined && state.reply !== '') lines.push('', 'Last reply:', '', ...state.reply.split('\n').map((l) => `> ${l}`));
   const links: string[] = [];
   if (rec.branch !== undefined) links.push(`branch: \`${rec.branch}\``);
-  if (state?.prUrl !== undefined) links.push(`PR: ${state.prUrl}`);
+  // A fresh Claude's session never printed the room's PR: its own pr.json still names it.
+  const own = rec.kind === 'code' ? roomPr(rec, env)?.url : undefined;
+  const pr = state?.prUrl ?? (own !== undefined && PR_LINK.test(own) ? own : undefined);
+  if (pr !== undefined) links.push(`PR: ${pr}`);
   links.push(...commits.map((c) => `commit ${c}`));
   lines.push('', '## Links', '', ...bullets(links));
   return lines.join('\n');

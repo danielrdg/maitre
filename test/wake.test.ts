@@ -320,14 +320,44 @@ test('the resume picker is caught at once, without waiting for the deadline, and
   assert.equal(tabs().length, 1);
 });
 
-test('a resume that never starts fails at the deadline and falls back to a fresh claude', async () => {
+test('a resume with no Claude in its tab at the deadline fails there and falls back to a fresh claude', async () => {
   await open('a');
   parkByHand('a');
-  process.env.FAKE_HERDR_RESUME = 'hang';
+  process.env.FAKE_HERDR_RESUME = 'shell';
   const w = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 300 });
   assert.equal(w.resumed, false);
   assert.match(w.lines[0], /could not be resumed \(it did not start within 0\.3 s\)/);
   assert.equal(tabs().length, 1);
+});
+
+test('a slow resume (its SessionStart after the deadline, a Claude in its tab all along) is waited for: resumed, one tab, no fresh start', async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'hang';
+  let late: NodeJS.Timeout | undefined;
+  const t0 = Date.now();
+  const w = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 300, slowStartMs: 60_000, afterTab: () => void (late = setTimeout(() => event('a', 'SessionStart'), 1_000)) });
+  clearTimeout(late);
+  assert.deepEqual(w, { resumed: true, lines: ['woke a: resumed its session'], needsYou: false });
+  assert.ok(Date.now() - t0 >= 1_000, 'past the deadline');
+  assert.equal(tabs().length, 1);
+  assert.equal(runs().filter((r) => r.includes("'--brief-file'")).length, 1, 'only the first open had a brief');
+  assert.equal(readRoom('a')!.seat, undefined);
+});
+
+test('a resume whose Claude stays in its tab but never confirms is kept and left to the user: no fresh start', async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'hang';
+  const w = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 200, slowStartMs: 700 });
+  assert.deepEqual(w, { resumed: true, lines: ['woke a: its session is still starting — check its tab'], needsYou: true });
+  assert.equal(tabs().length, 1, 'the tab is kept');
+  assert.equal(runs().filter((r) => r.includes("'--brief-file'")).length, 1, 'no fresh start');
+  const now = readRoom('a')!;
+  assert.equal(now.herdr!.workspaceId, tabs()[0]);
+  assert.equal(now.seat, undefined);
+  const note = readFileSync(eventsFile('a'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as HookLine).at(-1)!;
+  assert.deepEqual([note.event, note.text, note.starting], ['MaitreStatus', STARTING_TEXT, true], 'the lounge shows it starting');
 });
 
 test('the folder-trust dialog on a scratch room is answered and the resume goes on', async () => {
@@ -564,10 +594,10 @@ test('a failed resume whose tab cannot be closed starts no fresh claude: the wak
   await open('a');
   const parked = parkByHand('a');
   const brief = readFileSync(join(roomDir('a'), 'brief.md'), 'utf8');
-  process.env.FAKE_HERDR_RESUME = 'hang';
+  process.env.FAKE_HERDR_RESUME = 'picker';
   process.env.FAKE_HERDR_FAIL_workspace_close = 'boom';
-  await assert.rejects(wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 300 }), /a: could not close its new tab \(w\d+\) — close it in herdr; the room stays parked/);
-  assert.equal(runs().length, 2, 'no fresh start next to the hung resume');
+  await assert.rejects(wakeRoom('a', process.env, QUICK), /a: could not close its new tab \(w\d+\) — close it in herdr; the room stays parked/);
+  assert.equal(runs().length, 2, 'no fresh start next to the failed resume');
   assert.equal(runs().filter((r) => r.includes("'--brief-file'")).length, 1, 'only the first open had a brief');
   assert.deepEqual(readRoom('a'), parked);
   assert.equal(readFileSync(join(roomDir('a'), 'brief.md'), 'utf8'), brief);

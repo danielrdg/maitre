@@ -78,7 +78,7 @@ function drawFurnitureFront(kind, t, world) {
 export function drawSprite(spr, cx, fy, flip, bob, dim, shadow = true) {
   const x0 = Math.round(cx - 9), y0 = Math.round(fy - 31 + (bob || 0));
   if (shadow) { R(cx - 6, fy, 12, 1, 'rgba(0,0,0,.35)'); R(cx - 4, fy + 1, 8, 1, 'rgba(0,0,0,.22)'); }
-  if (dim) g.globalAlpha = .82;
+  if (dim) g.globalAlpha = typeof dim === 'number' ? dim : .82;
   if (flip) { g.save(); g.translate(x0 + 18, y0); g.scale(-1, 1); g.drawImage(spr, 0, 0); g.restore(); }
   else g.drawImage(spr, x0, y0);
   g.globalAlpha = 1;
@@ -89,7 +89,10 @@ export const anc = (o, a, flip) => [flip ? o[0] + 17 - a[0] : o[0] + a[0], o[1] 
 function drawBubble(o, kind) {
   const bx = o[0] + 5, by = o[1] - 12;
   R(bx, by, 9, 10, '#160c09'); R(bx + 3, by + 10, 2, 1, '#160c09');
-  if (kind === 'alert') {
+  if (kind === 'notice') {
+    R(bx + 1, by + 1, 7, 8, '#ff9a3c'); R(bx + 1, by + 1, 7, 1, '#ffc27a');
+    R(bx + 2, by + 5, 1, 1, '#ffffff'); R(bx + 4, by + 5, 1, 1, '#ffffff'); R(bx + 6, by + 5, 1, 1, '#ffffff');
+  } else if (kind === 'alert') {
     R(bx + 1, by + 1, 7, 8, '#ffffff'); R(bx + 4, by + 2, 1, 4, '#d61f1f'); R(bx + 4, by + 7, 1, 1, '#d61f1f');
   } else {
     R(bx + 1, by + 1, 7, 8, '#3fbf7a');
@@ -97,6 +100,19 @@ function drawBubble(o, kind) {
     R(bx + 5, by + 3, 1, 2, '#ffffff'); R(bx + 6, by + 2, 1, 2, '#ffffff');
   }
 }
+
+// The balloon over an agent: a blocked one blinks its alert, a PR notice is orange (over a ready room's
+// check too: a failed CI matters more), a ready one shows its check. Walkers show none.
+export function badgeFor(a, t) {
+  if (a.walking) return null;
+  if (a.state === 'blocked') return (t % .9) < .6 ? 'alert' : null;
+  if (a.info?.notice) return 'notice';
+  return a.state === 'ready' ? 'check' : null;
+}
+
+// Queued rooms are dimmed a little; a parked room, whose Claude stopped, more.
+export const isDim = a => a.state === 'queue' || a.info?.parked === true;
+const dimAlpha = a => (a.info?.parked === true ? .55 : .82);
 
 const glowAt = (x, y, r, c) => {
   const gr = g.createRadialGradient(x, y, 0, x, y, r); gr.addColorStop(0, c); gr.addColorStop(1, 'rgba(0,0,0,0)');
@@ -120,7 +136,7 @@ export function renderFrame(ctx, bg, world, t) {
   const items = [];
   for (const a of agents) { const ps2 = poseFor(a, t, cheerUntil); items.push({ y: a.y, draw() {
     const spr = sprite(a.look, ps2.pose);
-    const o = drawSprite(spr, a.x, a.y, ps2.flip, ps2.bob, a.state === 'queue', !(a.state === 'ready' && !a.walking));
+    const o = drawSprite(spr, a.x, a.y, ps2.flip, ps2.bob, isDim(a) && dimAlpha(a), !(a.state === 'ready' && !a.walking));
     hitboxes.push({ kind: 'agent', ref: a, x: o[0], y: o[1], w: 18, h: 34 });
     if (ps2.ember) { const [ex, ey] = anc(o, ps2.ember, ps2.flip); R(ex, ey, 1, 1, (t * 3 + a.off) % 1 < .5 ? '#ff7a1a' : '#ffd04a');
       if (frame % (a.state === 'boss' ? 16 : 10) === 0) emitSmoke(ps, ex + .5, ey, 1, false); }
@@ -128,8 +144,8 @@ export function renderFrame(ctx, bg, world, t) {
     if (a.state === 'smoke' && ps2.pose.mouth === 'o' && frame % 2 === 0) emitSmoke(ps, o[0] + 9, o[1] + 11, 3, true);
     if (a.state === 'boss' && frame % 170 === 85) ps.parts.push({ k: 'ring', x: o[0] + 12, y: o[1] + 9, vx: .06, vy: -.15, life: 0, max: 130 });
     if (a.state === 'sleep' && frame % 70 === 0) ps.parts.push({ k: 'zz', x: o[0] + 13, y: o[1] + 4, life: 0, max: 80 });
-    if (a.state === 'blocked' && !a.walking && (t % .9) < .6) drawBubble(o, 'alert');
-    if (a.state === 'ready' && !a.walking) drawBubble(o, 'check');
+    const badge = badgeFor(a, t);
+    if (badge) drawBubble(o, badge);
   } }); }
   for (const n of npcs) { const ps2 = npcPose(n, t, ringUntil, beat); items.push({ y: n.y, draw() {
     const o = drawSprite(sprite(n.look, ps2.pose), n.x, n.y, ps2.flip, ps2.bob);

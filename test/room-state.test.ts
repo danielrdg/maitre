@@ -772,6 +772,32 @@ test('a starting block from maître clears on the room\'s SessionStart; a declar
   assert.equal(reduce(replaced, ev('SessionStart', {})).state, 'blocked', 'a later declared block is not a starting one');
 });
 
+test("maître's starting block reopens an exited room on the same session (a wake that stops before SessionStart)", () => {
+  const sid = { session: 's-0001' };
+  const gone = fold(FIXTURE);
+  assert.equal(gone.state, 'exit');
+  const starting = reduce(gone, ev('MaitreStatus', { session: '', status: 'blocked', text: "Trust this folder? Answer in the room's tab", options: [], starting: true }));
+  assert.equal(starting.state, 'blocked');
+  assert.equal(starting.block?.detail, "Trust this folder? Answer in the room's tab");
+  assert.equal(starting.session, 's-0001', "the session being resumed, not the line's blank one");
+  assert.equal(starting.since, starting.updatedAt);
+  assert.deepEqual(starting.steps, []);
+  assert.equal(starting.task, '');
+  assert.equal(starting.prUrl, undefined);
+  const up = reduce(starting, ev('SessionStart', sid));
+  assert.equal(up.state, 'coffee');
+  assert.equal(up.block, undefined);
+  assert.equal(up.session, 's-0001');
+  const died = reduce(starting, ev('MaitreExit', { session: '' }));
+  assert.equal(died.state, 'exit');
+  assert.equal(died.session, 's-0001', 'a Claude that dies at the question leaves a session to wake');
+  assert.equal(reduce(gone, ev('MaitreStatus', { session: '', status: 'blocked', text: 'x', options: [] })), gone, 'only the starting block reopens');
+  assert.equal(reduce(gone, ev('MaitreStatus', { session: '', status: 'working', text: 'x', starting: true })), gone);
+  const fresh = reduce(starting, ev('SessionStart', { session: 's-0002' }));
+  assert.equal(fresh.state, 'coffee', "a fresh Claude's own session takes over");
+  assert.equal(fresh.session, 's-0002');
+});
+
 test('Stop keeps the last reply; the next prompt clears it', () => {
   const s1 = reduce(started(), ev('Stop', { last_message: 'São 14:52 de quinta.' }));
   assert.equal(s1.reply, 'São 14:52 de quinta.');

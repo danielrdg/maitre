@@ -11,7 +11,7 @@ import { hudModel, renderHud, renderHelp } from './hud.js';
 import { STEPS } from './demo.js';
 import { STEP, makeRngs, createWorld, stepWorld, ringNow, demoActions } from './sim.js';
 import { createLiveCast, createBell, titleFor, LiveSource } from './live.js';
-import { receptionSession, openTerminal, loungePlacement } from './reception.js';
+import { receptionSession, openTerminal, wakeRoom, loungePlacement } from './reception.js';
 
 // ?capture=1 is for README art: no overlays, no sound, and a clock that counts
 // simulation steps instead of wall time. A script that sets window.__maitreManualClock
@@ -222,7 +222,7 @@ export function boot(doc = document) {
     tip.style.display = 'block';
     tip.textContent = h.kind === 'lever' ? tr('tip.lever')
       : h.kind === 'npc' ? tr(h.ref.kind === 'sax' ? 'tip.sax' : `npc.${h.ref.kind}`)
-      : tr('tip.agent', { name: h.ref.label, state: tr(`state.${h.ref.state}`) });
+      : tr('tip.agent', { name: h.ref.label, state: tr(h.ref.info?.parked ? 'state.parked' : `state.${h.ref.state}`) });
     tip.style.left = pct(x, W); tip.style.top = pct(y - 6, H);
   });
   cv.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
@@ -242,7 +242,18 @@ export function boot(doc = document) {
   let panelFor = null;
   // Kept here, not in the panel DOM: a room event re-renders the panel and re-enables its button.
   let termError = null, termBusy = false;
-  function closePanel() { panel.style.display = 'none'; panelFor = null; termError = null; }
+  // A wake takes up to a minute: who is being woken, and the last answer, outlive a re-render too.
+  let waking = null, woke = null;
+  function closePanel() { panel.style.display = 'none'; panelFor = null; termError = null; woke = null; }
+  async function wakeFor(a) {
+    if (waking) return null;
+    waking = a;
+    let r;
+    try { r = await wakeRoom(a.id, undefined, lang); } finally { waking = null; }
+    woke = { agent: a, result: r };
+    if (panelFor === a) openPanel(a);
+    return r;
+  }
   async function terminalFor(a) {
     if (termBusy) return termError?.agent === a ? termError.message : null;
     termBusy = true;
@@ -256,7 +267,10 @@ export function boot(doc = document) {
     panelFor = a;
     renderPanel(panel, panelModel(a, lang), ({ text }) => answer(a, text), {
       lang, portrait: portrait(a, makeCanvas), onClose: closePanel,
-      ...(live ? { onTerminal: () => terminalFor(a), terminalError: termError?.agent === a ? termError.message : null } : {}),
+      ...(live ? {
+        onTerminal: () => terminalFor(a), terminalError: termError?.agent === a ? termError.message : null,
+        onWake: () => wakeFor(a), waking: waking === a, wakeResult: woke?.agent === a ? woke.result : null,
+      } : {}),
     });
     panel.style.display = 'block';
   }

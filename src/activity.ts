@@ -1,5 +1,6 @@
 import { countsAsActivity } from './events.js';
-import { readEventsTail } from './room-open.js';
+import type { PrState } from './pr-state.js';
+import { readEventsTail, type RoomLiveness } from './room-open.js';
 import { reduce, type LiveState, type RoomState } from './room-state.js';
 import type { RoomRecord } from './rooms.js';
 
@@ -8,6 +9,8 @@ export interface RoomActivity {
   lastEventAt?: number;
   prUrl?: string;
   transcript?: string;
+  // The reducer's current session: a late line from a session before /clear does not count.
+  session?: string;
 }
 
 // Disk only, so the CLI and the lounge decide alike: the same bounded tail the lounge listing reads.
@@ -27,6 +30,7 @@ export function roomActivity(room: string, env: NodeJS.ProcessEnv = process.env)
     ...(lastEventAt !== undefined ? { lastEventAt } : {}),
     ...(state?.prUrl !== undefined ? { prUrl: state.prUrl } : {}),
     ...(transcript !== undefined ? { transcript } : {}),
+    ...(state !== undefined && state.session !== '' ? { session: state.session } : {}),
   };
 }
 
@@ -34,7 +38,16 @@ export function isIdle(a: RoomActivity, now: number, idleMs: number): boolean {
   return (a.state === 'ready' || a.state === 'coffee') && a.lastEventAt !== undefined && now - a.lastEventAt > idleMs;
 }
 
+// Quiet: parked-worthy silence (ready, coffee, whisky or couch with herdr idle and no countable event for `ms`).
+export function isQuiet(a: RoomActivity, herdr: RoomLiveness, now: number, ms: number): boolean {
+  const resting = a.state === 'ready' || a.state === 'coffee' || a.state === 'whisky' || a.state === 'couch';
+  return resting && herdr === 'idle' && a.lastEventAt !== undefined && now - a.lastEventAt > ms;
+}
+
 // `running` is the caller's liveness probe; a present couch counts as couched (staleness is the janitor's call).
-export function isActive(rec: RoomRecord, a: RoomActivity, running: boolean): boolean {
-  return rec.closedBy === undefined && running && rec.couch === undefined && a.prUrl === undefined && a.state !== 'whisky';
+// With `pr` (pr.json) the PR decides; without it, the reducer's prUrl/whisky view does.
+export function isActive(rec: RoomRecord, a: RoomActivity, running: boolean, pr?: Pick<PrState, 'state'>): boolean {
+  if (rec.closedBy !== undefined || !running || rec.couch !== undefined || rec.seat !== undefined) return false;
+  if (pr !== undefined) return pr.state !== 'OPEN';
+  return a.prUrl === undefined && a.state !== 'whisky';
 }

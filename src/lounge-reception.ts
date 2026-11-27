@@ -10,6 +10,9 @@ import { isRecord, probeRoom, roomLabel } from './room-open.js';
 import { readRoom, type RoomRecord } from './rooms.js';
 import { dispatchRouteDetailed, isRequestId, readRequests, routeRequests, storedRequestIds } from './router.js';
 import { storeRequest } from './requests.js';
+import { wakeRoom } from './wake.js';
+
+export type WakeFn = (room: string, env: NodeJS.ProcessEnv) => Promise<{ resumed: boolean; lines: string[]; needsYou: boolean }>;
 
 export type ReceptionReply =
   | { kind: 'question'; id: string; text: string }
@@ -322,16 +325,30 @@ async function terminal(res: ServerResponse, room: string, env: NodeJS.ProcessEn
   send(res, 200, { kind: 'ok' });
 }
 
-const TERMINAL_PATH = /^\/api\/rooms\/(.+)\/terminal$/;
+// The panel's Wake button: a parked room (or one whose Claude is gone) comes back with its session.
+async function wake(res: ServerResponse, room: string, env: NodeJS.ProcessEnv, wakeFn: WakeFn): Promise<void> {
+  if (registered(room, env) === undefined) return fail(res, 404, `no room named ${room}`);
+  let woken: Awaited<ReturnType<WakeFn>>;
+  try {
+    woken = await wakeFn(room, env);
+  } catch (err) {
+    return fail(res, 409, (err as Error).message);
+  }
+  send(res, 200, { kind: 'woken', room, lines: woken.lines, needsYou: woken.needsYou });
+}
+
+const ROOM_PATH = /^\/api\/rooms\/(.+)\/(terminal|wake)$/;
 
 export function receptionRoutes(opts: {
   queue: ReceptionQueue;
   env: NodeJS.ProcessEnv;
   spawnTerminal?: SpawnTerminal;
   deps?: ReceptionDeps;
+  wake?: WakeFn;
 }): (req: IncomingMessage, res: ServerResponse, url: URL, auth?: LoungeAuth) => boolean {
   const { queue, env } = opts;
   const spawnTerminal = opts.spawnTerminal ?? spawnDetached;
+  const wakeFn: WakeFn = opts.wake ?? ((room, e) => wakeRoom(room, e));
   const deps = opts.deps ?? {};
   // The server answers a throw with a text 404; these handlers answer every error themselves.
   const guard = (res: ServerResponse, work: Promise<void>) => {
@@ -347,7 +364,7 @@ export function receptionRoutes(opts: {
       guard(res, reception(req, res, queue, env, deps));
       return true;
     }
-    const m = TERMINAL_PATH.exec(url.pathname);
+    const m = ROOM_PATH.exec(url.pathname);
     if (m !== null) {
       if (req.method !== 'POST') return notAllowed(req, res);
       req.resume();
@@ -362,7 +379,7 @@ export function receptionRoutes(opts: {
         fail(res, 400, `invalid room name ${JSON.stringify(room)}`);
         return true;
       }
-      guard(res, terminal(res, room, env, spawnTerminal));
+      guard(res, m[2] === 'wake' ? wake(res, room, env, wakeFn) : terminal(res, room, env, spawnTerminal));
       return true;
     }
     return false;

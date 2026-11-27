@@ -338,3 +338,14 @@ test('room run with an unreadable brief file prints one line, exits 1 and never 
     sb.cleanup();
   }
 });
+
+test('buildRoomCommand passes --resume through after the model, with no brief to submit as a prompt', () => {
+  const home = tmp('build');
+  try {
+    const args = buildRoomCommand('x', ['--model', 'sonnet', '--resume', 's1'], { MAITRE_HOME: home }).args;
+    assert.deepEqual(args.slice(-4), ['--model', 'sonnet', '--resume', 's1']);
+    assert.deepEqual(args.slice(0, -4), buildRoomCommand('x', ['--model', 'sonnet'], { MAITRE_HOME: home }, 'brief').args.slice(0, -3));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

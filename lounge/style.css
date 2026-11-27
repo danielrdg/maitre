@@ -113,6 +113,11 @@ body { margin: 0; overflow: hidden; display: grid; place-items: center; backgrou
 @keyframes say { 0% { transform: translate(-50%, -100%) scale(.6); opacity: 0; } 100% { transform: translate(-50%, -100%) scale(1); opacity: 1; } }
 .panel .term .opt { text-align: center; }
 .panel .termerr { margin-top: calc(6 * var(--px)); color: #ff9a8a; font-size: max(10px, calc(12 * var(--px))); overflow-wrap: anywhere; }
+.panel .woke { margin-top: calc(6 * var(--px)); color: #c9f5dc; font-size: max(10px, calc(12 * var(--px))); overflow-wrap: anywhere; }
+/* A PR notice: the orange of its balloon over the agent. */
+.panel .prnote { background: #3a1f0a; border: 2px solid #ff9a3c; padding: calc(6 * var(--px)) calc(9 * var(--px)); overflow-wrap: anywhere; }
+.panel .prnote b { color: #ffc27a; }
+.panel .prnote a { display: inline-block; margin-top: calc(4 * var(--px)); color: #ffd45c; }
 
 /* Corner controls over the stage. */
 .hud { position: absolute; z-index: 3; left: 1.2%; top: 2.2%; display: flex; gap: calc(6 * var(--px)); align-items: flex-start; }

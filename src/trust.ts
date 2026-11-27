@@ -13,6 +13,10 @@ const OPTION = (label: string) => new RegExp(`^[\\s│|]*(?:❯\\s*)?(?:\\d+\\.\
 const YES = OPTION('Yes, I trust this folder');
 const NO = OPTION('No, exit');
 
+export function trustDialogShown(screen: string): boolean {
+  return YES.test(screen) && NO.test(screen);
+}
+
 function real(p: string): string {
   try {
     return realpathSync(p);
@@ -64,7 +68,7 @@ export async function handleTrust(
     seenAgent ||= hasAgent;
     if (sent) {
       const screen = await readPane(paneId);
-      if (!(YES.test(screen) && NO.test(screen)) && info.status !== 'unknown') return 'accepted';
+      if (!trustDialogShown(screen) && info.status !== 'unknown') return 'accepted';
       checkedAfterSend = true;
     } else if (info.status === 'working') {
       // The dialog only comes before the first turn, so a later prompt is never answered here.
@@ -73,7 +77,7 @@ export async function handleTrust(
       return 'not-shown';
     } else if (info.status === 'blocked') {
       const screen = await readPane(paneId);
-      if (YES.test(screen) && NO.test(screen)) {
+      if (trustDialogShown(screen)) {
         if (scope === 'ask') return 'needs-you';
         await sendKeys(paneId, 'down', 'enter');
         sent = true;

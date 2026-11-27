@@ -7,6 +7,7 @@ import { panelModel, renderPanel } from '../../lounge/js/panel.js';
 import { createWorld, stepWorld, makeRngs, STEP } from '../../lounge/js/sim.js';
 import { createCast, SPOTS } from '../../lounge/js/agents.js';
 import { mulberry32 } from '../../lounge/js/rng.js';
+import { badgeFor, isDim } from '../../lounge/js/scene.js';
 
 const room = (over = {}) => ({
   room: 'r1', session: 's-1', model: 'opus', state: 'work', since: 1_000_000, updatedAt: 1_000_000,
@@ -557,5 +558,153 @@ test('the sidewalk line follows the queue: position 1 at the front by the rope, 
     for (const [id, p] of [['d', 1], ['a', 2], ['c', 3]]) cast.room(q(id, p));
     settled(world, hooks);
     assert.deepEqual(['d', 'a', 'c'].map(at), frontFirst.slice(0, 3));
+  }
+});
+
+// --- parked, dancing and noticed rooms
+
+const PR = 'https://github.com/example/repo/pull/7';
+
+test('a parked room sits on the couch, dimmed; a merged room dances; neither is a new lounge state', () => {
+  const p = roomToAgents(room({ state: 'parked' })).main;
+  assert.equal(p.state, 'sleep');
+  assert.equal(p.info.parked, true);
+  const d = roomToAgents(room({ state: 'dance' })).main;
+  assert.equal(d.state, 'dance');
+  assert.equal('parked' in d.info, false);
+  assert.equal('parked' in roomToAgents(room({ state: 'couch' })).main.info, false);
+  assert.equal(STATE_KEYS.length, 13);
+  const { world, cast, hooks } = liveWorld();
+  cast.snapshot([room({ room: 'p', state: 'parked' }), room({ room: 'c', state: 'couch' }), room({ room: 'd', state: 'dance' })]);
+  settled(world, hooks);
+  const [pa] = byId(world, 'p'), [ca] = byId(world, 'c'), [da] = byId(world, 'd');
+  assert.equal(isDim(pa), true);
+  assert.equal(isDim(ca), false);
+  assert.ok(SPOTS.dance.some(([x, y]) => Math.abs(da.x - x) < 30 && da.y === y), `${da.x},${da.y}`);
+});
+
+test('a notice rides on the agent as an orange badge, never as the bell; a link only when it is a GitHub PR', () => {
+  const n = roomToAgents(room({ state: 'ready', notice: { kind: 'ci', text: 'CI failed: build', url: PR } })).main;
+  assert.deepEqual(n.info.notice, { kind: 'ci', text: 'CI failed: build', url: PR });
+  const odd = roomToAgents(room({ notice: { kind: 'ci', text: 'x', url: 'javascript:alert(1)' } })).main;
+  assert.deepEqual(odd.info.notice, { kind: 'ci', text: 'x' });
+  assert.equal('notice' in roomToAgents(room({ notice: 'junk' })).main.info, false);
+  assert.equal(badgeFor({ state: 'work', walking: false, info: n.info }, 0), 'notice');
+  assert.equal(badgeFor({ state: 'ready', walking: false, info: n.info }, 0), 'notice', 'a notice wins over the ready check');
+  assert.equal(badgeFor({ state: 'ready', walking: false, info: {} }, 0), 'check');
+  assert.equal(badgeFor({ state: 'blocked', walking: false, info: n.info }, 0), 'alert');
+  assert.equal(badgeFor({ state: 'work', walking: true, info: n.info }, 0), null);
+  assert.equal(badgeFor({ state: 'work', walking: false, info: {} }, 0), null);
+  let rang = 0;
+  const bell = createBell({ ring: () => rang++ });
+  bell.snapshot([room({ state: 'ready', notice: { kind: 'review', text: 'x', url: PR } })], 0);
+  bell.room(room({ state: 'work', notice: { kind: 'ci', text: 'y', url: PR } }), 1);
+  assert.equal(rang, 0);
+  assert.equal(bell.count, 0);
+});
+
+test('the panel of a parked room offers Wake instead of the terminal, in both languages', () => {
+  const parked = { id: 'p', label: 'p', state: 'sleep', look: { model: 'opus' }, info: { live: true, task: 'x', steps: [], where: 'web', since: 1, parked: true } };
+  const m = panelModel(parked);
+  assert.equal(m.wake, true);
+  assert.equal(m.room, 'p');
+  assert.equal('terminal' in m, false);
+  assert.equal(m.state, t('state.parked'));
+  assert.equal(m.wait, t('panel.parked'));
+  assert.notEqual(t('state.parked', 'pt-BR'), t('state.parked'));
+  for (const key of ['state.parked', 'panel.parked', 'panel.wake', 'panel.waking', 'panel.wakeFailed', 'panel.notice', 'panel.prLink', 'notice.ci', 'notice.review', 'notice.merged', 'notice.closed']) {
+    for (const lang of ['en', 'pt-BR']) assert.ok(typeof t(key, lang) === 'string' && t(key, lang) !== key, `${lang} ${key}`);
+  }
+  assert.equal('wake' in panelModel({ ...parked, info: { ...parked.info, parked: undefined } }), false);
+});
+
+test('a parked room that dances still offers Wake, never the terminal', () => {
+  const a = roomToAgents(room({ state: 'dance', parked: true })).main;
+  assert.equal(a.state, 'dance');
+  assert.equal(a.info.parked, true);
+  const m = panelModel({ ...a, look: { model: 'opus' } });
+  assert.equal(m.wake, true);
+  assert.equal('terminal' in m, false);
+  assert.equal('parked' in roomToAgents(room({ state: 'dance', parked: 'yes' })).main.info, false);
+});
+
+// Enough DOM to render a panel, click its buttons and read its links.
+function clickDoc() {
+  const node = tag => {
+    const n = {
+      tag, children: [], attrs: {}, style: {}, listeners: {}, className: '', textContent: '', title: '', placeholder: '', disabled: false, href: '',
+      append(...c) { n.children.push(...c); },
+      replaceChildren(...c) { n.children = c; },
+      setAttribute(k, v) { n.attrs[k] = v; },
+      addEventListener(type, fn) { n.listeners[type] = fn; },
+      remove() {},
+    };
+    return n;
+  };
+  const doc = { createElement: node, createTextNode: text => ({ tag: '#text', textContent: text, children: [] }) };
+  const root = node('div');
+  root.ownerDocument = doc;
+  return root;
+}
+const walk = n => [n, ...(n.children || []).flatMap(walk)];
+
+test('the panel shows the notice as text with its PR link, in both languages', () => {
+  for (const lang of ['en', 'pt-BR']) {
+    const root = clickDoc();
+    const a = { id: 'r', label: 'r', state: 'work', look: { model: 'opus' }, info: { live: true, task: 'x', steps: [], where: 'web', since: 1, notice: { kind: 'review', text: '<b>New comment</b> from rev', url: PR } } };
+    renderPanel(root, panelModel(a, lang), () => {}, { lang });
+    const nodes = walk(root);
+    assert.ok(nodes.some(n => n.textContent === t('notice.review', lang)), lang);
+    assert.ok(nodes.some(n => n.textContent === '<b>New comment</b> from rev'), 'the notice is text');
+    assert.ok(!nodes.some(n => n.tag === 'b' && n.textContent === 'New comment'));
+    const link = nodes.find(n => n.tag === 'a');
+    assert.equal(link.href, PR);
+    assert.equal(link.textContent, t('panel.prLink', lang));
+    assert.equal(link.target, '_blank');
+    assert.equal(link.rel, 'noopener noreferrer');
+  }
+  const root = clickDoc();
+  renderPanel(root, panelModel({ id: 'r', label: 'r', state: 'work', look: { model: 'opus' }, info: { live: true, task: 'x', steps: [], where: 'w', since: 1, notice: { kind: 'ci', text: 'x', url: 'javascript:alert(1)' } } }), () => {}, {});
+  assert.equal(walk(root).some(n => n.tag === 'a'), false, 'no link that is not a GitHub PR');
+});
+
+test('the Wake button calls onWake once at a time and shows its lines or its error', async () => {
+  const parked = { id: 'p', label: 'p', state: 'sleep', look: { model: 'opus' }, info: { live: true, task: 'x', steps: [], where: 'web', since: 1, parked: true } };
+  const root = clickDoc();
+  let calls = 0, finish;
+  const onWake = () => { calls++; return new Promise(r => { finish = r; }); };
+  renderPanel(root, panelModel(parked), () => {}, { onWake, onTerminal: async () => null });
+  assert.equal(walk(root).some(n => n.tag === 'button' && n.textContent === t('panel.openTerminal')), false);
+  const btn = walk(root).find(n => n.tag === 'button' && n.textContent === t('panel.wake'));
+  assert.ok(btn);
+  btn.listeners.click();
+  btn.listeners.click();
+  assert.equal(calls, 1);
+  assert.equal(btn.disabled, true);
+  assert.equal(btn.textContent, t('panel.waking'));
+  finish({ ok: false, message: '<i>p is closing</i>' });
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(btn.disabled, false);
+  const text = walk(root).map(n => n.textContent).join('|');
+  assert.ok(text.includes(t('panel.wakeFailed', 'en', { message: '<i>p is closing</i>' })), text);
+
+  const again = clickDoc();
+  renderPanel(again, panelModel(parked), () => {}, { onWake: async () => ({ ok: true, lines: ['woke p: resumed its session'] }), wakeResult: { ok: true, lines: ['earlier'] } });
+  assert.ok(walk(again).some(n => n.textContent === 'earlier'), 'a remembered result survives a re-render');
+  walk(again).find(n => n.tag === 'button' && n.textContent === t('panel.wake')).listeners.click();
+  await new Promise(r => setTimeout(r, 0));
+  assert.ok(walk(again).some(n => n.textContent === 'woke p: resumed its session'));
+});
+
+test('a wake result is shown even when the room already left the couch before it arrived', () => {
+  const ready = { id: 'p', label: 'p', state: 'ready', look: { model: 'opus' }, info: { live: true, task: 'x', steps: [], where: 'web', since: 1 } };
+  for (const [result, text] of [
+    [{ ok: true, lines: ['woke p — it is asking something in its tab: answer it there'] }, 'woke p — it is asking something in its tab: answer it there'],
+    [{ ok: false, message: 'p is closing' }, t('panel.wakeFailed', 'en', { message: 'p is closing' })],
+  ]) {
+    const root = clickDoc();
+    renderPanel(root, panelModel(ready), () => {}, { onWake: async () => null, onTerminal: async () => null, wakeResult: result });
+    assert.ok(walk(root).some(n => n.textContent === text), text);
+    assert.equal(walk(root).some(n => n.tag === 'button' && n.textContent === t('panel.wake')), false, 'no Wake button: it is awake');
   }
 });

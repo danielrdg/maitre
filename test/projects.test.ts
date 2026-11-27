@@ -193,6 +193,10 @@ test('settings: defaults with no config', () => {
       idleMs: 4 * 3_600_000,
       intervalMs: 5 * 60_000,
       vault: join(env.MAITRE_HOME, 'memory'),
+      releaseMs: 30 * 60_000,
+      autoWake: false,
+      danceMs: 3 * 60_000,
+      pollMs: 2 * 60_000,
       warnings: [],
     });
   });
@@ -200,7 +204,25 @@ test('settings: defaults with no config', () => {
 
 test('settings: valid values are used', () => {
   withConfig({ roots: [], projects: {}, capacity: 2, janitor: { idleHours: 0.5, intervalMinutes: 1 }, vault: '/srv/vault' }, (env) => {
-    assert.deepEqual(settings(env), { capacity: 2, idleMs: 1_800_000, intervalMs: 60_000, vault: '/srv/vault', warnings: [] });
+    assert.deepEqual(settings(env), {
+      capacity: 2,
+      idleMs: 1_800_000,
+      intervalMs: 60_000,
+      vault: '/srv/vault',
+      releaseMs: 30 * 60_000,
+      autoWake: false,
+      danceMs: 3 * 60_000,
+      pollMs: 2 * 60_000,
+      warnings: [],
+    });
+  });
+});
+
+test('settings: seat and PR values are used', () => {
+  const raw = { roots: [], projects: {}, seat: { releaseMinutes: 10 }, pr: { autoWake: true, danceMinutes: 0.5, pollMinutes: 1 } };
+  withConfig(raw, (env) => {
+    const s = settings(env);
+    assert.deepEqual([s.releaseMs, s.autoWake, s.danceMs, s.pollMs, s.warnings], [600_000, true, 30_000, 60_000, []]);
   });
 });
 
@@ -216,10 +238,18 @@ test('settings: each invalid value falls back to its default with one warning', 
     ['janitor.intervalMinutes', null],
     ['vault', 'relative/dir'],
     ['vault', 7],
+    ['seat.releaseMinutes', 0],
+    ['seat.releaseMinutes', '30'],
+    ['pr.autoWake', 'yes'],
+    ['pr.autoWake', 1],
+    ['pr.danceMinutes', -3],
+    ['pr.pollMinutes', 0],
+    ['pr.pollMinutes', null],
   ];
   for (const [key, value] of bad) {
     const raw: Record<string, unknown> = { roots: [], projects: {} };
-    if (key.startsWith('janitor.')) raw.janitor = { [key.slice(8)]: value };
+    const [section, field] = key.split('.');
+    if (field !== undefined) raw[section!] = { [field]: value };
     else raw[key] = value;
     withConfig(raw, (env) => {
       const s = settings(env);
@@ -228,13 +258,15 @@ test('settings: each invalid value falls back to its default with one warning', 
       assert.deepEqual({ ...s, warnings: [] }, { ...settings({ MAITRE_HOME: env.MAITRE_HOME + '-none' }), warnings: [], vault: s.vault });
     });
   }
-  withConfig({ roots: [], projects: {}, janitor: 'x' }, (env) => assert.equal(settings(env).warnings.length, 1));
+  for (const section of ['janitor', 'seat', 'pr']) {
+    withConfig({ roots: [], projects: {}, [section]: 'x' }, (env) => assert.equal(settings(env).warnings.length, 1, section));
+  }
 });
 
 test('config keeps capacity, janitor, vault and lang through a load and save', () => {
   withTmp((dir) => {
     const env = { MAITRE_HOME: join(dir, 'home') };
-    const cfg = { roots: ['/x'], projects: {}, lang: 'pt-BR' as const, capacity: 3, janitor: { idleHours: 2, intervalMinutes: 10 }, vault: '/v' };
+    const cfg = { roots: ['/x'], projects: {}, lang: 'pt-BR' as const, capacity: 3, janitor: { idleHours: 2, intervalMinutes: 10 }, vault: '/v', seat: { releaseMinutes: 15 }, pr: { autoWake: true, danceMinutes: 1, pollMinutes: 5 } };
     saveConfig(cfg, env);
     assert.deepEqual(loadConfig(env), cfg);
     saveConfig({ ...loadConfig(env), roots: ['/y'] }, env);

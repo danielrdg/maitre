@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isActive, isIdle, roomActivity, type RoomActivity } from '../src/activity.js';
+import { isActive, isIdle, isQuiet, roomActivity, type RoomActivity } from '../src/activity.js';
 import type { HookLine } from '../src/events.js';
 import { roomDir } from '../src/paths.js';
 import type { RoomRecord } from '../src/rooms.js';
@@ -49,14 +49,21 @@ test('a room with no events has no activity', () => {
 test('activity reduces the events: state, newest event time, PR link', () => {
   withHome((env) => {
     write(env, 'r1', [start(1000), prompt(2000), stop(3000)]);
-    assert.deepEqual(roomActivity('r1', env), { state: 'ready', lastEventAt: 3000 });
+    assert.deepEqual(roomActivity('r1', env), { state: 'ready', lastEventAt: 3000, session: 's1' });
   });
 });
 
 test("Claude Code's Notification is not activity: lastEventAt stays at the turn's last event", () => {
   withHome((env) => {
     write(env, 'r1', [start(1000), prompt(2000), stop(3000), { ts: 63_000, event: 'Notification', notification_type: 'idle_prompt' }]);
-    assert.deepEqual(roomActivity('r1', env), { state: 'ready', lastEventAt: 3000 });
+    assert.deepEqual(roomActivity('r1', env), { state: 'ready', lastEventAt: 3000, session: 's1' });
+  });
+});
+
+test("the session is the reducer's: a late SessionEnd of the session before /clear is not it", () => {
+  withHome((env) => {
+    write(env, 'r1', [start(1000), stop(2000), start(3000, { session: 's2' }), stop(4000, { session: 's2' }), { ts: 5000, event: 'SessionEnd', session: 's1' }]);
+    assert.equal(roomActivity('r1', env).session, 's2');
   });
 });
 
@@ -92,4 +99,49 @@ test('isActive: running, open, not couched, no PR', () => {
 
 test('closedAt alone does not close a room', () => {
   assert.equal(isActive(rec({ closedAt: 5 }), act(), true), true);
+});
+
+test('isActive: a seat released or an OPEN PR keeps a room out; MERGED, CLOSED or absent does not', () => {
+  const seat = { releasedAt: 1, session: 's1' };
+  const pr = (state: 'OPEN' | 'MERGED' | 'CLOSED') => ({ state });
+  assert.equal(isActive(rec({ seat }), act(), true), false);
+  assert.equal(isActive(rec({ seat }), act(), true, pr('MERGED')), false);
+  assert.equal(isActive(rec(), act(), true, pr('OPEN')), false);
+  assert.equal(isActive(rec(), act(), true, pr('MERGED')), true);
+  assert.equal(isActive(rec(), act(), true, pr('CLOSED')), true);
+  assert.equal(isActive(rec(), act(), true, undefined), true);
+  assert.equal(isActive(rec(), act(), false, pr('MERGED')), false);
+});
+
+test('isActive: a given PR state replaces the reducer prUrl and whisky rule', () => {
+  const stale = act({ prUrl: 'https://github.com/o/r/pull/1', state: 'whisky' });
+  assert.equal(isActive(rec(), stale, true), false);
+  assert.equal(isActive(rec(), stale, true, { state: 'MERGED' }), true);
+  assert.equal(isActive(rec(), stale, true, { state: 'OPEN' }), false);
+});
+
+test('isQuiet: resting live state, herdr idle, last countable event older than the threshold', () => {
+  const ms = 30 * 60_000;
+  const old = 1_000_000;
+  const now = old + ms + 1;
+  for (const state of ['ready', 'coffee', 'whisky', 'couch'] as const) {
+    assert.equal(isQuiet(act({ state, lastEventAt: old }), 'idle', now, ms), true, state);
+  }
+  for (const state of ['work', 'smoke', 'blocked', 'exit', 'queue', 'none'] as const) {
+    assert.equal(isQuiet(act({ state, lastEventAt: old }), 'idle', now, ms), false, state);
+  }
+  for (const herdr of ['working', 'blocked', 'unknown', 'not running'] as const) {
+    assert.equal(isQuiet(act({ state: 'whisky', lastEventAt: old }), herdr, now, ms), false, herdr);
+  }
+  assert.equal(isQuiet(act({ state: 'ready', lastEventAt: old }), 'idle', old + ms, ms), false);
+  assert.equal(isQuiet({ state: 'ready' }, 'idle', now, ms), false);
+});
+
+test('isQuiet: a Notification does not count as activity', () => {
+  withHome((env) => {
+    write(env, 'r1', [start(1_000), stop(2_000), { ts: 9_000_000, event: 'Notification' }]);
+    const a = roomActivity('r1', env);
+    assert.equal(a.lastEventAt, 2_000);
+    assert.equal(isQuiet(a, 'idle', 9_000_001, 60_000), true);
+  });
 });

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { HookLine } from '../src/events.js';
 import { HerdrError, shellQuote } from '../src/herdr.js';
 import { roomDir } from '../src/paths.js';
+import { readPr, writePr } from '../src/pr-state.js';
 import { writeIndex, type Project } from '../src/projects.js';
 import { closeRoom } from '../src/janitor.js';
 import { BRIEF_HEADER, inputText, listRoomRows, markNotRunning, openRoom, promptMatches, roomLabel, sendToRoom, unwrapPasted } from '../src/room-open.js';
@@ -283,9 +284,28 @@ test('room send reports unconfirmed when the prompt never shows up, ignoring an 
 test('room send to a gone pane says the room is not running and marks it closed', async () => {
   await openScratch();
   sb.setState({ next: 2, workspaces: {}, panes: {} });
-  await assert.rejects(sendToRoom('x', 'hi'), /^Error: room x is not running — open it again with: maitre room open …$/);
+  await assert.rejects(sendToRoom('x', 'hi'), /^Error: room x is not running — wake it with: maitre room wake x$/);
   assert.equal(typeof readRoom('x')?.closedAt, 'number');
   assert.deepEqual(herdrCalls('agent', 'prompt'), []);
+  writeFileSync(join(roomDir('x'), 'events.jsonl'), '');
+  await assert.rejects(sendToRoom('x', 'hi'), /^Error: room x is not running — open it again with: maitre room open …$/, 'no session to resume');
+});
+
+test('room open refuses a parked room (a seat on its record): wake it, or close it first; nothing is touched', async () => {
+  await openScratch();
+  writePr('x', { url: 'https://github.com/o/r/pull/7', number: 7, state: 'OPEN', headRefName: 'maitre/x', seenAt: Date.now(), failing: [] });
+  const parked = { ...readRoom('x')!, seat: { releasedAt: Date.now(), session: 's1' } };
+  writeRoom(parked);
+  sb.setState({ ...sb.state(), workspaces: {}, panes: {} });
+  const before = herdrCalls('workspace', 'create').length;
+  await assert.rejects(openScratch(), /^Error: room x is parked — wake it with: maitre room wake x \(or close it first with: maitre room close x\)$/);
+  assert.equal(herdrCalls('workspace', 'create').length, before);
+  assert.deepEqual(readRoom('x'), parked);
+  assert.equal(readPr('x')?.number, 7);
+  await closeRoom('x', process.env, { exitTimeoutMs: 200 });
+  assert.equal(readRoom('x')!.closedBy, 'user');
+  await openScratch();
+  assert.equal(readRoom('x')!.seat, undefined, 'the close the message points at lets it open fresh');
 });
 
 test('room send to a restored bare shell, or to a pane id now in another tab, says not running', async () => {
@@ -372,7 +392,7 @@ test('room list shows each room with its herdr status and lounge state; restored
   const rows = await listRoomRows();
   assert.deepEqual(rows, [
     { room: 'a', model: 'sonnet', herdr: 'idle', lounge },
-    { room: 'b', model: 'sonnet', herdr: 'not running', lounge: 'coffee' },
+    { room: 'b', model: 'sonnet', herdr: 'not running', lounge: 'parked — wake: maitre room wake b' },
   ]);
   assert.equal(typeof readRoom('b')?.closedAt, 'number');
   assert.equal(readRoom('a')?.closedAt, undefined);
@@ -593,9 +613,43 @@ test('room list shows a couch that holds with its reasons, a dead room\'s pendin
     [
       ['a', 'idle', 'couch: uncommitted changes: f.txt; an open PR'],
       ['b', 'idle', 'ready'],
-      ['c', 'not running', 'coffee, pending: 2 commits not pushed'],
+      ['c', 'not running', 'parked, pending: 2 commits not pushed — wake: maitre room wake c'],
       ['d', 'not running', 'closed'],
       ['e', 'idle', 'coffee'],
     ],
   );
+});
+
+test('a fresh open of a room name drops the pr.json and pr-seek.json an earlier opening left; a failed open keeps them', async () => {
+  project();
+  const first = await openRoom({ name: 'a', project: 'proj', model: 'sonnet', taskType: 'change', brief: 'do it' }, process.env, FAST);
+  writePr('a', { url: 'https://github.com/o/r/pull/7', number: 7, state: 'MERGED', headRefName: first.branch!, seenAt: Date.now(), failing: [] });
+  writeFileSync(join(roomDir('a'), 'pr-seek.json'), JSON.stringify({ discoveredAt: Date.now() }));
+  sb.setState({ ...sb.state(), workspaces: {}, panes: {} });
+
+  process.env.FAKE_HERDR_ON_RUN = 'shell';
+  await assert.rejects(openRoom({ name: 'a', project: 'proj', model: 'sonnet', taskType: 'change', brief: 'again' }, process.env, { trustTimeoutMs: 200, pollMs: 10 }), /did not start/);
+  assert.equal(readPr('a')?.state, 'MERGED', 'a failed open changes nothing');
+  assert.ok(existsSync(join(roomDir('a'), 'pr-seek.json')));
+
+  delete process.env.FAKE_HERDR_ON_RUN;
+  await openRoom({ name: 'a', project: 'proj', model: 'sonnet', taskType: 'change', brief: 'again' }, process.env, FAST);
+  assert.equal(readPr('a'), undefined);
+  assert.equal(existsSync(join(roomDir('a'), 'pr.json')), false);
+  assert.equal(existsSync(join(roomDir('a'), 'pr-seek.json')), false);
+});
+
+test('room list shows a PR notice, filtered and clipped, until the room\'s next real prompt', async () => {
+  for (const name of ['a', 'b']) await openScratch(name);
+  for (const name of ['a', 'b']) writeRoom({ ...readRoom(name)!, branch: `maitre/${name}` });
+  const since = Date.now() + 1000;
+  const notice = (text: string) => ({ kind: 'review' as const, text, url: 'https://github.com/o/r/pull/7', since });
+  const pr = (name: string, text: string) => writePr(name, { url: 'https://github.com/o/r/pull/7', number: 7, state: 'OPEN', headRefName: `maitre/${name}`, seenAt: since, failing: [], notice: notice(text) });
+  pr('a', `New comment from \u202erev ${'x'.repeat(200)}`);
+  pr('b', 'New review from rev');
+  appendFileSync(join(roomDir('b'), 'events.jsonl'), JSON.stringify({ v: 1, room: 'b', session: 's1', ts: since + 5, event: 'UserPromptSubmit', prompt: 'look' }) + '\n');
+  const rows = Object.fromEntries((await listRoomRows(process.env, { queue: false })).map((r) => [r.room, r.lounge]));
+  assert.match(rows.a!, /^coffee; PR review: New comment from \?rev x+…$/);
+  assert.ok(rows.a!.length < 140, rows.a);
+  assert.equal(rows.b, 'work', 'read: a real prompt after it');
 });

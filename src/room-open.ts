@@ -1,7 +1,7 @@
 import { chmodSync, closeSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isClosing } from './closing.js';
+import { isClosing, ownsClosing } from './closing.js';
 import { countsAsActivity, type HookLine } from './events.js';
 import {
   HerdrError,
@@ -19,12 +19,15 @@ import {
   type AgentInfo,
 } from './herdr.js';
 import { maitreHome, roomDir, roomSlug } from './paths.js';
+import { shownText } from './pending.js';
+import { dropPrState, readsNotice, roomPr } from './pr-state.js';
 import { readIndex, type Project } from './projects.js';
 import { BRIEF_HEADER, reduce, type RoomState } from './room-state.js';
 import { readFailed, readQueue } from './queue.js';
 import { couchHolds, listRooms, parked, patchRoom, readRoom, writeRoom, type RoomRecord } from './rooms.js';
 import { appendRoomLine } from './status.js';
-import { handleTrust } from './trust.js';
+import { handleTrust, type TrustResult } from './trust.js';
+import { parkedState } from './wake.js';
 import { createScratch, createWorktree } from './worktree.js';
 
 export { BRIEF_HEADER };
@@ -36,9 +39,9 @@ export type RoomLiveness = 'working' | 'blocked' | 'idle' | 'unknown' | 'not run
 type Workspaces = { id: string; label: string }[];
 
 const MAITRE_BIN = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'maitre');
-const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,63}$/;
+export const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,63}$/;
 // Linux caps a single argv string at 128 KiB, and the brief reaches claude as one.
-const MAX_BRIEF_BYTES = 100_000;
+export const MAX_BRIEF_BYTES = 100_000;
 const CONFIRM_MS = 10_000;
 const EXIT_MS = 5_000;
 const POLL_MS = 100;
@@ -47,7 +50,8 @@ const PREFIX = 40;
 const ELLIPSIS = '…';
 const LOUNGE_TAIL_BYTES = 256 * 1024;
 
-const notRunning = (room: string) => new Error(`room ${room} is not running — open it again with: maitre room open …`);
+const notRunning = (rec: RoomRecord, env: NodeJS.ProcessEnv) =>
+  new Error(`room ${rec.room} is not running — ${parkedState(rec, env) !== undefined ? `wake it with: maitre room wake ${rec.room}` : 'open it again with: maitre room open …'}`);
 const waitingOnYou = (room: string) => new Error(`room ${room} is waiting on you — answer it in its tab`);
 const noRoom = (room: string) => new Error(`no room named ${room} — open it with: maitre room open …`);
 
@@ -79,6 +83,13 @@ export function markNotRunning(rec: RoomRecord, env: NodeJS.ProcessEnv = process
   return patchRoom(rec, (r) => (r.closedAt !== undefined || r.closedBy !== undefined ? r : { ...r, closedAt: Date.now() }), env);
 }
 
+const withoutClosedAt = ({ closedAt: _c, ...r }: RoomRecord): RoomRecord => r;
+
+// A room found running again: a closedAt stamped by a probe that missed it says nothing any more.
+export function markRunning(rec: RoomRecord, env: NodeJS.ProcessEnv = process.env): RoomRecord {
+  return patchRoom(rec, (r) => (r.closedAt === undefined || r.closedBy !== undefined ? r : withoutClosedAt(r)), env);
+}
+
 // Every tab with this label except `keep`: herdr may have restored copies under new ids.
 export async function closeLabeledTabs(label: string, workspaces: Workspaces, keep?: string): Promise<void> {
   for (const w of workspaces) {
@@ -101,7 +112,7 @@ function findProject(name: string, env: NodeJS.ProcessEnv): Project {
   return p;
 }
 
-function writeBrief(room: string, brief: string, env: NodeJS.ProcessEnv): string {
+export function writeBrief(room: string, brief: string, env: NodeJS.ProcessEnv): string {
   const dir = roomDir(room, env);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const path = join(dir, 'brief.md');
@@ -110,8 +121,11 @@ function writeBrief(room: string, brief: string, env: NodeJS.ProcessEnv): string
   return path;
 }
 
-function paneCommand(room: string, briefPath: string, model: string): string {
-  const cmd = [MAITRE_BIN, 'room', 'run', room, '--brief-file', briefPath, '--', '--model', model].map(shellQuote).join(' ');
+// What a room's tab runs, for an open and for a wake alike: a wake adds only `--resume <session>`.
+export function roomPaneCommand(room: string, model: string, opts: { briefPath?: string; resume?: string } = {}): string {
+  const brief = opts.briefPath !== undefined ? ['--brief-file', opts.briefPath] : [];
+  const resume = opts.resume !== undefined ? ['--resume', opts.resume] : [];
+  const cmd = [MAITRE_BIN, 'room', 'run', room, ...brief, '--', '--model', model, ...resume].map(shellQuote).join(' ');
   // herdr types the command into a shell: a control character would split or alter it.
   if (/[\x00-\x1f\x7f]/.test(cmd)) throw new Error('the room command contains a control character');
   return cmd;
@@ -146,6 +160,10 @@ export async function openRoom(
   if (prev !== undefined) {
     const workspaces = await listWorkspaces();
     if ((await probeRoom(prev, workspaces, env)) !== 'not running') throw new Error(`room ${room} is already open`);
+    // A fresh open would drop the session the room parked with, and its pr.json.
+    if (prev.seat !== undefined && prev.closedBy === undefined) {
+      throw new Error(`room ${room} is parked — wake it with: maitre room wake ${room} (or close it first with: maitre room close ${room})`);
+    }
     await closeRoomTabs(prev, workspaces);
   }
 
@@ -158,25 +176,8 @@ export async function openRoom(
   let ws: { workspaceId: string; paneId: string } | undefined;
   try {
     const briefPath = writeBrief(room, opts.brief, env);
-    ws = await createWorkspace({
-      cwd: dir,
-      label: roomLabel({ room, project: project?.name }),
-      env: { MAITRE_ROOM: room, MAITRE_HOME: maitreHome(env) },
-    });
-    const events = join(roomDir(room, env), 'events.jsonl');
-    const offset = fileSize(events);
-    await runInPane(ws.paneId, paneCommand(room, briefPath, opts.model));
-    const trust = await handleTrust(ws.paneId, dir, {
-      timeoutMs: timing.trustTimeoutMs,
-      pollMs: timing.pollMs,
-      env,
-      started: () => sessionStarted(events, offset),
-    });
-    if (trust === 'no-agent') throw new Error(`room ${room} did not start: no Claude appeared in its tab (is \`claude\` on PATH?)`);
-    if (trust === 'unresolved' || trust === 'needs-you') {
-      const text = trust === 'needs-you' ? TRUST_BLOCKED_TEXT : STARTING_TEXT;
-      appendRoomLine(room, 'MaitreStatus', { status: 'blocked', text, options: [], starting: true }, env);
-    }
+    ws = await createRoomTab({ room, project: project?.name, dir }, env);
+    const trust = await startInTab(room, dir, ws.paneId, roomPaneCommand(room, opts.model, { briefPath }), env, timing);
     const rec: RoomRecord = {
       room,
       ...(project !== undefined ? { project: project.name } : {}),
@@ -189,6 +190,7 @@ export async function openRoom(
       createdAt: Date.now(),
       ...(opts.fromQueue !== undefined ? { fromQueue: opts.fromQueue } : {}),
     };
+    dropPrState(room, env);
     writeRoom(rec, env);
     return { ...rec, warnings, needsTrust: trust === 'needs-you' };
   } catch (err) {
@@ -196,6 +198,40 @@ export async function openRoom(
     throw err;
   }
 }
+
+export function createRoomTab(rec: { room: string; project?: string; dir: string }, env: NodeJS.ProcessEnv): Promise<{ workspaceId: string; paneId: string }> {
+  return createWorkspace({ cwd: rec.dir, label: roomLabel(rec), env: { MAITRE_ROOM: rec.room, MAITRE_HOME: maitreHome(env) } });
+}
+
+// Runs a fresh Claude (one with a brief) in the room's new tab and waits for it like an open does.
+export async function startInTab(
+  room: string,
+  dir: string,
+  paneId: string,
+  command: string,
+  env: NodeJS.ProcessEnv,
+  timing: { trustTimeoutMs?: number; pollMs?: number },
+): Promise<TrustResult> {
+  const events = roomEventsFile(room, env);
+  const offset = fileSize(events);
+  await runInPane(paneId, command);
+  const trust = await handleTrust(paneId, dir, {
+    timeoutMs: timing.trustTimeoutMs,
+    pollMs: timing.pollMs,
+    env,
+    started: () => sessionStarted(events, offset),
+  });
+  if (trust === 'no-agent') throw new Error(`room ${room} did not start: no Claude appeared in its tab (is \`claude\` on PATH?)`);
+  if (trust === 'unresolved' || trust === 'needs-you') noteStarting(room, trust === 'needs-you' ? TRUST_BLOCKED_TEXT : STARTING_TEXT, env);
+  return trust;
+}
+
+// Shown in the lounge until the room's SessionStart clears it.
+export function noteStarting(room: string, text: string, env: NodeJS.ProcessEnv): void {
+  appendRoomLine(room, 'MaitreStatus', { status: 'blocked', text, options: [], starting: true }, env);
+}
+
+export const roomEventsFile = (room: string, env: NodeJS.ProcessEnv = process.env): string => join(roomDir(room, env), 'events.jsonl');
 
 // An unreadable queue holds no name that can be shown to be queued.
 function queuedPosition(room: string, env: NodeJS.ProcessEnv): number | undefined {
@@ -207,7 +243,7 @@ function queuedPosition(room: string, env: NodeJS.ProcessEnv): number | undefine
   }
 }
 
-function fileSize(path: string): number {
+export function fileSize(path: string): number {
   try {
     return statSync(path).size;
   } catch {
@@ -249,6 +285,10 @@ function parseLines(text: string): HookLine[] {
     }
   }
   return out;
+}
+
+export function linesSince(file: string, offset: number): HookLine[] {
+  return parseLines(readFrom(file, offset));
 }
 
 function sessionStarted(file: string, offset: number): boolean {
@@ -295,23 +335,24 @@ export async function sendToRoom(
 }
 
 // busy: the room was working; Claude Code injects the text into the running turn, between tool calls.
+// closing: the token of the room's closing marker, when the caller holds it to keep closers off.
 export async function deliverToRoom(
   room: string,
   text: string,
   env: NodeJS.ProcessEnv = process.env,
-  opts: { confirmMs?: number } = {},
+  opts: { confirmMs?: number; closing?: string } = {},
 ): Promise<{ result: 'delivered' | 'unconfirmed'; busy: boolean }> {
   const slug = roomSlug(room);
   const rec = readRoom(slug, env);
   if (rec === undefined) throw noRoom(slug);
-  if (isClosing(slug, env)) throw new Error(`${slug} is closing`);
+  if (opts.closing !== undefined ? !ownsClosing(slug, opts.closing, env) : isClosing(slug, env)) throw new Error(`${slug} is closing`);
   if (text.trim() === '') throw new Error('nothing to send');
   if (Buffer.byteLength(text) > MAX_BRIEF_BYTES) throw new Error(`the message is too long (at most ${MAX_BRIEF_BYTES} bytes)`);
   await ensureServer(env);
   const live = await probeRoom(rec, undefined, env);
   if (live === 'not running') {
     markNotRunning(rec, env);
-    throw notRunning(slug);
+    throw notRunning(rec, env);
   }
   if (live === 'blocked') throw waitingOnYou(slug);
   const file = join(roomDir(slug, env), 'events.jsonl');
@@ -355,11 +396,25 @@ function loungeColumn(rec: RoomRecord, herdr: RoomLiveness, env: NodeJS.ProcessE
   if (rec.closedBy !== undefined) return 'closed';
   let state: RoomState | undefined;
   let last: number | undefined;
+  let prompted = -Infinity;
   for (const l of readEventsTail(rec.room, env)) {
     state = reduce(state, l);
     if (countsAsActivity(l)) last = l.ts;
+    if (readsNotice(l) && typeof l.ts === 'number') prompted = Math.max(prompted, l.ts);
   }
-  const shown = state?.state ?? '-';
+  const parked = herdr === 'not running' && parkedState(rec, env) !== undefined;
+  const column = loungeState(rec, herdr, parked ? 'parked' : (state?.state ?? '-'), last);
+  return withNotice(parked ? `${column} — wake: maitre room wake ${rec.room}` : column, rec, prompted, env);
+}
+
+// A PR notice the room has not read yet (no real prompt since), as the lounge shows it.
+function withNotice(column: string, rec: RoomRecord, prompted: number, env: NodeJS.ProcessEnv): string {
+  const n = roomPr(rec, env)?.notice;
+  if (n === undefined || prompted > n.since) return column;
+  return `${column}; PR ${n.kind}: ${shownText(n.text, NOTICE_SHOWN)}`;
+}
+
+function loungeState(rec: RoomRecord, herdr: RoomLiveness, shown: string, last: number | undefined): string {
   const couch = parked(rec.couch);
   const up = herdr === 'idle' || herdr === 'unknown';
   if (couch !== undefined && up && couchHolds(couch, shown, last)) return `couch: ${couch.reasons.join('; ')}`;
@@ -367,6 +422,8 @@ function loungeColumn(rec: RoomRecord, herdr: RoomLiveness, env: NodeJS.ProcessE
   if (pending !== undefined && herdr === 'not running' && (last ?? -Infinity) <= pending.since) return `${shown}, pending: ${pending.reasons.join('; ')}`;
   return shown;
 }
+
+const NOTICE_SHOWN = 80;
 
 export function isRecord(rec: RoomRecord): boolean {
   if (typeof rec.room !== 'string') return false;

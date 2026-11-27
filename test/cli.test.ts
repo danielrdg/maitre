@@ -558,3 +558,11 @@ test('maitre lounge --demo opens its window with a ticket too', async () => {
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('parseArgs parses room wake; HELP lists it; room run passes --resume through to claude', () => {
+  assert.deepEqual(parseArgs(['room', 'wake', 'Nf Bug']), { cmd: 'room-wake', room: 'Nf Bug' });
+  for (const argv of [['room', 'wake'], ['room', 'wake', 'x', 'y'], ['room', 'wake', '-x']]) assert.equal(parseArgs(argv).cmd, 'usage', argv.join(' '));
+  assert.match(HELP, /^ {2}maitre room wake <room>$/m);
+  assert.match(HELP, /^ {2}room wake {5}\S/m);
+  assert.deepEqual(parseArgs(['room', 'run', 'x', '--', '--model', 'sonnet', '--resume', 's1']), { cmd: 'room-run', room: 'x', extra: ['--model', 'sonnet', '--resume', 's1'] });
+});

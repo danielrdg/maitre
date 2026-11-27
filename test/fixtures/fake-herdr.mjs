@@ -85,6 +85,71 @@ if (code !== 0 && process.env.FAKE_HERDR_ERRORS_ON_STDOUT !== '1') process.stder
 else process.stdout.write(out);
 process.exit(code);
 
+// The session id after `--resume` in a pane command (single-quoted tokens), if any.
+function resumeId(cmd) {
+  const tokens = cmd.match(/'(?:[^']|'\\'')*'/g) ?? [];
+  const i = tokens.indexOf("'--resume'");
+  return i >= 0 && tokens[i + 1] !== undefined ? tokens[i + 1].slice(1, -1) : undefined;
+}
+
+// `claude --resume <id>` as the resume spike saw it. FAKE_HERDR_RESUME picks the outcome: 'ok' (default:
+// SessionStart with the same id, source resume), 'missing' (Claude shows for one look, prints
+// "No conversation found", exits; a lone SessionEnd with that id), 'picker' (the session picker, idle,
+// no SessionStart), 'hang' (idle, nothing), 'trust' (the folder-trust dialog first), 'question'
+// (blocked on something that is not the trust dialog), 'other' (idle, a SessionStart with another id),
+// 'shell' (no Claude ever appears). With no SessionStart (a test writes it): 'late-shell', 'late-blocked'
+// (the trust dialog), 'late-picker', each idle from the second `agent get` on. With a SessionStart:
+// 'slow' (unknown for two `agent get`s, then idle), 'start-unregistered' (herdr answers agent_not_found
+// for two `agent get`s, then idle), 'start-exit' (seen once, then exits),
+// 'start-unknown' (herdr never sees it), 'start-blocked' (a question).
+function resume(p, id, wenv) {
+  const mode = process.env.FAKE_HERDR_RESUME ?? 'ok';
+  p.resume = id;
+  if (mode === 'missing') {
+    p.agent = 'unknown';
+    p.exitAfter = 1;
+    p.screen = `No conversation found with session ID: ${id}\n$ \n`;
+    if (wenv.MAITRE_ROOM) runHook('maitre-hook.mjs', { hook_event_name: 'SessionEnd', session_id: id, reason: 'other' }, wenv);
+  } else if (mode === 'picker') {
+    p.agent = 'idle';
+    p.screen = ' Resume session\n\n ⌕ Search…\n\n ❯ an earlier session\n';
+  } else if (mode === 'hang') {
+    p.agent = 'idle';
+  } else if (mode === 'trust') {
+    p.agent = 'blocked';
+    p.trust = true;
+  } else if (mode === 'question') {
+    p.agent = 'blocked';
+    p.screen = ' Resume from summary?\n ❯ 1. Yes\n   2. No\n';
+  } else if (mode === 'other') {
+    p.agent = 'idle';
+    p.resume = 'another-session';
+    sessionStart(p, wenv);
+  } else if (mode === 'shell') {
+    p.agent = 'shell';
+  } else if (mode === 'late-shell') {
+    p.agent = 'shell';
+    p.idleAfter = 1;
+  } else if (mode === 'late-blocked') {
+    p.agent = 'blocked';
+    p.trust = true;
+    p.idleAfter = 1;
+  } else if (mode === 'late-picker') {
+    p.agent = 'idle';
+    p.screen = ' Resume session\n\n ⌕ Search…\n';
+    p.idleAfter = 1;
+  } else if (mode.startsWith('start-') || mode === 'slow') {
+    p.agent = mode === 'start-blocked' ? 'blocked' : mode === 'start-unregistered' ? 'shell' : 'unknown';
+    if (mode === 'slow' || mode === 'start-unregistered') p.idleAfter = 2;
+    if (mode === 'start-exit') p.exitAfter = 1;
+    if (mode === 'start-blocked') p.screen = ' Resume from summary?\n ❯ 1. Yes\n   2. No\n';
+    sessionStart(p, wenv);
+  } else {
+    p.agent = 'idle';
+    sessionStart(p, wenv);
+  }
+}
+
 // State: { next, workspaces: { <id>: { label, cwd, env } }, panes: { <id>: { ws, agent, trust?, screen?, ran? } } }.
 // agent is 'shell' (bare shell, no agent) or an agent_status. FAKE_HERDR_FAIL_<key>=<code> fails that
 // subcommand without touching the state; any call fails while the file $FAKE_HERDR_FAIL_WHILE exists. FAKE_HERDR_ON_RUN sets what `pane run` starts: 'idle' (default),
@@ -105,7 +170,8 @@ function runHook(script, payload, wenv) {
 
 function sessionStart(p, wenv) {
   if (process.env.FAKE_HERDR_SESSION_START === '0') return;
-  const payload = { hook_event_name: 'SessionStart', session_id: 's1', source: 'startup', model: 'claude-sonnet-5' };
+  const resumed = p.resume !== undefined;
+  const payload = { hook_event_name: 'SessionStart', session_id: resumed ? p.resume : 's1', source: resumed ? 'resume' : 'startup', model: 'claude-sonnet-5' };
   if (wenv.MAITRE_ROOM) runHook('maitre-hook.mjs', payload, wenv);
   else if ((p.ran ?? []).at(-1)?.includes("'reception'")) runHook('reception-request.mjs', payload, wenv);
 }
@@ -116,6 +182,14 @@ function stateful(file) {
   const fail = (c, message = c) => ({ out: JSON.stringify({ error: { code: c, message } }), code: 1 });
   const injected = process.env[`FAKE_HERDR_FAIL_${key}`];
   if (injected) return fail(injected, `fake-herdr: injected ${injected}`);
+  // FAKE_HERDR_FAIL_AFTER_<key>=<n>: that subcommand works n times, then fails (counted in the state).
+  const after = process.env[`FAKE_HERDR_FAIL_AFTER_${key}`];
+  if (after !== undefined) {
+    st.counts = st.counts ?? {};
+    st.counts[key] = (st.counts[key] ?? 0) + 1;
+    save();
+    if (st.counts[key] > Number(after)) return fail('injected_after', `fake-herdr: ${key} fails after ${after}`);
+  }
   const watched = process.env.FAKE_HERDR_FAIL_WHILE;
   if (watched && existsSync(watched)) return fail('called_while_locked', `fake-herdr: called while ${watched} exists`);
   const wsJson = (id) => ({ ...ws, workspace_id: id, label: st.workspaces[id].label });
@@ -179,6 +253,8 @@ function stateful(file) {
         const info = process.env.FAKE_HERDR_LOUNGE_INFO;
         const home = st.workspaces[p.ws].env?.MAITRE_HOME;
         if (info && home) writeFileSync(join(home, 'lounge.json'), info, { mode: 0o600 });
+      } else if (resumeId(rest[3]) !== undefined) {
+        resume(p, resumeId(rest[3]), st.workspaces[p.ws].env ?? {});
       } else if (on === 'trust') {
         p.agent = 'blocked';
         p.trust = true;
@@ -199,6 +275,24 @@ function stateful(file) {
     }
     case 'agent_get': {
       const p = st.panes[id];
+      // A Claude that settles on its own: idle after `idleAfter` more looks (its screen and dialog gone).
+      if (p && p.idleAfter !== undefined) {
+        if (p.idleAfter <= 0) {
+          p.agent = 'idle';
+          p.trust = false;
+          delete p.screen;
+          delete p.idleAfter;
+        } else p.idleAfter--;
+        save();
+      }
+      // A Claude that exits on its own: seen `exitAfter` more times, then a bare shell.
+      if (p && p.exitAfter !== undefined) {
+        if (p.exitAfter <= 0) {
+          p.agent = 'shell';
+          delete p.exitAfter;
+        } else p.exitAfter--;
+        save();
+      }
       if (!p || p.agent === 'shell') return fail('agent_not_found');
       return { out: ok('agent:get', { type: 'agent_info', agent: agentJson(id) }), code: 0 };
     }

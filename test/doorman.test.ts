@@ -8,6 +8,8 @@ import { processStart } from '../src/closing.js';
 import { RETRY_MS, activeCount, admit, appendToQueued, doormanTick, openQueued, queuedRooms, readFailed, readQueue, type QueueEntry } from '../src/doorman.js';
 import { closeRoom, janitorLog } from '../src/janitor.js';
 import { roomDir } from '../src/paths.js';
+import { writePr } from '../src/pr-state.js';
+import { writeIndex } from '../src/projects.js';
 import { failedFile, openingFile, queueFile, queueLock, writeQueue } from '../src/queue.js';
 import { listRoomRows, openRoom } from '../src/room-open.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
@@ -503,4 +505,41 @@ test('maitre room list degrades on a corrupt queue: one warning line, the rooms 
   assert.equal(r.stdout.trim().split('\n').length, 1);
   assert.match(r.stderr, /^maitre: warning: cannot read .+queue\.json: .+\n$/);
   assert.equal(r.stderr.split('\n').length, 2, 'one warning line');
+});
+
+test('a running code room whose pr.json says OPEN frees its seat; once MERGED it holds one again', async () => {
+  capacity(1);
+  const git = (cwd: string, ...args: string[]) => {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+    assert.equal(r.status, 0, r.stderr);
+  };
+  const remote = join(sb.dir, 'remote.git');
+  const clone = join(sb.dir, 'clone');
+  git(sb.dir, 'init', '-q', '--bare', '-b', 'main', remote);
+  git(sb.dir, 'clone', '-q', remote, clone);
+  git(clone, 'commit', '-q', '--allow-empty', '-m', 'init');
+  git(clone, 'push', '-q', 'origin', 'main');
+  writeIndex([{ name: 'proj', path: clone, base: 'main', branchPrefix: 'maitre/' }]);
+  const a = await openRoom({ name: 'a', project: 'proj', model: 'sonnet', taskType: 'change', brief: 'work on a' }, process.env, FAST);
+  assert.equal(await activeCount(), 1);
+  const pr = { url: 'https://github.com/o/r/pull/7', number: 7, headRefName: a.branch!, seenAt: Date.now(), failing: [] };
+  writePr('a', { ...pr, state: 'OPEN' });
+  assert.equal(await activeCount(), 0, 'at the bar: an open PR does not count, whatever the events say');
+  const seat = await admit(route('b'), ['1']);
+  assert.equal(seat.kind, 'open');
+  if (seat.kind === 'open') seat.release();
+  writePr('a', { ...pr, state: 'MERGED' });
+  assert.equal(await activeCount(), 1);
+});
+
+test('a queued room that continues a closed one opens with the minutes, and a near-limit request does not break the open', async () => {
+  const dir = join(sb.home, 'memory', 'minutes');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, '2026-11-01-old.md'), `---\nroom: "old"\nclosed: 2026-11-01T10:00:00.000Z\n---\n\n## What was asked\n\nthe old one\n\n${'x'.repeat(9000)}\n`);
+  request(1, 'r'.repeat(95_000));
+  const e = { ...entry('again', ['1'], 1), route: { ...route('again'), continues: 'old' } };
+  await openQueued(e, process.env);
+  const brief = readFileSync(join(roomDir('again'), 'brief.md'), 'utf8');
+  assert.ok(Buffer.byteLength(brief) <= 100_000 + 100);
+  assert.match(brief, /# Minutes of old \(closed 2026-11-01\)/);
 });

@@ -3,8 +3,9 @@ import type { HookLine } from './events.js';
 
 export const BRIEF_HEADER = '# Brief from the maître reception';
 
-// 'queue' and 'couch' are never the reducer's: LiveRooms shows them from queue.json and the registry.
-export type LiveState = 'coffee' | 'work' | 'smoke' | 'blocked' | 'ready' | 'whisky' | 'exit' | 'queue' | 'couch';
+// 'queue', 'couch', 'parked' and 'dance' are never the reducer's: LiveRooms shows them from queue.json,
+// the registry and pr.json.
+export type LiveState = 'coffee' | 'work' | 'smoke' | 'blocked' | 'ready' | 'whisky' | 'exit' | 'queue' | 'couch' | 'parked' | 'dance';
 export type ModelKey = 'haiku' | 'sonnet' | 'opus' | 'fable' | 'unknown';
 
 export interface Block {
@@ -37,6 +38,10 @@ export interface RoomState {
   kind?: 'code' | 'scratch';
   couchReasons?: string[];
   queuePosition?: number;
+  // A parked room shown in another state (dancing): it is still woken, it has no tab.
+  parked?: true;
+  // From pr.json: url only when it is a GitHub PR URL.
+  notice?: { kind: 'ci' | 'review' | 'merged' | 'closed'; text: string; url?: string };
 }
 
 interface Pending {
@@ -171,12 +176,15 @@ export function reduce(prev: RoomState | undefined, ev: HookLine): RoomState {
   if (session === 'stale') return prev!;
   // An exited room never comes back for its own session's late lines. SessionStart only fires on a
   // real (re)start, so it reopens the room even with the same id (--resume); the other openers need a new id.
+  // maître's starting note marks a (re)start too: a resume can stop on a question before its SessionStart.
+  const restarting = event === 'MaitreStatus' && ev.status === 'blocked' && ev.starting === true;
   const reopens =
     prev?.state === 'exit' &&
-    (event === 'SessionStart' || (OPENS_SESSION.has(event) && (str(ev.session) ?? '') !== '' && ev.session !== prev.session));
+    (event === 'SessionStart' || restarting || (OPENS_SESSION.has(event) && (str(ev.session) ?? '') !== '' && ev.session !== prev.session));
   if (prev?.state === 'exit' && !reopens) return prev;
   const reset = prev === undefined || session === 'new' || reopens;
-  const base: Tracked = reset ? fresh({ ...ev, room: str(ev.room) ?? '', session: str(ev.session) ?? '' }, prev) : (prev as Tracked);
+  const resumed = restarting && prev !== undefined ? prev.session : '';
+  const base: Tracked = reset ? fresh({ ...ev, room: str(ev.room) ?? '', session: str(ev.session) || resumed }, prev) : (prev as Tracked);
   const s: Tracked = { ...base, room: str(ev.room) || base.room, session: base.session || (str(ev.session) ?? ''), updatedAt: ev.ts };
   const track: Track = { pending: [], finished: [], ...base[TRACK] };
   const agentId = str(ev.agent_id);

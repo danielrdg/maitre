@@ -19,6 +19,7 @@ import { deliverToRoom, describeDelivery, describeOpen, listRoomRows, openRoom, 
 import { attach, runReception, startMaitre } from './reception.js';
 import { parseSetupArgs, runSetup, type SetupOptions } from './setup.js';
 import { reservedFlag, runRoom } from './room-run.js';
+import { wakeRoom } from './wake.js';
 import { describeRoute, dispatchRoute, isRequestId, routeRequests } from './router.js';
 import { STATUSES, runStatus, type RoomStatus } from './status.js';
 
@@ -37,6 +38,7 @@ export type CliArgs =
   | { cmd: 'room-send'; room: string; text: string }
   | { cmd: 'room-list' }
   | { cmd: 'room-close'; room: string }
+  | { cmd: 'room-wake'; room: string }
   | { cmd: 'janitor'; dryRun: boolean }
   | { cmd: 'status'; status: RoomStatus; text: string; options: string[] }
   | { cmd: 'index'; roots: string[] }
@@ -52,7 +54,7 @@ export type CliArgs =
 
 const ROOM_RUN_USAGE = 'usage: maitre room run <name> [--brief-file <path>] [-- <claude args>]';
 const ROOM_OPEN_USAGE = 'usage: maitre room open <name> [--project <p>] --model <m> --task <type> (--brief "<text>" | --brief-file <path>)';
-const ROOM_USAGE = 'usage: maitre room <open|send|list|close|run> ...';
+const ROOM_USAGE = 'usage: maitre room <open|send|list|close|wake|run> ...';
 const INDEX_USAGE = 'usage: maitre index [--root <dir>]...';
 const ROUTE_USAGE = 'usage: maitre route <id> [<id>...] [--json]';
 const DISPATCH_USAGE = 'usage: maitre dispatch <id>';
@@ -125,6 +127,7 @@ function parseRoom(argv: string[]): CliArgs {
   }
   if (sub === 'list') return rest.length === 0 ? { cmd: 'room-list' } : usage('usage: maitre room list');
   if (sub === 'close') return rest.length === 1 && isName(rest[0]) ? { cmd: 'room-close', room: rest[0] } : usage('usage: maitre room close <room>');
+  if (sub === 'wake') return rest.length === 1 && isName(rest[0]) ? { cmd: 'room-wake', room: rest[0] } : usage('usage: maitre room wake <room>');
   return usage(ROOM_USAGE);
 }
 
@@ -210,6 +213,7 @@ Usage:
   maitre room send <room> "<text>"
   maitre room list
   maitre room close <room>
+  maitre room wake <room>
   maitre room run <name> [--brief-file <path>] [-- <claude args>]
   maitre status <working|waiting|blocked> "<text>" [--option <o>]...
   maitre index [--root <dir>]...
@@ -231,6 +235,7 @@ Commands:
   room send     Send a message to a running room without waiting for its turn
   room list     List rooms with their herdr status and lounge state
   room close    Write a room's minutes, exit it and close its tab (its directory is kept)
+  room wake     Bring back a parked room (or one whose Claude died) by resuming its session in a new tab
   room run      Start Claude Code in a named room the lounge can see
   index         Scan roots for git repos and write the project index
   projects      List indexed projects
@@ -285,7 +290,7 @@ function waiting(room: string): boolean {
   }
 }
 
-async function roomCommand(args: Extract<CliArgs, { cmd: 'room-open' | 'room-send' | 'room-list' | 'room-close' }>): Promise<void> {
+async function roomCommand(args: Extract<CliArgs, { cmd: 'room-open' | 'room-send' | 'room-list' | 'room-close' | 'room-wake' }>): Promise<void> {
   if (args.cmd === 'room-open') {
     let brief = args.brief;
     if (brief === undefined) {
@@ -307,6 +312,8 @@ async function roomCommand(args: Extract<CliArgs, { cmd: 'room-open' | 'room-sen
   } else if (args.cmd === 'room-send') {
     const room = roomSlug(args.room);
     console.log(describeDelivery(room, await deliverToRoom(room, args.text, process.env, sendConfirm())));
+  } else if (args.cmd === 'room-wake') {
+    for (const line of (await wakeRoom(args.room)).lines) console.log(line);
   } else if (args.cmd === 'room-list') {
     const rows = await listRoomRows(process.env, { warn: (w) => console.error(`maitre: warning: ${w}`) });
     console.log(rows.length === 0 ? 'no rooms' : formatRows(rows).join('\n'));
@@ -433,7 +440,7 @@ export async function main(argv: string[]): Promise<void> {
     process.exitCode = runStatus(args.status, args.text, args.options);
     return;
   }
-  if (args.cmd === 'room-open' || args.cmd === 'room-send' || args.cmd === 'room-list' || args.cmd === 'room-close') {
+  if (args.cmd === 'room-open' || args.cmd === 'room-send' || args.cmd === 'room-list' || args.cmd === 'room-close' || args.cmd === 'room-wake') {
     try {
       await roomCommand(args);
     } catch (err) {

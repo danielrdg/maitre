@@ -13,7 +13,7 @@ export interface Pending {
 }
 
 const GIT_TIMEOUT_MS = 60_000;
-const NET_TIMEOUT_MS = 20_000;
+export const NET_TIMEOUT_MS = 20_000;
 const MAX_BUFFER = 16 * 1024 * 1024;
 const IN_PROGRESS = ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG', 'sequencer'];
 // Inherited (e.g. from a git hook), these point git at another repository than the worktree.
@@ -22,9 +22,9 @@ const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const REFLOG_LIMIT = 200;
 const BRANCH_REFLOG_LIMIT = 2000;
 
-class CheckError extends Error {}
+export class CheckError extends Error {}
 
-interface Result {
+export interface Result {
   code: number;
   stdout: string;
   stderr: string;
@@ -42,7 +42,7 @@ function firstLine(s: string): string {
   return s.split('\n').map((l) => l.trim()).find((l) => l !== '') ?? '';
 }
 
-function run(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeout: number): Promise<Result> {
+export function run(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeout: number): Promise<Result> {
   return new Promise((done, fail) => {
     execFile(cmd, args, { cwd, env, timeout, maxBuffer: MAX_BUFFER, encoding: 'utf8' }, (err, stdout, stderr) => {
       if (err === null) return done({ code: 0, stdout, stderr });
@@ -55,16 +55,16 @@ function run(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, t
   });
 }
 
-function must(cmd: string, args: string[], r: Result): string {
+export function must(cmd: string, args: string[], r: Result): string {
   if (r.code !== 0) throw new CheckError(`${cmd} ${args[0]}: ${firstLine(r.stderr) || `exit ${r.code}`}`);
   return r.stdout;
 }
 
-function message(err: unknown): string {
+export function message(err: unknown): string {
   return err instanceof CheckError ? err.message : firstLine(err instanceof Error ? err.message : String(err));
 }
 
-function toolEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function toolEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = { ...cleanEnv(env), GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GH_PROMPT_DISABLED: '1' };
   for (const k of REPO_VARS) delete out[k];
   if (!out.GIT_SSH_COMMAND) out.GIT_SSH_COMMAND = 'ssh -o BatchMode=yes';
@@ -101,13 +101,15 @@ function changedPaths(out: string): string[] {
 const SHOWN_PATHS = 3;
 const PATH_MAX = 60;
 
-// File names reach room list, the log and the minutes: control characters (C0, C1) and bidi overrides
-// are replaced, long names clipped.
+// Outside text (file names, PR check names, logins) reaches room list, the log and the minutes:
+// control characters (C0, C1) and bidi overrides are replaced, long text clipped.
+export function shownText(s: string, max: number): string {
+  const flat = s.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, '?');
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
 function shownPaths(paths: string[]): string {
-  const clean = paths.slice(0, SHOWN_PATHS).map((p) => {
-    const flat = p.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, '?');
-    return flat.length > PATH_MAX ? `${flat.slice(0, PATH_MAX - 1)}…` : flat;
-  });
+  const clean = paths.slice(0, SHOWN_PATHS).map((p) => shownText(p, PATH_MAX));
   return [...clean, ...(paths.length > SHOWN_PATHS ? ['…'] : [])].join(', ');
 }
 

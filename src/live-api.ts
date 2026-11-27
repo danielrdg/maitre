@@ -1,15 +1,24 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { isClosing } from './closing.js';
 import { countsAsActivity, type HookLine } from './events.js';
+import { herdrSession } from './herdr.js';
 import type { LoungeAuth, TicketStore } from './lounge-server.js';
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { roomDir } from './paths.js';
+import { shownText } from './pending.js';
+import { patchPr, readPr, readsNotice, type PrState } from './pr-state.js';
 import { queueFile, readQueue, type QueueEntry } from './queue.js';
 import { couchHolds, parked, readRoom, type RoomRecord } from './rooms.js';
 import { modelKey, reduce, type RoomState } from './room-state.js';
+import { isSessionId } from './wake.js';
 
 const PING_MS = 15_000;
 const WATCH_MS = 1_000;
+const NOTICE_MAX = 200;
+const DANCES_OVER = new Set(['ready', 'coffee', 'whisky', 'couch', 'parked']);
+// The only links the lounge is given: the page puts it in an href.
+const PR_LINK = /^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/pull\/\d+$/;
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
@@ -46,10 +55,70 @@ export class LiveRooms {
   // events reach the tail, so the agent walks from the sidewalk to its table instead of out and back in.
   private readonly handoff = new Map<string, RoomState>();
 
-  constructor(private readonly env: NodeJS.ProcessEnv = process.env) {}
+  // The newest real prompt per room (the main agent's, not synthetic): a PR notice older than it is read.
+  private readonly lastPrompt = new Map<string, number>();
+  private readonly now: () => number;
+
+  constructor(
+    private readonly env: NodeJS.ProcessEnv = process.env,
+    opts: { now?: () => number } = {},
+  ) {
+    this.now = opts.now ?? Date.now;
+  }
 
   // Keyed by room.json's mtime: the file is read again only when it changes.
   private readonly registry = new Map<string, { stamp: string; rec: RoomRecord | undefined }>();
+  // pr.json, keyed the same way.
+  private readonly prs = new Map<string, { stamp: string; pr: PrState | undefined }>();
+
+  // This opening's PR (as roomPr reads it): one an earlier room of the same name left says nothing.
+  private prOf(rec: RoomRecord): PrState | undefined {
+    let stamp: string;
+    try {
+      const st = statSync(join(roomDir(rec.room, this.env), 'pr.json'));
+      stamp = `${st.mtimeMs}:${st.size}`;
+    } catch {
+      this.prs.delete(rec.room);
+      return undefined;
+    }
+    let hit = this.prs.get(rec.room);
+    if (hit?.stamp !== stamp) {
+      hit = { stamp, pr: readPr(rec.room, this.env) };
+      this.prs.set(rec.room, hit);
+    }
+    const pr = hit.pr;
+    return pr !== undefined && pr.headRefName === rec.branch && pr.seenAt >= rec.createdAt ? pr : undefined;
+  }
+
+  // Claude stopped with the room still open: released for its seat, or gone with a session to resume.
+  // Gone is an exit line, or closedAt (found not running) with nothing since: a reboot writes no exit line.
+  // A room being closed is not parked: its tab closes before closedBy is written.
+  private parked(state: RoomState): boolean {
+    const rec = this.record(state.room);
+    if (rec === undefined || rec.closedBy !== undefined) return false;
+    const dead =
+      state.state === 'exit' || (typeof rec.closedAt === 'number' && (this.lastEvent.get(state.room) ?? state.updatedAt) <= rec.closedAt);
+    if (!dead) return false;
+    const seat: unknown = rec.seat;
+    if (typeof seat === 'object' && seat !== null && isSessionId((seat as { session?: unknown }).session)) return true;
+    if (!isSessionId(state.session)) return false;
+    if (rec.herdr !== undefined && rec.herdr.session !== herdrSession(this.env)) return false;
+    return !isClosing(state.room, this.env);
+  }
+
+  // A real prompt after a notice: the room was told, the notice goes (pr.json too).
+  private promptSeen(line: HookLine): void {
+    if (!readsNotice(line) || typeof line.ts !== 'number') return;
+    this.lastPrompt.set(line.room, Math.max(this.lastPrompt.get(line.room) ?? -Infinity, line.ts));
+    const rec = this.record(line.room);
+    const since = rec && this.prOf(rec)?.notice?.since;
+    if (since === undefined || !(line.ts > since)) return;
+    try {
+      patchPr(line.room, ({ notice, ...pr }) => (notice !== undefined && line.ts > notice.since ? pr : undefined), this.env);
+    } catch {
+      // shown as read all the same
+    }
+  }
 
   private record(room: string): RoomRecord | undefined {
     let stamp: string;
@@ -94,7 +163,7 @@ export class LiveRooms {
     return this.queue.rooms;
   }
 
-  private view(state: RoomState): RoomState {
+  private view(state: RoomState, isParked = false): RoomState {
     const rec = this.record(state.room);
     if (!rec) return state;
     const out: RoomState = { ...state };
@@ -106,6 +175,19 @@ export class LiveRooms {
     if (couch !== undefined && couchHolds(couch, state.state, this.lastEvent.get(state.room) ?? state.updatedAt)) {
       out.state = 'couch';
       out.couchReasons = couch.reasons;
+    }
+    if (isParked) out.state = 'parked';
+    if (out.state === 'exit') return out;
+    const pr = this.prOf(rec);
+    const n = pr?.notice;
+    if (n !== undefined && (this.lastPrompt.get(state.room) ?? -Infinity) <= n.since) {
+      out.notice = { kind: n.kind, text: shownText(n.text, NOTICE_MAX), ...(PR_LINK.test(n.url) ? { url: n.url } : {}) };
+    }
+    // Only over a room at rest: one that works or needs you keeps its state, its alert and its bell.
+    if (pr?.state === 'MERGED' && pr.dance !== undefined && this.now() < pr.dance.until && DANCES_OVER.has(out.state)) {
+      if (out.state === 'parked') out.parked = true;
+      out.state = 'dance';
+      delete out.couchReasons;
     }
     return out;
   }
@@ -134,12 +216,12 @@ export class LiveRooms {
       }
     }
     if (live !== undefined && live.state !== 'exit' && (queued === undefined || live.updatedAt > queued.since)) {
-      if (!this.closed(live)) return this.view(live);
+      if (!this.closed(live)) return this.view(live, this.parked(live));
       const { couchReasons: _c, ...gone } = this.view(live);
       return { ...gone, state: 'exit' };
     }
     if (queued !== undefined) return queued;
-    return live && this.view(live);
+    return live && this.view(live, this.parked(live));
   }
 
   private emit(room: RoomState): void {
@@ -156,6 +238,7 @@ export class LiveRooms {
 
   apply(line: HookLine): RoomState {
     if (typeof line.ts === 'number' && countsAsActivity(line)) this.lastEvent.set(line.room, Math.max(this.lastEvent.get(line.room) ?? -Infinity, line.ts));
+    this.promptSeen(line);
     const prev = this.rooms.get(line.room);
     const next = reduce(prev, line);
     if (next === prev) return next;
@@ -172,7 +255,8 @@ export class LiveRooms {
     for (const room of new Set([...this.rooms.keys(), ...before.keys(), ...queued.keys(), ...this.handoff.keys()])) {
       const was = this.shown.get(room);
       const quiet = was === undefined || was.state === 'exit';
-      if (quiet && this.rooms.get(room)?.state === 'exit' && !queued.has(room) && !this.handoff.has(room)) continue;
+      const live = this.rooms.get(room);
+      if (quiet && live?.state === 'exit' && !queued.has(room) && !this.handoff.has(room) && !this.parked(live)) continue;
       const left = before.get(room);
       const now = this.present(room) ?? (left && { ...withoutPosition(left), state: 'exit' as const });
       if (now === undefined || (now.state === 'exit' && quiet)) continue;

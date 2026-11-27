@@ -1,5 +1,6 @@
 import { t } from './i18n.js';
 import { MODEL } from './sprites.js';
+import { PR_LINK } from './live.js';
 
 // Every piece of agent-sourced text goes through textContent.
 
@@ -33,8 +34,10 @@ export function panelModel(agent, lang = 'en', now = Date.now()) {
   const info = agent.info || {};
   const modelKey = MODEL[agent.look.model] && agent.look.model !== 'tux' ? agent.look.model : 'queued';
   const b = agent.state === 'blocked' ? info.block : undefined;
-  // Only a live room's main agent has a terminal; a subagent's id is `<room>/<id>`. A queued room has no tab yet.
+  // Only a live room's main agent has a terminal; a subagent's id is `<room>/<id>`. A queued room has no tab yet,
+  // a parked one no longer has one: it is woken instead.
   const room = info.live && !String(agent.id).includes('/') && agent.state !== 'queue' ? String(agent.id) : undefined;
+  const parked = room !== undefined && info.parked === true;
   const block = !b ? undefined : b.kind ? liveBlock(b, lang) : {
     reason: b.reason,
     options: b.options.map((o, i) => ({ key: 'ABC'[i], text: o.text, detail: o.detail, recommended: !!o.recommended })),
@@ -44,7 +47,7 @@ export function panelModel(agent, lang = 'en', now = Date.now()) {
     model: t(`model.${modelKey}`, lang),
     modelColor: MODEL[modelKey][0],
     stateKey: agent.state,
-    state: t(`state.${agent.state}`, lang),
+    state: t(parked ? 'state.parked' : `state.${agent.state}`, lang),
     task: info.task || '—',
     where: info.where || '—',
     steps: [...(info.steps || [])],
@@ -52,15 +55,24 @@ export function panelModel(agent, lang = 'en', now = Date.now()) {
     minutes: info.minutes ?? 0,
     tokens: info.tokens ?? '—',
     ...usageFor(info, lang, now),
-    ...(room === undefined ? {} : { terminal: true, room }),
+    ...(room === undefined ? {} : parked ? { wake: true, room } : { terminal: true, room }),
     ...waitLine(agent, info, lang),
+    ...noticeFor(info, lang),
     block,
   };
+}
+
+// A PR notice: its text as the server cleaned it, and a link only to a GitHub PR.
+function noticeFor(info, lang) {
+  const n = info.live ? info.notice : undefined;
+  if (!n || typeof n.text !== 'string') return {};
+  return { notice: { label: t(`notice.${n.kind}`, lang), text: n.text, ...(typeof n.url === 'string' && PR_LINK.test(n.url) ? { url: n.url } : {}) } };
 }
 
 // Why a live room is on the sidewalk or the couch.
 function waitLine(agent, info, lang) {
   if (!info.live) return {};
+  if (info.parked === true) return { wait: t('panel.parked', lang) };
   if (agent.state === 'queue' && Number.isInteger(info.queuePosition)) return { wait: t('panel.queued', lang, { n: info.queuePosition }) };
   if (agent.state === 'sleep' && Array.isArray(info.couchReasons)) return { wait: t('panel.couch', lang, { reasons: info.couchReasons.join('; ') }) };
   return {};
@@ -112,7 +124,51 @@ function terminalRow(doc, lang, onTerminal, error) {
   return row;
 }
 
-export function renderPanel(root, model, onAnswer, { lang = 'en', portrait = null, onClose = null, onTerminal = null, terminalError = null } = {}) {
+// onWake() resolves to { ok: true, lines } or { ok: false, message }, or null when nothing is to be told.
+// `waking` and `result` survive a re-render, which a room event triggers.
+function wakeRow(doc, lang, onWake, { waking = false, result = null } = {}) {
+  const row = el(doc, 'div', 'term');
+  const btn = el(doc, 'button', 'opt', t(waking ? 'panel.waking' : 'panel.wake', lang));
+  btn.disabled = waking;
+  const out = el(doc, 'div', 'woke');
+  const show = r => { if (r) fillWake(doc, lang, out, r); };
+  show(result);
+  btn.addEventListener('click', () => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = t('panel.waking', lang);
+    new Promise(r => r(onWake()))
+      .then(show, e => show({ ok: false, message: String(e?.message ?? e) }))
+      .finally(() => { btn.disabled = false; btn.textContent = t('panel.wake', lang); });
+  });
+  row.append(btn, out);
+  return row;
+}
+
+function fillWake(doc, lang, out, r) {
+  out.className = r.ok ? 'woke' : 'termerr';
+  out.replaceChildren(...(r.ok ? r.lines.map(l => el(doc, 'div', null, l)) : [el(doc, 'div', null, t('panel.wakeFailed', lang, { message: r.message }))]));
+  return out;
+}
+
+const wakeLines = (doc, lang, r) => fillWake(doc, lang, el(doc, 'div', 'woke'), r);
+
+function noticeBox(doc, lang, n) {
+  const box = el(doc, 'div', 'prnote');
+  box.append(el(doc, 'b', null, n.label), el(doc, 'div', null, n.text));
+  if (n.url) {
+    const a = el(doc, 'a', null, t('panel.prLink', lang));
+    a.href = n.url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    box.append(a);
+  }
+  return box;
+}
+
+export function renderPanel(root, model, onAnswer, {
+  lang = 'en', portrait = null, onClose = null, onTerminal = null, terminalError = null, onWake = null, waking = false, wakeResult = null,
+} = {}) {
   const doc = root.ownerDocument;
   root.replaceChildren();
 
@@ -136,6 +192,7 @@ export function renderPanel(root, model, onAnswer, { lang = 'en', portrait = nul
 
   root.append(close, head);
   if (model.wait) root.append(el(doc, 'div', 'wait', model.wait));
+  if (model.notice) root.append(el(doc, 'div', 'lbl', t('panel.notice', lang)), noticeBox(doc, lang, model.notice));
   root.append(
     el(doc, 'div', 'lbl', t('panel.doing', lang)), el(doc, 'div', null, model.task),
     el(doc, 'div', 'lbl', t('panel.where', lang)), el(doc, 'div', null, model.where),
@@ -144,6 +201,10 @@ export function renderPanel(root, model, onAnswer, { lang = 'en', portrait = nul
   if (model.reply) root.append(el(doc, 'div', 'lbl', t('panel.lastReply', lang)), el(doc, 'div', 'reply', model.reply));
   if (model.usage != null) root.append(el(doc, 'div', 'lbl', model.usageLabel), el(doc, 'div', null, model.usage));
   if (model.terminal && onTerminal) root.append(terminalRow(doc, lang, onTerminal, terminalError));
+  if (model.wake && onWake) root.append(wakeRow(doc, lang, onWake, { waking, result: wakeResult }));
+  // A woken room leaves the couch before the wake answers: its lines (a question in its tab, a fresh
+  // Claude) are still shown.
+  else if (model.room && wakeResult) root.append(wakeLines(doc, lang, wakeResult));
 
   if (model.block?.readOnly) {
     root.append(readOnlyBlock(doc, model.block, lang));

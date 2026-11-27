@@ -423,14 +423,19 @@ export async function dispatchRouteDetailed(id: string, env: NodeJS.ProcessEnv =
       // A fresh Claude got the request in its brief; a room waiting on the user cannot take it now.
       if (!woken.resumed) return { room, lines: woken.lines, needsYou: woken.needsYou };
       if (woken.needsYou) return { room, lines: [...woken.lines, 'the request was not sent: send it again once the room is ready in its tab'], needsYou: true };
-      return { room, lines: [...woken.lines, describeDelivery(room, await deliverToRoom(room, text, env, opts))], needsYou: false };
+      const sent = await deliverToRoom(room, text, env, opts);
+      return { room, lines: [...woken.lines, describeDelivery(room, sent)], needsYou: sent.result === 'unsent' };
     }
-    return { room, lines: [describeDelivery(room, await deliverToRoom(room, text, env, opts))], needsYou: false };
+    const sent = await deliverToRoom(room, text, env, opts);
+    return { room, lines: [describeDelivery(room, sent)], needsYou: sent.result === 'unsent' };
   }
   const seat = await admit(r, requestIds, env);
   const room = roomSlug(r.room.name);
   if (seat.kind === 'queued') return queuedReply(room, `queued: ${room} waits for a seat (position ${seat.position})`, env);
-  if (seat.kind === 'running') return { room, lines: [describeDelivery(room, await deliverToRoom(room, text, env, opts))], needsYou: false };
+  if (seat.kind === 'running') {
+    const sent = await deliverToRoom(room, text, env, opts);
+    return { room, lines: [describeDelivery(room, sent)], needsYou: sent.result === 'unsent' };
+  }
   let rec;
   try {
     rec = await openRoom({ name: r.room.name, ...(r.project !== null ? { project: r.project } : {}), model: r.model, taskType: r.taskType, brief: withMinutes(text, r.continues, r.project, env) }, env);

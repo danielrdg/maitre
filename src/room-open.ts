@@ -15,6 +15,7 @@ import {
   prompt,
   readPane,
   runInPane,
+  sendKeys,
   shellQuote,
   type AgentInfo,
 } from './herdr.js';
@@ -343,8 +344,25 @@ export async function sendToRoom(
   text: string,
   env: NodeJS.ProcessEnv = process.env,
   opts: { confirmMs?: number } = {},
-): Promise<'delivered' | 'unconfirmed'> {
+): Promise<Delivered['result']> {
   return (await deliverToRoom(room, text, env, opts)).result;
+}
+
+// unsent: the request sits typed in the room's input box (or something else is there): it needs Enter by hand.
+export interface Delivered {
+  result: 'delivered' | 'unconfirmed' | 'unsent';
+  busy: boolean;
+}
+
+const RETYPE_MS = 500;
+const sameTyped = (a: string, b: string): boolean => a.replace(/\s+/g, '') === b.replace(/\s+/g, '');
+
+async function boxText(paneId: string): Promise<string | undefined> {
+  try {
+    return inputText(await readPane(paneId, undefined, { ansi: true }));
+  } catch {
+    return undefined;
+  }
 }
 
 // busy: the room was working; Claude Code injects the text into the running turn, between tool calls.
@@ -354,7 +372,7 @@ export async function deliverToRoom(
   text: string,
   env: NodeJS.ProcessEnv = process.env,
   opts: { confirmMs?: number; closing?: string } = {},
-): Promise<{ result: 'delivered' | 'unconfirmed'; busy: boolean }> {
+): Promise<Delivered> {
   const slug = roomSlug(room);
   const rec = readRoom(slug, env);
   if (rec === undefined) throw noRoom(slug);
@@ -376,12 +394,26 @@ export async function deliverToRoom(
     if (e instanceof RoomBlockedError) throw waitingOnYou(slug);
     throw e;
   }
-  const ok = await confirmed(file, offset, text, opts.confirmMs ?? CONFIRM_MS);
-  return { result: ok ? 'delivered' : 'unconfirmed', busy: live === 'working' };
+  const ms = opts.confirmMs ?? CONFIRM_MS;
+  if (await confirmed(file, offset, text, ms)) return { result: 'delivered', busy: live === 'working' };
+  // A busy room takes the text into its running turn; an empty or unreadable box says nothing either way.
+  if (live === 'working') return { result: 'unconfirmed', busy: true };
+  const paneId = rec.herdr!.paneId;
+  const held = await boxText(paneId);
+  if (held === undefined || held === '') return { result: 'unconfirmed', busy: false };
+  // Typed but not submitted (a Claude still finishing its start): one more Enter, only over maître's own text.
+  if (!sameTyped(held, text)) return { result: 'unsent', busy: false };
+  await sleep(RETYPE_MS);
+  const still = await boxText(paneId);
+  if (still === undefined || still === '') return { result: (await confirmed(file, offset, text, ms)) ? 'delivered' : 'unconfirmed', busy: false };
+  if (!sameTyped(still, text)) return { result: 'unsent', busy: false };
+  await sendKeys(paneId, 'enter');
+  return { result: (await confirmed(file, offset, text, ms)) ? 'delivered' : 'unsent', busy: false };
 }
 
-export function describeDelivery(room: string, r: { result: 'delivered' | 'unconfirmed'; busy: boolean }): string {
+export function describeDelivery(room: string, r: Delivered): string {
   if (r.result === 'delivered') return `sent to ${room}`;
+  if (r.result === 'unsent') return `typed into ${room}'s input but not sent — press Enter in its tab`;
   if (r.busy) return `sent to ${room} — it's busy and will see it during this turn`;
   return `sent to ${room} (not confirmed: the room has not shown it yet)`;
 }

@@ -12,7 +12,7 @@ import { readRoom, writeRoom } from '../src/rooms.js';
 import { BRIEF_HEADER } from '../src/room-open.js';
 import { continuedMinutes, hasMinutes, recentMinutes, withMinutes } from '../src/minutes.js';
 import { MAX_BRIEF_BYTES } from '../src/room-open.js';
-import { ROUTER_SYSTEM, RouterError, buildRouterPrompt, modelFor, parseRoute, route, routerArgs, type Route } from '../src/router.js';
+import { ROUTER_SYSTEM, RouterError, buildRouterPrompt, dispatchRouteDetailed, modelFor, parseRoute, route, routerArgs, type Route } from '../src/router.js';
 import { queuedRooms, readFailed, readQueue } from '../src/doorman.js';
 import { openingFile, queueLock, writeQueue } from '../src/queue.js';
 import { QUEUE_HINT } from '../src/router.js';
@@ -340,6 +340,17 @@ test('maitre dispatch to an existing room sends the request text, and route offe
   assert.equal(d.status, 0, d.stderr);
   assert.equal(d.stdout, 'sent to nf-bug\n');
   assert.equal(sb.calls().filter((c) => c[0] === 'agent' && c[1] === 'prompt').at(-1)?.[3], 'also handle the cancelled notes');
+});
+
+test('a dispatch whose request is left typed in the room needs you, and says to press Enter there', async () => {
+  writeIndex(PROJECTS);
+  await openRoom({ name: 'nf-bug', project: undefined, model: 'sonnet', taskType: 'change', brief: 'fix the NF bug' }, process.env, FAST);
+  writeRequest(12, 'also handle the cancelled notes');
+  mkdirSync(join(sb.home, 'reception', 'routes'), { recursive: true });
+  writeFileSync(routeFile(12), JSON.stringify({ route: { project: null, room: { kind: 'existing', name: 'nf-bug' }, taskType: 'change', model: 'sonnet', hasCode: true, confidence: 0.7 }, requestIds: ['12'] }));
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-stuck';
+  const d = await dispatchRouteDetailed('12', process.env, { confirmMs: 300 });
+  assert.deepEqual(d, { room: 'nf-bug', lines: ["typed into nf-bug's input but not sent — press Enter in its tab"], needsYou: true });
 });
 
 test('maitre route renames a new room that collides with a room of another project', async () => {

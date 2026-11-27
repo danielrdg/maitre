@@ -335,6 +335,11 @@ function stateful(file) {
       if (!p) return fail('pane_not_found');
       if (p.agent === 'shell') return fail('agent_not_found');
       const keys = rest.slice(3);
+      if (p.typed !== undefined && keys.join(' ') === 'enter' && process.env.FAKE_HERDR_PROMPT_HOOK === 'typed') {
+        runHook('maitre-hook.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's1', prompt: p.typed }, st.workspaces[p.ws].env ?? {});
+        delete p.typed;
+        delete p.screen;
+      }
       if (p.trust && process.env.FAKE_HERDR_TRUST_STICKY !== '1') {
         p.trust = false;
         p.agent = keys.join(' ') === 'down enter' ? 'idle' : 'shell';
@@ -348,8 +353,13 @@ function stateful(file) {
       if (!p || p.agent === 'shell') return fail('agent_not_found');
       if (p.agent === 'blocked') return fail('agent_blocked');
       const text = rest[3];
+      const hook = process.env.FAKE_HERDR_PROMPT_HOOK;
       if (text === '/exit') p.agent = 'shell';
-      else if (process.env.FAKE_HERDR_PROMPT_HOOK !== '0') {
+      else if (hook === 'typed' || hook === 'typed-stuck') {
+        // Typed but not submitted: the text sits in the input box; Enter submits it ('typed' only).
+        p.typed = text;
+        p.screen = `${RULE}\n❯\u00a0${text}\n${RULE}\n`;
+      } else if (hook !== '0') {
         runHook('maitre-hook.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's1', prompt: process.env.FAKE_HERDR_PASTE === '1' ? `\n\n<pasted_content id="7">\n${text}\n</pasted_content id="7">\n` : text }, st.workspaces[p.ws].env ?? {});
       }
       save();

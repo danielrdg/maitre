@@ -10,7 +10,7 @@ import { roomDir } from '../src/paths.js';
 import { readPr, writePr } from '../src/pr-state.js';
 import { writeIndex, type Project } from '../src/projects.js';
 import { closeRoom } from '../src/janitor.js';
-import { BRIEF_HEADER, inputText, listRoomRows, markNotRunning, openRoom, promptMatches, roomLabel, sendToRoom, unwrapPasted } from '../src/room-open.js';
+import { BRIEF_HEADER, deliverToRoom, describeDelivery, inputText, listRoomRows, markNotRunning, openRoom, promptMatches, roomLabel, sendToRoom, unwrapPasted } from '../src/room-open.js';
 import { reduce, type RoomState } from '../src/room-state.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
 import { herdrSandbox, type HerdrSandbox } from './herdr-sandbox.js';
@@ -337,6 +337,34 @@ test('room send refuses a message over the brief limit with one line, typing not
   assert.deepEqual(herdrCalls('agent', 'prompt'), []);
   await sendToRoom('x', 'a'.repeat(100_000));
   assert.equal(herdrCalls('agent', 'prompt').length, 1);
+});
+
+const enters = () => sb.calls().filter((c) => c[0] === 'agent' && c[1] === 'send-keys' && c.slice(3).join(' ') === 'enter');
+
+test('a request left typed in the input box gets one more Enter, and is confirmed then', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 }), { result: 'delivered', busy: false });
+  assert.equal(enters().length, 1);
+});
+
+test('a request still unsent after that Enter is reported typed, to be sent by hand', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-stuck';
+  const r = await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 });
+  assert.deepEqual(r, { result: 'unsent', busy: false });
+  assert.equal(enters().length, 1, 'one Enter, not more');
+  assert.equal(describeDelivery('x', r), "typed into x's input but not sent — press Enter in its tab");
+});
+
+test("text in the input box that maître did not type never gets an Enter: the request is reported unsent", async () => {
+  await openScratch();
+  const st = sb.state();
+  st.panes['w1:p1']!.screen = `${'─'.repeat(40)}\n❯\u00a0my own draft\n${'─'.repeat(40)}\n`;
+  sb.setState(st);
+  process.env.FAKE_HERDR_PROMPT_HOOK = '0';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 }), { result: 'unsent', busy: false });
+  assert.deepEqual(enters(), []);
 });
 
 test('room send to a working room types it anyway; unconfirmed when the room has only queued it', async () => {

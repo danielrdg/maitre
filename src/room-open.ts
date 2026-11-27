@@ -352,6 +352,7 @@ export async function sendToRoom(
 }
 
 // unsent: not confirmed, and the request may sit typed in the room's input box: the user has to look.
+// unconfirmed: only for a busy room whose box no longer holds the text (its running turn took it).
 export interface Delivered {
   result: 'delivered' | 'unconfirmed' | 'unsent';
   busy: boolean;
@@ -361,6 +362,12 @@ const RETYPE_MS = 500;
 // How long the input box is watched after an unconfirmed delivery: under load the typed text shows up late.
 const WATCH_MS = 15_000;
 const BOX_POLL_MS = 1_000;
+// After maître's own Enter emptied the box, how long more its hook line may take: under load the user's
+// other UserPromptSubmit hooks run first (e2e run 5 saw it land 10.5-11 s after the Enter).
+const LATE_HOOK_MS = 3_000;
+// The longest a delivery waits on a room, herdr's own latency aside: the confirm window, the box watch,
+// the second read, the confirm window after an Enter, and the late-hook grace.
+export const WORST_DELIVERY_MS = CONFIRM_MS + WATCH_MS + RETYPE_MS + CONFIRM_MS + LATE_HOOK_MS;
 const sameTyped = (a: string, b: string): boolean => a.replace(/\s+/g, '') === b.replace(/\s+/g, '');
 
 // The input box on `screen` holds exactly `text` as maître typed it; Claude Code wraps a long one over lines.
@@ -409,13 +416,27 @@ export async function deliverToRoom(
     throw e;
   }
   const ms = opts.confirmMs ?? CONFIRM_MS;
-  if (await confirmed(file, offset, text, ms)) return { result: 'delivered', busy: live === 'working' };
-  // A busy room takes the text into its running turn.
-  if (live === 'working') return { result: 'unconfirmed', busy: true };
+  const busy = live === 'working';
+  if (await confirmed(file, offset, text, ms)) return { result: 'delivered', busy };
   const paneId = rec.herdr!.paneId;
+  // A busy room takes the text into its running turn: only a box that no longer holds it says so.
+  if (busy) {
+    const held = await boxText(paneId);
+    if (held !== undefined && !sameTyped(held, text)) return { result: 'unconfirmed', busy: true };
+  }
   const sent = await enterIfTyped(rec, paneId, text, () => confirmed(file, offset, text, 0), opts.watchMs ?? opts.confirmMs ?? WATCH_MS, env);
-  if (sent && (await confirmed(file, offset, text, ms))) return { result: 'delivered', busy: false };
-  return { result: confirmedNow(file, offset, text) ? 'delivered' : 'unsent', busy: false };
+  if (sent && (await confirmed(file, offset, text, ms))) return { result: 'delivered', busy };
+  // The box no longer holds the text after maître's Enter: the hook line may just be late.
+  if (sent && !holdsTyped(await readOr(paneId), text) && (await confirmed(file, offset, text, LATE_HOOK_MS))) return { result: 'delivered', busy };
+  return { result: confirmedNow(file, offset, text) ? 'delivered' : 'unsent', busy };
+}
+
+async function readOr(paneId: string): Promise<string> {
+  try {
+    return await readPane(paneId, undefined, { ansi: true });
+  } catch {
+    return '';
+  }
 }
 
 const confirmedNow = (file: string, offset: number, text: string): boolean =>
@@ -433,18 +454,19 @@ async function enterIfTyped(rec: RoomRecord, paneId: string, text: string, done:
     if (held !== undefined && held !== '') {
       if (!sameTyped(held, text)) return false;
       await sleep(RETYPE_MS);
+      // The probe first, so the last read is the step right before the Enter.
+      let live: RoomLiveness;
+      try {
+        live = await probeRoom(rec, undefined, env);
+      } catch {
+        return false;
+      }
+      if (live !== 'idle' && live !== 'unknown') return false;
       const still = await boxText(paneId);
       if (still === undefined || still === '') {
         if (await done()) return false;
       } else {
         if (!sameTyped(still, text)) return false;
-        let live: RoomLiveness;
-        try {
-          live = await probeRoom(rec, undefined, env);
-        } catch {
-          return false;
-        }
-        if (live !== 'idle' && live !== 'unknown') return false;
         try {
           await sendKeys(paneId, 'enter');
         } catch {
@@ -461,8 +483,7 @@ async function enterIfTyped(rec: RoomRecord, paneId: string, text: string, done:
 export function describeDelivery(room: string, r: Delivered): string {
   if (r.result === 'delivered') return `sent to ${room}`;
   if (r.result === 'unsent') return `not confirmed: the request may be typed in ${room}'s input — check its tab and press Enter there`;
-  if (r.busy) return `sent to ${room} — it's busy and will see it during this turn`;
-  return `sent to ${room} (not confirmed: the room has not shown it yet)`;
+  return `sent to ${room} — it's busy and will see it during this turn`;
 }
 
 export interface RoomRow {

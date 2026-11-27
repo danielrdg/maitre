@@ -364,7 +364,8 @@ function stateful(file) {
       if (p.agent === 'shell') return fail('agent_not_found');
       const keys = rest.slice(3);
       if (p.typed !== undefined && keys.join(' ') === 'enter' && process.env.FAKE_HERDR_PROMPT_HOOK !== 'typed-stuck') {
-        runHook('maitre-hook.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's1', prompt: p.typed }, st.workspaces[p.ws].env ?? {});
+        // 'typed-slow': the box empties, and the hook line is left to the test (other prompt hooks ran first).
+        if (process.env.FAKE_HERDR_PROMPT_HOOK !== 'typed-slow') runHook('maitre-hook.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's1', prompt: p.typed }, st.workspaces[p.ws].env ?? {});
         delete p.typed;
         delete p.screen;
       }
@@ -395,6 +396,9 @@ function stateful(file) {
         else p.screen = box;
         if (hook === 'typed-swap') p.later = `${RULE}\n❯\u00a0my own draft\n${RULE}\n`;
         if (hook === 'typed-exit') p.exitAfter = 0;
+        // 'typed-block': a question replaces the prompt right after; 'typed-busy': herdr says working.
+        if (hook === 'typed-block') p.agent = 'blocked';
+        if (hook === 'typed-busy') p.agent = 'working';
       } else if (hook !== '0') {
         runHook('maitre-hook.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's1', prompt: process.env.FAKE_HERDR_PASTE === '1' ? `\n\n<pasted_content id="7">\n${text}\n</pasted_content id="7">\n` : text }, st.workspaces[p.ws].env ?? {});
       }

@@ -427,6 +427,40 @@ test("text in the input box that maître did not type never gets an Enter: the r
   assert.deepEqual(enters(), []);
 });
 
+test('a box whose room turns to a question before the Enter gets none', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-block';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 }), { result: 'unsent', busy: false });
+  assert.deepEqual(enters(), []);
+});
+
+test('a hook line that lands late after maître\'s own Enter, the box emptied, still counts as delivered', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-slow';
+  const text = 'check the logout too';
+  const late = setInterval(() => {
+    if (enters().length === 0) return;
+    clearInterval(late);
+    setTimeout(() => appendFileSync(join(roomDir('x'), 'events.jsonl'), JSON.stringify({ v: 1, ts: Date.now(), room: 'x', session: 's1', event: 'UserPromptSubmit', prompt: text }) + '\n'), 600);
+  }, 20);
+  try {
+    assert.deepEqual(await deliverToRoom('x', text, process.env, { confirmMs: 300 }), { result: 'delivered', busy: false });
+  } finally {
+    clearInterval(late);
+  }
+});
+
+test("a busy room's request still sitting in its box is not taken for delivered: it needs you", async () => {
+  await openScratch();
+  const s = sb.state();
+  s.panes['w1:p1'].agent = 'working';
+  sb.setState(s);
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-busy';
+  const r = await deliverToRoom('x', 'later', process.env, { confirmMs: 300 });
+  assert.deepEqual(r, { result: 'unsent', busy: true });
+  assert.deepEqual(enters(), [], 'no Enter into a working room');
+});
+
 test('room send to a working room types it anyway; unconfirmed when the room has only queued it', async () => {
   await openScratch();
   const s = sb.state();

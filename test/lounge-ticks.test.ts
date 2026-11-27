@@ -699,6 +699,17 @@ test('autoWake on: a room closed by hand before M3a (no stamp, no seat) is never
   assert.ok(out.some((l) => l.includes('did not tell alpha')), out.join('\n'));
 });
 
+test('autoWake on: a line left typed in the room and not sent is logged as such', async () => {
+  writeFileSync(join(sb.home, 'config.json'), JSON.stringify({ roots: [], projects: {}, pr: { autoWake: true } }));
+  const { gh } = prRoom('alpha', failingCheck);
+  const { deps } = autoWakeDeps(gh, 'idle');
+  const out: string[] = [];
+  ticks = startTicks(process.env, { ...deps, log: (l) => out.push(l), deliver: async () => ({ result: 'unsent' as const, busy: false }) });
+  await ticks.idle();
+  assert.ok(out.some((l) => l === 'maitre: pr: did not tell alpha about its PR: the line may be typed in its input, not sent'), out.join('\n'));
+  assert.ok(!out.some((l) => l.startsWith('maitre: pr: told alpha')), out.join('\n'));
+});
+
 test('autoWake on: a review is told with its author login and the URL, never the comment body; an odd login is left out', async () => {
   writeFileSync(join(sb.home, 'config.json'), JSON.stringify({ roots: [], projects: {}, pr: { autoWake: true } }));
   const a = prRoom('alpha', hostileComment('copilot[bot]'));

@@ -10,7 +10,7 @@ import { roomDir } from '../src/paths.js';
 import { readPr, writePr } from '../src/pr-state.js';
 import { writeIndex, type Project } from '../src/projects.js';
 import { closeRoom } from '../src/janitor.js';
-import { BRIEF_HEADER, deliverToRoom, describeDelivery, inputText, listRoomRows, markNotRunning, openRoom, promptMatches, roomLabel, sendToRoom, unwrapPasted } from '../src/room-open.js';
+import { BRIEF_HEADER, deliverToRoom, describeDelivery, holdsTyped, inputText, listRoomRows, markNotRunning, openRoom, promptMatches, roomLabel, sendToRoom, unwrapPasted } from '../src/room-open.js';
 import { reduce, type RoomState } from '../src/room-state.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
 import { herdrSandbox, type HerdrSandbox } from './herdr-sandbox.js';
@@ -278,7 +278,7 @@ test('room send reports unconfirmed when the prompt never shows up, ignoring an 
   await openScratch();
   assert.equal(await sendToRoom('x', 'hello', process.env, { confirmMs: 3000 }), 'delivered');
   process.env.FAKE_HERDR_PROMPT_HOOK = '0';
-  assert.equal(await sendToRoom('x', 'hello', process.env, { confirmMs: 300 }), 'unconfirmed');
+  assert.equal(await sendToRoom('x', 'hello', process.env, { confirmMs: 300 }), 'unsent', 'not confirmed is never "all done"');
 });
 
 test('room send to a gone pane says the room is not running and marks it closed', async () => {
@@ -354,7 +354,67 @@ test('a request still unsent after that Enter is reported typed, to be sent by h
   const r = await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 });
   assert.deepEqual(r, { result: 'unsent', busy: false });
   assert.equal(enters().length, 1, 'one Enter, not more');
-  assert.equal(describeDelivery('x', r), "typed into x's input but not sent — press Enter in its tab");
+  assert.equal(describeDelivery('x', r), "not confirmed: the request may be typed in x's input — check its tab and press Enter there");
+});
+
+test('a request that shows up in the input box only after the first look still gets its Enter, and is confirmed', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-late';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 600 }), { result: 'delivered', busy: false });
+  assert.equal(enters().length, 1);
+});
+
+test('a request wrapped over lines in the input box, as Claude Code shows a long one, is still maître\'s own text', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed';
+  process.env.FAKE_HERDR_TYPED_WRAP = '12';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout flow and the session cookie too', process.env, { confirmMs: 600 }), { result: 'delivered', busy: false });
+  assert.equal(enters().length, 1);
+});
+
+test('a box that changes to other text before the Enter gets none', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-swap';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 600 }), { result: 'unsent', busy: false });
+  assert.deepEqual(enters(), []);
+});
+
+test('a room whose Claude exits before the Enter gets none, and the delivery ends as needing you, not as an error', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-exit';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 600 }), { result: 'unsent', busy: false });
+  assert.deepEqual(enters(), []);
+});
+
+test('never confirmed with an empty input box still needs you: the request may be typed later', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = '0';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 }), { result: 'unsent', busy: false });
+  assert.deepEqual(enters(), []);
+});
+
+test('maitre room send exits 3 when the request may sit typed and unsent', () => {
+  return openScratch().then(() => {
+    const r = cli(['room', 'send', 'x', 'check the logout too'], { FAKE_HERDR_PROMPT_HOOK: 'typed-stuck', MAITRE_SEND_CONFIRM_MS: '300' });
+    assert.equal(r.status, 3, r.stderr);
+    assert.equal(r.stdout, "not confirmed: the request may be typed in x's input — check its tab and press Enter there\n");
+  });
+});
+
+test('an input box captured as herdr gives it (ANSI, wrapped, status lines below) holds maître\'s text', () => {
+  const E = '\x1b';
+  const rule = `${E}[2m${E}[38;5;244m${'─'.repeat(60)}${E}[0m\r`;
+  const screen = [
+    `${E}[1m● done 12:05${E}[0m\r`,
+    rule,
+    `${E}[0m❯\u00a0Follow-up for room wake4: repeat item 5 of the numbered list you gave in your first\r`,
+    `  reply.\r`,
+    `\r`,
+    rule,
+    `  ${E}[2m⏵⏵ auto mode on (shift+tab to cycle)${E}[0m\r`,
+  ].join('\n');
+  assert.equal(holdsTyped(screen, 'Follow-up for room wake4: repeat item 5 of the numbered list you gave in your first reply.'), true);
+  assert.equal(holdsTyped(screen, 'Follow-up for room wake4: repeat item 4'), false);
 });
 
 test("text in the input box that maître did not type never gets an Enter: the request is reported unsent", async () => {
@@ -466,8 +526,8 @@ test('room close closes a restored bare-shell tab and never touches a reused pan
   assert.equal(typeof readRoom('x')?.closedAt, 'number');
 });
 
-function cli(args: string[]): { status: number | null; stdout: string; stderr: string } {
-  const r = spawnSync(process.execPath, [MAITRE, ...args], { env: sb.env, encoding: 'utf8' });
+function cli(args: string[], extra: NodeJS.ProcessEnv = {}): { status: number | null; stdout: string; stderr: string } {
+  const r = spawnSync(process.execPath, [MAITRE, ...args], { env: { ...sb.env, ...extra }, encoding: 'utf8' });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 

@@ -318,7 +318,10 @@ async function roomCommand(args: Extract<CliArgs, { cmd: 'room-open' | 'room-sen
     console.log(describeOpen(rec));
   } else if (args.cmd === 'room-send') {
     const room = roomSlug(args.room);
-    console.log(describeDelivery(room, await deliverToRoom(room, args.text, process.env, sendConfirm())));
+    const sent = await deliverToRoom(room, args.text, process.env, sendConfirm());
+    console.log(describeDelivery(room, sent));
+    // A script (or a room sending to another) must not take a request that may sit unsent for delivered.
+    if (sent.result === 'unsent') process.exitCode = 3;
   } else if (args.cmd === 'room-wake') {
     for (const line of (await wakeRoom(args.room)).lines) console.log(line);
   } else if (args.cmd === 'room-list') {

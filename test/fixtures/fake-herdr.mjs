@@ -300,6 +300,11 @@ function stateful(file) {
       const screen = p.screen !== undefined ? p.screen : p.trust
         ? ' Accessing workspace:\n\n /x\n\n Is this a project you created or one you trust?\n\n ❯ 1. No, exit\n   2. Yes, I trust this folder\n'
         : p.agent === 'shell' ? '$ \n' : EMPTY_INPUT;
+      if (p.later !== undefined) {
+        p.screen = p.later;
+        delete p.later;
+        save();
+      }
       return { out: screen, code: 0 };
     }
     case 'agent_get': {
@@ -345,7 +350,7 @@ function stateful(file) {
       if (!p) return fail('pane_not_found');
       if (p.agent === 'shell') return fail('agent_not_found');
       const keys = rest.slice(3);
-      if (p.typed !== undefined && keys.join(' ') === 'enter' && process.env.FAKE_HERDR_PROMPT_HOOK === 'typed') {
+      if (p.typed !== undefined && keys.join(' ') === 'enter' && process.env.FAKE_HERDR_PROMPT_HOOK !== 'typed-stuck') {
         runHook('maitre-hook.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's1', prompt: p.typed }, st.workspaces[p.ws].env ?? {});
         delete p.typed;
         delete p.screen;
@@ -365,10 +370,18 @@ function stateful(file) {
       const text = rest[3];
       const hook = process.env.FAKE_HERDR_PROMPT_HOOK;
       if (text === '/exit') p.agent = 'shell';
-      else if (hook === 'typed' || hook === 'typed-stuck') {
-        // Typed but not submitted: the text sits in the input box; Enter submits it ('typed' only).
+      else if (hook?.startsWith('typed')) {
+        // Typed but not submitted: the text sits in the input box, and Enter submits it, except 'typed-stuck'.
+        // 'typed-late': shown only from the second `pane read`; 'typed-swap': other text from the second
+        // read on; 'typed-exit': Claude exits right after; FAKE_HERDR_TYPED_WRAP=<n> wraps it as Claude Code does.
         p.typed = text;
-        p.screen = `${RULE}\n❯\u00a0${text}\n${RULE}\n`;
+        const wrap = Number(process.env.FAKE_HERDR_TYPED_WRAP ?? 0);
+        const shown = wrap > 0 ? text.match(new RegExp(`.{1,${wrap}}`, 'g')).join('\n  ') : text;
+        const box = `${RULE}\n❯\u00a0${shown}\n\n${RULE}\n  ⏵⏵ auto mode on (shift+tab to cycle)\n`;
+        if (hook === 'typed-late') p.later = box;
+        else p.screen = box;
+        if (hook === 'typed-swap') p.later = `${RULE}\n❯\u00a0my own draft\n${RULE}\n`;
+        if (hook === 'typed-exit') p.exitAfter = 0;
       } else if (hook !== '0') {
         runHook('maitre-hook.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's1', prompt: process.env.FAKE_HERDR_PASTE === '1' ? `\n\n<pasted_content id="7">\n${text}\n</pasted_content id="7">\n` : text }, st.workspaces[p.ws].env ?? {});
       }

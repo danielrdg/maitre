@@ -7,7 +7,7 @@ import { notifyDesktop } from './open-app.js';
 import { NOTICE_PROMPT, readPr } from './pr-state.js';
 import { prTick, type PrEvent } from './pr-watch.js';
 import { liveReservations } from './queue.js';
-import { deliverToRoom, isRecord, probeRoom, unsentInput, type RoomLiveness } from './room-open.js';
+import { deliverToRoom, isRecord, probeRoom, unsentInput, type Delivered, type RoomLiveness } from './room-open.js';
 import { listRooms, readRoom, type RoomRecord } from './rooms.js';
 import type { RoomState } from './room-state.js';
 import { offersWake, wakeRoom, type WakeDeps, type Woken } from './wake.js';
@@ -33,7 +33,7 @@ export interface TickDeps {
   pollMs?: number;
   liveness?: (rec: RoomRecord, env: NodeJS.ProcessEnv) => Promise<RoomLiveness>;
   wake?: (room: string, env: NodeJS.ProcessEnv, deps?: WakeDeps) => Promise<Woken>;
-  deliver?: (room: string, text: string, env: NodeJS.ProcessEnv, opts: { closing: string }) => Promise<unknown>;
+  deliver?: (room: string, text: string, env: NodeJS.ProcessEnv, opts: { closing: string }) => Promise<Pick<Delivered, 'result'>>;
   // What the room's input box holds that is not sent (undefined: nothing), as closing checks it.
   unsent?: (rec: RoomRecord) => Promise<string | undefined>;
 }
@@ -256,7 +256,7 @@ export function startTicks(env: NodeJS.ProcessEnv = process.env, deps: TickDeps 
         // A draft in its input box would be sent along with the line.
         const unsent = await unsentOf(now);
         if (unsent !== undefined) return skip(unsent);
-        await deliver(room, l, env, { closing: held.token });
+        if ((await deliver(room, l, env, { closing: held.token })).result === 'unsent') return skip('the line may be typed in its input, not sent');
       }
     } finally {
       releaseClosing(room, held.token, env);

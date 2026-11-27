@@ -350,7 +350,20 @@ test('a dispatch whose request is left typed in the room needs you, and says to 
   writeFileSync(routeFile(12), JSON.stringify({ route: { project: null, room: { kind: 'existing', name: 'nf-bug' }, taskType: 'change', model: 'sonnet', hasCode: true, confidence: 0.7 }, requestIds: ['12'] }));
   process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-stuck';
   const d = await dispatchRouteDetailed('12', process.env, { confirmMs: 300 });
-  assert.deepEqual(d, { room: 'nf-bug', lines: ["typed into nf-bug's input but not sent — press Enter in its tab"], needsYou: true });
+  assert.deepEqual(d, { room: 'nf-bug', lines: ["not confirmed: the request may be typed in nf-bug's input — check its tab and press Enter there"], needsYou: true });
+});
+
+test('a dispatch that wakes a parked room and leaves the request typed there needs you too', async () => {
+  writeIndex(PROJECTS);
+  await openRoom({ name: 'nf-bug', project: undefined, model: 'sonnet', taskType: 'change', brief: 'fix the NF bug' }, process.env, FAST);
+  writeRoom({ ...readRoom('nf-bug')!, seat: { releasedAt: Date.now(), session: 's1' }, closedAt: Date.now() });
+  sb.setState({ ...sb.state(), workspaces: {}, panes: {} });
+  writeRequest(13, 'also handle the cancelled notes');
+  mkdirSync(join(sb.home, 'reception', 'routes'), { recursive: true });
+  writeFileSync(routeFile(13), JSON.stringify({ route: { project: null, room: { kind: 'existing', name: 'nf-bug' }, taskType: 'change', model: 'sonnet', hasCode: true, confidence: 0.7 }, requestIds: ['13'] }));
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-stuck';
+  const d = await dispatchRouteDetailed('13', process.env, { confirmMs: 300 });
+  assert.deepEqual(d, { room: 'nf-bug', lines: ['woke nf-bug: resumed its session', "not confirmed: the request may be typed in nf-bug's input — check its tab and press Enter there"], needsYou: true });
 });
 
 test('maitre route renames a new room that collides with a room of another project', async () => {

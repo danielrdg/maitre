@@ -23,6 +23,7 @@ import { openWindow, ticketUrl, uiLang } from './open-app.js';
 import { maitreHome } from './paths.js';
 import { closeLabeledTabs, closeRoomTabs, isRecord, liveness, markNotRunning, probeRoom, roomLabel } from './room-open.js';
 import { runForeground } from './room-run.js';
+import { stillStarting } from './wake.js';
 import { isOpening } from './queue.js';
 import { listRooms, readRoom } from './rooms.js';
 import { handleTrust, type TrustResult } from './trust.js';
@@ -183,7 +184,7 @@ async function sweepRooms(env: NodeJS.ProcessEnv, warnings: string[]): Promise<s
       if (isOpening(listed.room, env)) continue;
       const rec = readRoom(listed.room, env);
       if (rec === undefined || !isRecord(rec)) continue;
-      if ((await probeRoom(rec, workspaces, env)) !== 'not running') continue;
+      if ((await probeRoom(rec, workspaces, env)) !== 'not running' || stillStarting(rec, workspaces, env)) continue;
       const hadTab = workspaces.some((w) => w.label === roomLabel(rec));
       await closeRoomTabs(rec, workspaces);
       if (hadTab || rec.closedAt === undefined) closed.push(rec.room);

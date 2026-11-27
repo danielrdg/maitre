@@ -15,6 +15,7 @@ import { readIndex } from './projects.js';
 import { checkInput, CloseStopped, closeRoomTab, isRecord, markRunning, probeRoom, unsentInput, type RoomLiveness } from './room-open.js';
 import { listRooms, patchRoom, readRoom, sameRoom, writeRoom, type RoomRecord } from './rooms.js';
 import { park, whyPark, type ParkDeps } from './seats.js';
+import { stillStarting } from './wake.js';
 import { expectedDir, moveScratch, ownedDir } from './vault.js';
 
 export type JanitorDecision = { room: string; decision: 'close' | 'couch' | 'park' | 'skip' | 'error'; reasons: string[] };
@@ -439,7 +440,8 @@ async function decide(rec: RoomRecord, t: Tick): Promise<JanitorDecision> {
     else rec = withoutCouch(rec);
     notes.push('couch cleared: the room is active again');
   }
-  if (!running && !dryRun) rec = patchRoom(rec, (r) => (r.closedAt !== undefined ? r : { ...r, closedAt: Date.now() }), env);
+  // A wake left its tab still starting: not running for herdr, but no dead room's closedAt (it would show parked).
+  if (!running && !dryRun && !stillStarting(rec, t.workspaces, env)) rec = patchRoom(rec, (r) => (r.closedAt !== undefined ? r : { ...r, closedAt: Date.now() }), env);
   if (running && !dryRun) rec = markRunning(rec, env);
   const pr = rec.kind === 'code' ? roomPr(rec, env) : undefined;
   const why = running ? whyPark(rec, activity, pr) : undefined;

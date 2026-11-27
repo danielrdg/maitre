@@ -11,7 +11,7 @@ import { roomDir } from '../src/paths.js';
 import { readPr, writePr } from '../src/pr-state.js';
 import { writeIndex, type Project } from '../src/projects.js';
 import { isOpening, openingFile } from '../src/queue.js';
-import { BRIEF_HEADER, MAX_BRIEF_BYTES, STARTING_TEXT, TRUST_BLOCKED_TEXT, listRoomRows, openRoom, probeRoom } from '../src/room-open.js';
+import { BRIEF_HEADER, MAX_BRIEF_BYTES, STARTING_TEXT, TRUST_BLOCKED_TEXT, listRoomRows, openRoom, probeRoom, sendToRoom } from '../src/room-open.js';
 import { LiveRooms } from '../src/live-api.js';
 import type { HookLine } from '../src/events.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
@@ -388,6 +388,27 @@ test('"No conversation found" on screen, even before Claude was ever seen, fails
   assert.equal(w.resumed, false);
   assert.match(w.lines[0], /could not be resumed \(its session was not found\)/);
   assert.match(runs().at(-1)!, /'--brief-file'/);
+});
+
+test('a room left still starting in its tab is not taken for parked: no second wake, open, send or stamp closes or hides it', async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'shell';
+  const first = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 200, slowStartMs: 600 });
+  assert.deepEqual(first.lines, ['woke a: its session is still starting — check its tab']);
+  const tab = tabs();
+  assert.equal(tab.length, 1);
+  const made = creates().length;
+  await assert.rejects(wakeRoom('a', process.env, QUICK), /^Error: a is still starting in its tab — check it there$/);
+  await assert.rejects(sendToRoom('a', 'hello', process.env, { confirmMs: 200 }), /^Error: room a is still starting in its tab — check it there$/);
+  await assert.rejects(open('a'), /^Error: room a is still starting in its tab — check it there$/);
+  const rows = await listRoomRows();
+  assert.deepEqual(rows.map((r) => [r.room, r.herdr, r.lounge, r.starting]), [['a', 'not running', 'starting — check its tab', true]]);
+  assert.equal(parkedState(readRoom('a')), 'parked', 'on disk alone it would look parked: herdr decides');
+  await janitorTick();
+  assert.equal(readRoom('a')!.closedAt, undefined, 'nothing stamped it not running');
+  assert.deepEqual(tabs(), tab, 'its tab is still there');
+  assert.equal(creates().length, made);
 });
 
 test('a slow resume (its SessionStart after the deadline, a Claude in its tab all along) is waited for: resumed, one tab, no fresh start', async () => {

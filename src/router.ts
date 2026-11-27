@@ -300,7 +300,7 @@ async function openRoomsFor(env: NodeJS.ProcessEnv): Promise<{ rooms: RouterRoom
     return { rooms: queued.rooms, warning };
   }
   const rooms = rows.flatMap((r) => {
-    const state = r.herdr !== 'not running' ? r.herdr : parkedState(readRoom(r.room, env), env);
+    const state = r.herdr !== 'not running' ? r.herdr : r.starting === true ? 'starting' : parkedState(readRoom(r.room, env), env);
     return state === undefined ? [] : [{ name: r.room, ...(r.project !== undefined ? { project: r.project } : {}), task: taskLine(r.room, env, '-'), state }];
   });
   return { rooms: [...rooms, ...queued.rooms], ...(queued.warning !== undefined ? { warning: queued.warning } : {}) };

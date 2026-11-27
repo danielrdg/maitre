@@ -28,7 +28,7 @@ import { readFailed, readQueue } from './queue.js';
 import { couchHolds, listRooms, parked, patchRoom, readRoom, writeRoom, type RoomRecord } from './rooms.js';
 import { appendRoomLine } from './status.js';
 import { handleTrust, type TrustResult } from './trust.js';
-import { offersWake, parkedState, wakeSession } from './wake.js';
+import { offersWake, parkedState, stillStarting, stillStartingError, wakeSession } from './wake.js';
 import { createScratch, createWorktree } from './worktree.js';
 
 export { BRIEF_HEADER };
@@ -174,6 +174,7 @@ export async function openRoom(
   if (prev !== undefined) {
     const workspaces = await listWorkspaces();
     if ((await probeRoom(prev, workspaces, env)) !== 'not running') throw new Error(`room ${room} is already open`);
+    if (stillStarting(prev, workspaces, env)) throw stillStartingError(room, 'room ');
     // A fresh open would drop the session the room parked with, and its pr.json.
     if (prev.seat !== undefined && prev.closedBy === undefined) {
       throw new Error(`room ${room} is parked — wake it with: maitre room wake ${room} (or close it first with: maitre room close ${room})`);
@@ -382,8 +383,10 @@ export async function deliverToRoom(
   if (text.trim() === '') throw new Error('nothing to send');
   if (Buffer.byteLength(text) > MAX_BRIEF_BYTES) throw new Error(`the message is too long (at most ${MAX_BRIEF_BYTES} bytes)`);
   await ensureServer(env);
-  const live = await probeRoom(rec, undefined, env);
+  const workspaces = await listWorkspaces();
+  const live = await probeRoom(rec, workspaces, env);
   if (live === 'not running') {
+    if (stillStarting(rec, workspaces, env)) throw stillStartingError(slug, 'room ');
     markNotRunning(rec, env);
     throw notRunning(rec, env);
   }
@@ -427,6 +430,8 @@ export interface RoomRow {
   // 'queued': waiting for a seat; 'failed': left the queue after failing to open.
   herdr: RoomLiveness | 'queued' | 'failed';
   lounge: string;
+  // A wake left it still starting in its tab: not running for herdr, yet not parked.
+  starting?: true;
 }
 
 // The newest LOUNGE_TAIL_BYTES of a room's hook events: all the doorman, janitor and CLI read of a room.
@@ -492,13 +497,15 @@ export async function listRoomRows(env: NodeJS.ProcessEnv = process.env, opts: {
     const workspaces = await listWorkspaces();
     for (const rec of recs) {
       const herdr = await probeRoom(rec, workspaces, env);
-      if (herdr === 'not running') markNotRunning(rec, env);
+      const starting = herdr === 'not running' && stillStarting(rec, workspaces, env);
+      if (herdr === 'not running' && !starting) markNotRunning(rec, env);
       rows.push({
         room: rec.room,
         ...(rec.project !== undefined ? { project: rec.project } : {}),
         model: typeof rec.model === 'string' ? rec.model : '-',
         herdr,
-        lounge: loungeColumn(rec, herdr, env),
+        lounge: starting ? 'starting — check its tab' : loungeColumn(rec, herdr, env),
+        ...(starting ? { starting: true as const } : {}),
       });
     }
   }

@@ -21,12 +21,15 @@ import {
   markRunning,
   noteStarting,
   probeRoom,
+  readEventsTail,
   roomEventsFile,
+  roomLabel,
   roomPaneCommand,
   startInTab,
   writeBrief,
   type RoomLiveness,
 } from './room-open.js';
+import { isStartingNote } from './room-state.js';
 import { patchRoom, readRoom, type RoomRecord } from './rooms.js';
 import { trustDialogShown, trustScope } from './trust.js';
 import { ownedDir } from './vault.js';
@@ -105,6 +108,18 @@ export function canWake(rec: RoomRecord, env: NodeJS.ProcessEnv = process.env): 
 export function parkedState(rec: unknown, env: NodeJS.ProcessEnv = process.env): 'parked' | undefined {
   return typeof rec === 'object' && rec !== null && isRecord(rec as RoomRecord) && canWake(rec as RoomRecord, env) ? 'parked' : undefined;
 }
+
+// A wake that ended "still starting" left its tab with maître's starting note on the session it resumes as
+// the room's newest event: herdr may not see its Claude yet, but that tab is not a dead room's. Nothing
+// closes it or offers it as parked; the janitor's idle rule stays the backstop.
+export function stillStarting(rec: RoomRecord, workspaces: { id: string; label: string }[], env: NodeJS.ProcessEnv = process.env): boolean {
+  const h = rec.herdr;
+  if (h === undefined || h.session !== herdrSession(env) || !workspaces.some((w) => w.id === h.workspaceId && w.label === roomLabel(rec))) return false;
+  const last = readEventsTail(rec.room, env).at(-1);
+  return last !== undefined && isStartingNote(last) && typeof last.resumes === 'string' && last.resumes !== '' && last.resumes === wakeSession(rec, env);
+}
+
+export const stillStartingError = (room: string, prefix = ''): Error => new Error(`${prefix}${room} is still starting in its tab — check it there`);
 
 type Verdict = { kind: 'resumed' } | { kind: 'failed'; reason: string } | { kind: 'needs-you'; trust: boolean } | { kind: 'starting' };
 
@@ -287,6 +302,7 @@ export async function wakeRoom(name: string, env: NodeJS.ProcessEnv = process.en
       markRunning(rec, env);
       return { resumed: true, lines: [`${room} is already running`], needsYou: false };
     }
+    if (stillStarting(rec, workspaces, env)) throw stillStartingError(room);
     const session = wakeSession(rec, env);
     if (session === undefined) {
       const out = rec.seat !== undefined ? `close it with: maitre room close ${room}, then open it again` : 'open it again';

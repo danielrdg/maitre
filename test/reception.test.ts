@@ -11,6 +11,7 @@ import { HELP, parseArgs } from '../src/cli.js';
 import { shellQuote } from '../src/herdr.js';
 import { receptionSettings, writeReceptionSettings } from '../src/hook-settings.js';
 import { buildReceptionCommand, startMaitre } from '../src/reception.js';
+import { roomDir } from '../src/paths.js';
 import { reserve } from '../src/queue.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
 import { trustScope } from '../src/trust.js';
@@ -362,6 +363,21 @@ test('maitre: a room being woken (its opening reservation held) keeps its new ta
   } finally {
     release();
   }
+});
+
+test("maitre: a room left still starting in its tab (its wake's starting note is the newest event) keeps its tab", async () => {
+  writeRoom({
+    room: 'slow', kind: 'scratch', dir: join(sb.home, 'scratch', 'slow'), model: 'sonnet', taskType: 'simple',
+    herdr: { session: 'maitre-test', workspaceId: 'w3', paneId: 'w3:p1' }, createdAt: 1, resumable: true,
+  });
+  mkdirSync(roomDir('slow'), { recursive: true });
+  const line = (l: Record<string, unknown>) => JSON.stringify({ v: 1, ts: Date.now(), room: 'slow', session: 's1', ...l });
+  writeFileSync(join(roomDir('slow'), 'events.jsonl'), [line({ event: 'SessionStart' }), line({ event: 'SessionEnd' }), line({ event: 'MaitreStatus', session: '', status: 'blocked', text: 'Room is still starting — check its tab', options: [], starting: true, resumes: 's1' })].join('\n') + '\n');
+  sb.setState({ next: 4, workspaces: { w3: { label: 'scratch / slow' } }, panes: { 'w3:p1': { ws: 'w3', agent: 'shell' } } });
+  const r = await startMaitre(process.env, { ...FAST, open: () => {} });
+  assert.deepEqual(r.closedRooms, []);
+  assert.equal(sb.state().workspaces.w3?.label, 'scratch / slow');
+  assert.equal(readRoom('slow')!.closedAt, undefined);
 });
 
 test('maitre: the reception trust dialog is answered on screen', async () => {

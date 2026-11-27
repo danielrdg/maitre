@@ -399,9 +399,9 @@ test('a room left still starting in its tab is not taken for parked: no second w
   const tab = tabs();
   assert.equal(tab.length, 1);
   const made = creates().length;
-  await assert.rejects(wakeRoom('a', process.env, QUICK), /^Error: a is still starting in its tab — check it there$/);
-  await assert.rejects(sendToRoom('a', 'hello', process.env, { confirmMs: 200 }), /^Error: room a is still starting in its tab — check it there$/);
-  await assert.rejects(open('a'), /^Error: room a is still starting in its tab — check it there$/);
+  await assert.rejects(wakeRoom('a', process.env, QUICK), /^Error: a is still starting in its tab; if nothing is happening there, close that tab and wake it again$/);
+  await assert.rejects(sendToRoom('a', 'hello', process.env, { confirmMs: 200 }), /^Error: room a is still starting in its tab; if nothing is happening there, close that tab and wake it again$/);
+  await assert.rejects(open('a'), /^Error: room a is still starting in its tab; if nothing is happening there, close that tab and wake it again$/);
   const rows = await listRoomRows();
   assert.deepEqual(rows.map((r) => [r.room, r.herdr, r.lounge, r.starting]), [['a', 'not running', 'starting — check its tab', true]]);
   assert.equal(parkedState(readRoom('a')), 'parked', 'on disk alone it would look parked: herdr decides');
@@ -409,6 +409,71 @@ test('a room left still starting in its tab is not taken for parked: no second w
   assert.equal(readRoom('a')!.closedAt, undefined, 'nothing stamped it not running');
   assert.deepEqual(tabs(), tab, 'its tab is still there');
   assert.equal(creates().length, made);
+});
+
+// A wake that ends "still starting" (no Claude ever seen), as the guard tests start from.
+async function leftStarting(proj?: string): Promise<string[]> {
+  await open('a', proj);
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'shell';
+  const w = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 200, slowStartMs: 600 });
+  assert.deepEqual(w.lines, ['woke a: its session is still starting — check its tab']);
+  return tabs();
+}
+
+const lounge = async () => (await listRoomRows()).map((r) => r.lounge);
+const append = (l: Record<string, unknown>) => appendFileSync(eventsFile('a'), JSON.stringify({ v: 1, ts: Date.now(), room: 'a', session: 's1', ...l }) + '\n');
+
+test("after the room's SessionStart, until herdr shows its Claude, the room is still starting: not parked, not stamped", async () => {
+  const tab = await leftStarting();
+  append({ event: 'SessionStart' });
+  assert.deepEqual(await lounge(), ['starting — check its tab']);
+  assert.equal(readRoom('a')!.closedAt, undefined);
+  await janitorTick();
+  assert.equal(readRoom('a')!.closedAt, undefined);
+  assert.deepEqual(tabs(), tab);
+  const st = sb.state();
+  st.panes[`${tab[0]}:p1`]!.agent = 'idle';
+  sb.setState(st);
+  assert.deepEqual((await listRoomRows()).map((r) => [r.herdr, r.starting]), [['idle', undefined]], 'herdr sees it: running');
+});
+
+for (const [why, after] of [
+  ['its tab was closed', () => killTabs()],
+  ["its own run's exit line came", () => append({ event: 'MaitreExit', session: '', run: 'x' })],
+  ['its session ended', () => append({ event: 'SessionEnd' })],
+  ['another session started there', () => append({ event: 'SessionStart', session: 's9' })],
+] as const) {
+  test(`a still-starting room is released once ${why}: parked again`, async () => {
+    await leftStarting();
+    after();
+    assert.match((await lounge())[0]!, /^(parked|ready|coffee|exit|-).*/);
+    assert.doesNotMatch((await lounge())[0]!, /starting/);
+  });
+}
+
+test('a starting note for another session than the one to wake (the seat names another) does not hold the room', async () => {
+  await leftStarting();
+  writeRoom({ ...readRoom('a')!, seat: { releasedAt: Date.now(), session: 's1' } });
+  append({ event: 'MaitreStatus', session: '', status: 'blocked', text: 'Room is still starting — check its tab', options: [], starting: true, resumes: 'other-session' });
+  assert.doesNotMatch((await lounge())[0]!, /starting —/);
+});
+
+test('ten minutes after its starting note, a room with work pending is offered for waking again, and that wake replaces the old tab', async () => {
+  project();
+  const old = await leftStarting('proj');
+  writeFileSync(join(readRoom('a')!.dir, 'work.txt'), 'wip');
+  const lines = readFileSync(eventsFile('a'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as HookLine);
+  lines.at(-1)!.ts = Date.now() - 11 * 60_000;
+  writeFileSync(eventsFile('a'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const [d] = await janitorTick(process.env, { now: () => Date.now() + 30 * 24 * 3_600_000 });
+  assert.equal(d!.decision, 'skip', 'the janitor leaves a room with work pending alone');
+  assert.doesNotMatch((await lounge())[0]!, /starting —/);
+  process.env.FAKE_HERDR_RESUME = 'ok';
+  const w = await wakeRoom('a', process.env, QUICK);
+  assert.deepEqual(w.lines, ['woke a: resumed its session']);
+  assert.equal(tabs().length, 1);
+  assert.notDeepEqual(tabs(), old, 'the old tab was closed');
 });
 
 test('a slow resume (its SessionStart after the deadline, a Claude in its tab all along) is waited for: resumed, one tab, no fresh start', async () => {

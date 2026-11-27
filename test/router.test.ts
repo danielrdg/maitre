@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from '../src/cli.js';
@@ -364,6 +364,32 @@ test('a dispatch that wakes a parked room and leaves the request typed there nee
   process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-stuck';
   const d = await dispatchRouteDetailed('13', process.env, { confirmMs: 300 });
   assert.deepEqual(d, { room: 'nf-bug', lines: ['woke nf-bug: resumed its session', "not confirmed: the request may be typed in nf-bug's input — check its tab and press Enter there"], needsYou: true });
+});
+
+test('route lists a room left still starting in its tab as starting, not parked', async () => {
+  writeIndex(PROJECTS);
+  await openRoom({ name: 'nf-bug', project: undefined, model: 'sonnet', taskType: 'change', brief: 'fix the NF bug' }, process.env, FAST);
+  const st = sb.state();
+  for (const p of Object.values(st.panes)) p.agent = 'shell';
+  sb.setState(st);
+  appendFileSync(join(roomDir('nf-bug'), 'events.jsonl'), JSON.stringify({ v: 1, ts: Date.now(), room: 'nf-bug', session: '', event: 'MaitreStatus', status: 'blocked', text: 'Room is still starting — check its tab', options: [], starting: true, resumes: 's1' }) + '\n');
+  await route('more work', reply(envelope(NEW_ROOM)));
+  assert.match(claudeCalls().at(-1)!.argv[1]!, /^- nf-bug \| scratch \| starting \| /m);
+});
+
+test('a new-room route to a name the doorman already opened delivers there, and a request left typed needs you', async () => {
+  writeIndex(PROJECTS);
+  const queuedAt = Date.now() - 1_000;
+  const route = { project: null, room: { kind: 'new', name: 'nf-bug' }, taskType: 'change', model: 'sonnet', hasCode: true, confidence: 0.7 } as Route;
+  await openRoom({ name: 'nf-bug', project: undefined, model: 'sonnet', taskType: 'change', brief: 'fix the NF bug', fromQueue: queuedAt }, process.env, FAST);
+  writeQueue([{ room: 'nf-bug', requestIds: ['13'], route, queuedAt, attempts: 0 }]);
+  writeRequest(14, 'also handle the cancelled notes');
+  mkdirSync(join(sb.home, 'reception', 'routes'), { recursive: true });
+  writeFileSync(routeFile(14), JSON.stringify({ route: { project: null, room: { kind: 'new', name: 'nf-bug' }, taskType: 'change', model: 'sonnet', hasCode: true, confidence: 0.7 }, requestIds: ['14'] }));
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-stuck';
+  const d = await dispatchRouteDetailed('14', process.env, { confirmMs: 300 });
+  assert.equal(d.needsYou, true);
+  assert.match(d.lines.at(-1)!, /^not confirmed: the request may be typed in nf-bug's input/);
 });
 
 test('maitre route renames a new room that collides with a room of another project', async () => {

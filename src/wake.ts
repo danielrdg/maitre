@@ -109,17 +109,28 @@ export function parkedState(rec: unknown, env: NodeJS.ProcessEnv = process.env):
   return typeof rec === 'object' && rec !== null && isRecord(rec as RoomRecord) && canWake(rec as RoomRecord, env) ? 'parked' : undefined;
 }
 
-// A wake that ended "still starting" left its tab with maître's starting note on the session it resumes as
-// the room's newest event: herdr may not see its Claude yet, but that tab is not a dead room's. Nothing
-// closes it or offers it as parked; the janitor's idle rule stays the backstop.
-export function stillStarting(rec: RoomRecord, workspaces: { id: string; label: string }[], env: NodeJS.ProcessEnv = process.env): boolean {
+// A wake that ended "still starting" left its tab with maître's starting note on the session it resumes. Until
+// herdr shows that Claude (callers ask only once herdr says not running), the tab is not a dead room's, even
+// after the session's own SessionStart (herdr can take seconds more): nothing closes it, stamps it not running
+// or offers it as parked. It ends with the tab, with a line saying that start is over (its run's exit line,
+// its SessionEnd, another session), or STILL_STARTING_MS after the note: a start dead without its exit line
+// (a hard kill) must not hold the room for good, and the next wake then replaces that tab.
+export const STILL_STARTING_MS = 10 * 60_000;
+
+export function stillStarting(rec: RoomRecord, workspaces: { id: string; label: string }[], env: NodeJS.ProcessEnv = process.env, now = Date.now()): boolean {
   const h = rec.herdr;
   if (h === undefined || h.session !== herdrSession(env) || !workspaces.some((w) => w.id === h.workspaceId && w.label === roomLabel(rec))) return false;
-  const last = readEventsTail(rec.room, env).at(-1);
-  return last !== undefined && isStartingNote(last) && typeof last.resumes === 'string' && last.resumes !== '' && last.resumes === wakeSession(rec, env);
+  const lines = readEventsTail(rec.room, env);
+  let i = lines.length - 1;
+  while (i >= 0 && !isStartingNote(lines[i]!)) i--;
+  const note = lines[i];
+  if (note === undefined || typeof note.resumes !== 'string' || note.resumes === '' || note.resumes !== wakeSession(rec, env)) return false;
+  if (!(typeof note.ts === 'number' && now - note.ts <= STILL_STARTING_MS)) return false;
+  return lines.slice(i + 1).every((l) => l.event !== 'MaitreExit' && l.event !== 'SessionEnd' && !(typeof l.session === 'string' && l.session !== '' && l.session !== note.resumes));
 }
 
-export const stillStartingError = (room: string, prefix = ''): Error => new Error(`${prefix}${room} is still starting in its tab — check it there`);
+export const stillStartingError = (room: string, prefix = ''): Error =>
+  new Error(`${prefix}${room} is still starting in its tab; if nothing is happening there, close that tab and wake it again`);
 
 type Verdict = { kind: 'resumed' } | { kind: 'failed'; reason: string } | { kind: 'needs-you'; trust: boolean } | { kind: 'starting' };
 

@@ -169,7 +169,7 @@ const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
 // --- ReceptionQueue
 
-test("the lounge reception's ceiling covers a follow-up's worst case (route, wake, delivery) with a margin, under Node's 300 s request timeout", () => {
+test("the lounge reception's ceiling covers a follow-up's worst case (route, wake, delivery) with a margin", () => {
   const worst = ROUTER_TIMEOUT_MS + WORST_WAKE_MS + WORST_DELIVERY_MS;
   assert.ok(RECEPTION_TIMEOUT_MS >= worst + 30_000, `${RECEPTION_TIMEOUT_MS} < ${worst} + 30 s`);
   assert.ok(RECEPTION_TIMEOUT_MS < 300_000);

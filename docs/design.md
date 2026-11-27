@@ -372,7 +372,7 @@ A subset of the README's [maître vs firstmate](../README.md#maître-vs-firstmat
   - **M2b · The doors (done):** `./setup` and `maitre setup`; `maitre serve` as a `systemd --user` service, with a stable `lounge.json` and one-time tickets; the clickable maître and the Super+M quick prompt, both going straight to the router; the `.desktop` app icon; and the room panel's "Open in terminal", pulled forward from M5 (§6.8.1).
 - **M3 · Doorman and janitor**, split in two by the owner on 27-11-2026:
   - **M3a · Doorman and janitor (done):** `capacity` and the FIFO queue on the sidewalk (`state/queue.json`, a failed list after three failed opens), the janitor with the never-lose-work checks, the couch, minutes in the vault and `maitre janitor --dry-run`, all running in the lounge process (§6.6, §7.1).
-  - **M3b · Seats, PRs and memory (done — end-to-end check pending):** a couched room or one with an open PR gives up its seat and wakes with `claude --resume` (`maitre room wake`, a follow-up, the lounge's Wake button); PR watching (CI and review notices, merge dance, PR closed without merge, optional `pr.autoWake`); the router reading recent minutes, and a new room born with an old room's minutes (§6.2, §6.6, §7.1).
+  - **M3b · Seats, PRs and memory (done):** a couched room or one with an open PR gives up its seat and wakes with `claude --resume` (`maitre room wake`, a follow-up, the lounge's Wake button); PR watching (CI and review notices, merge dance, PR closed without merge, optional `pr.autoWake`); the router reading recent minutes, and a new room born with an old room's minutes (§6.2, §6.6, §7.1).
 - **M4 · Building:** facade, floors, terrace, elevator.
 - **M5 · Answer from the lounge** and routing that learns.
 

@@ -111,10 +111,13 @@ export function patchPr(room: string, fn: (pr: PrState) => PrState | undefined, 
   return next;
 }
 
-// The pr.json of this opening of the room: one an earlier room of the same name left (on another branch,
+// A pr.json of this opening of the room: one an earlier room of the same name left (on another branch,
 // or last seen before this one opened) says nothing about it.
+export function ownsPr(rec: Pick<RoomRecord, 'branch' | 'createdAt'>, pr: Pick<PrState, 'headRefName' | 'seenAt'>): boolean {
+  return pr.headRefName === rec.branch && pr.seenAt >= rec.createdAt;
+}
+
 export function roomPr(rec: Pick<RoomRecord, 'room' | 'branch' | 'createdAt'>, env: NodeJS.ProcessEnv = process.env): PrState | undefined {
   const pr = readPr(rec.room, env);
-  if (pr === undefined || pr.headRefName !== rec.branch || !(pr.seenAt >= rec.createdAt)) return undefined;
-  return pr;
+  return pr !== undefined && ownsPr(rec, pr) ? pr : undefined;
 }

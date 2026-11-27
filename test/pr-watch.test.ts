@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { roomDir } from '../src/paths.js';
-import { readPr, writePr, type PrState } from '../src/pr-state.js';
+import { readPr, roomPr, writePr, type PrState } from '../src/pr-state.js';
 import { prTick, type Gh, type PrEvent } from '../src/pr-watch.js';
 import { writeRoom, type RoomRecord } from '../src/rooms.js';
 
@@ -204,6 +204,51 @@ test('a PR of the branch that ended before the room was opened is not adopted', 
     });
     assert.deepEqual(await w.tick(T0), []);
     assert.equal(readPr('alpha', w.env), undefined);
+  });
+});
+
+// pr.json files an earlier opening of the room left, or that were put there: none is this room's PR.
+const stalePrs: [string, (rec: RoomRecord) => PrState][] = [
+  ['merged, seen before the room opened', (rec) => ({ url: URL_A, number: 7, state: 'MERGED', headRefName: rec.branch!, seenAt: rec.createdAt - MIN, failing: [] })],
+  ['closed, of another branch', (rec) => ({ url: URL_A, number: 7, state: 'CLOSED', headRefName: 'maitre/other', seenAt: T0, failing: [] })],
+  ['open, seen before the room opened', (rec) => ({ url: URL_A, number: 7, state: 'OPEN', headRefName: rec.branch!, seenAt: rec.createdAt - MIN, failing: [] })],
+];
+for (const [what, stale] of stalePrs) {
+  test(`a pr.json ${what} does not block adopting the room's new PR`, async () => {
+    await withWorld(async (w) => {
+      const rec = w.room('alpha');
+      writePr('alpha', stale(rec), w.env);
+      w.data({
+        list: { 'maitre/alpha': [listed(URL_B, 'maitre/alpha')] },
+        view: { [URL_A]: view('maitre/alpha', { state: 'MERGED', mergedAt: '2026-11-20T10:00:00Z' }), [URL_B]: view('maitre/alpha') },
+      });
+      assert.deepEqual(kinds(await w.tick(T0)), ['alpha:adopted']);
+      assert.deepEqual(readPr('alpha', w.env), { url: URL_B, number: 8, state: 'OPEN', headRefName: 'maitre/alpha', seenAt: T0, failing: [] });
+    });
+  });
+}
+
+test("an open pr.json of an earlier opening whose PR merged before this room opened never becomes this room's", async () => {
+  await withWorld(async (w) => {
+    const rec = w.room('alpha');
+    writePr('alpha', { url: URL_A, number: 7, state: 'OPEN', headRefName: 'maitre/alpha', seenAt: rec.createdAt - MIN, failing: [] }, w.env);
+    w.data({
+      list: { 'maitre/alpha': [listed(URL_A, 'maitre/alpha', 'MERGED')] },
+      view: { [URL_A]: view('maitre/alpha', { state: 'MERGED', mergedAt: '2026-11-20T10:00:00Z' }) },
+    });
+    assert.deepEqual(await w.tick(T0), [], 'no merge, so no dance and no close for this room');
+    assert.equal(roomPr(rec, w.env), undefined);
+  });
+});
+
+test("a closed pr.json of this opening stays final: no gh call, a new PR on the branch is not adopted", async () => {
+  await withWorld(async (w) => {
+    const rec = w.room('alpha');
+    writePr('alpha', { url: URL_A, number: 7, state: 'CLOSED', headRefName: 'maitre/alpha', seenAt: rec.createdAt + MIN, failing: [] }, w.env);
+    w.data({ list: { 'maitre/alpha': [listed(URL_B, 'maitre/alpha')] }, view: { [URL_B]: view('maitre/alpha') } });
+    assert.deepEqual(await w.tick(T0), []);
+    assert.deepEqual(w.calls(), []);
+    assert.equal(readPr('alpha', w.env)?.url, URL_A);
   });
 });
 

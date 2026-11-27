@@ -3,7 +3,7 @@ import { roomActivity } from './activity.js';
 import { readJson, settings, writeJsonAtomic } from './config.js';
 import { roomDir } from './paths.js';
 import { CheckError, isGitHubUrl, message, must, NET_TIMEOUT_MS, run, shownText, toolEnv } from './pending.js';
-import { patchPr, prSeekFile, readPr, writePr, type PrNotice, type PrState } from './pr-state.js';
+import { ownsPr, patchPr, prSeekFile, readPr, writePr, type PrNotice, type PrState } from './pr-state.js';
 import { listRooms, type RoomRecord } from './rooms.js';
 
 export interface PrEvent {
@@ -209,9 +209,11 @@ class Watch {
     private readonly clock: () => number,
   ) {}
 
+  // A pr.json an earlier opening of the room left (or one put there) is no PR of this room: it is replaced
+  // by the room's own once found. A PR that ended before the room opened is still never adopted.
   async room(rec: RoomRecord): Promise<PrEvent[]> {
     const before = readPr(rec.room, this.env);
-    if (before !== undefined) return before.state === 'OPEN' ? this.poll(rec, before) : [];
+    if (before !== undefined && ownsPr(rec, before)) return before.state === 'OPEN' ? this.poll(rec, before) : [];
     return this.adopt(rec);
   }
 
@@ -303,7 +305,8 @@ class Watch {
 
   // The first sight of a PR: no CI or review notice, only its state.
   private baseline(rec: RoomRecord, url: string, view: View): PrEvent[] {
-    if (readPr(rec.room, this.env) !== undefined) return [];
+    const there = readPr(rec.room, this.env);
+    if (there !== undefined && ownsPr(rec, there)) return [];
     const number = Number(PR_URL.exec(url)![1]);
     const newest = view.feedback.at(-1);
     const pr: PrState = {
@@ -318,7 +321,8 @@ class Watch {
     };
     const events: PrEvent[] = [{ room: rec.room, kind: 'adopted', text: `PR #${number}: ${url}` }];
     this.ended(rec, pr, events);
-    writePr(rec.room, pr, this.env);
+    if (there === undefined) writePr(rec.room, pr, this.env);
+    else if (patchPr(rec.room, (now) => (ownsPr(rec, now) ? undefined : pr), this.env) === undefined) return [];
     return events;
   }
 

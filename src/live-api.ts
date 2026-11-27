@@ -7,7 +7,7 @@ import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { roomDir } from './paths.js';
 import { shownText } from './pending.js';
-import { patchPr, readPr, readsNotice, type PrState } from './pr-state.js';
+import { ownsPr, patchPr, readPr, readsNotice, type PrState } from './pr-state.js';
 import { queueFile, readQueue, type QueueEntry } from './queue.js';
 import { couchHolds, parked, readRoom, type RoomRecord } from './rooms.js';
 import { isStartingNote, modelKey, reduce, type RoomState } from './room-state.js';
@@ -87,7 +87,7 @@ export class LiveRooms {
       this.prs.set(rec.room, hit);
     }
     const pr = hit.pr;
-    return pr !== undefined && pr.headRefName === rec.branch && pr.seenAt >= rec.createdAt ? pr : undefined;
+    return pr !== undefined && ownsPr(rec, pr) ? pr : undefined;
   }
 
   // Claude stopped with the room still open: released for its seat, or gone with a session to resume.

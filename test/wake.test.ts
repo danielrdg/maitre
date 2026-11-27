@@ -225,6 +225,12 @@ test('every open stamps its record resumable, and a wake keeps the stamp', async
   parkByHand('a');
   await wakeRoom('a', process.env, QUICK);
   assert.equal(readRoom('a')!.resumable, true);
+  // A room parked before the stamp existed (a seat, no stamp) gets it once woken: it was not closed by hand.
+  const { resumable: _r, ...old } = readRoom('a')!;
+  writeRoom({ ...old, seat: { releasedAt: Date.now(), session: 's1' } });
+  killTabs();
+  await wakeRoom('a', process.env, QUICK);
+  assert.equal(readRoom('a')!.resumable, true);
 });
 
 test('a room closed by hand before M3a (closedAt only: no stamp, no seat) is not offered for waking, yet room wake resumes it', async () => {

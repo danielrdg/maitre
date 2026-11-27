@@ -213,11 +213,12 @@ async function dropTab(room: string, ws: { workspaceId: string }): Promise<void>
   if (!gone) throw new Error(`${room}: could not close its new tab (${ws.workspaceId}) — close it in herdr; the room stays parked`);
 }
 
-// One write, against the record as it is on disk: the new tab, and the seat and closedAt gone with it.
+// One write, against the record as it is on disk: the new tab, and the seat and closedAt gone with it; a
+// woken room may be woken again.
 function record(rec: RoomRecord, ws: { workspaceId: string; paneId: string }, env: NodeJS.ProcessEnv): void {
   const next = patchRoom(
     rec,
-    ({ seat: _s, closedAt: _c, ...r }) => ({ ...r, herdr: { session: herdrSession(env), workspaceId: ws.workspaceId, paneId: ws.paneId } }),
+    ({ seat: _s, closedAt: _c, ...r }) => ({ ...r, herdr: { session: herdrSession(env), workspaceId: ws.workspaceId, paneId: ws.paneId }, resumable: true }),
     env,
   );
   if (next.herdr?.workspaceId !== ws.workspaceId) throw new Error(`${rec.room} changed while it was being woken`);

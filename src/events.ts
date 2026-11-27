@@ -16,6 +16,12 @@ export const HOOK_EVENTS = [
 
 export type HookEvent = (typeof HOOK_EVENTS)[number];
 
+// Claude Code's own reminders (the idle one comes about a minute after Stop) are not the room doing
+// anything: they never reset the idle clock, make a couch stale or abort a close.
+export function countsAsActivity(line: Pick<HookLine, 'event'>): boolean {
+  return line.event !== 'Notification';
+}
+
 export interface HookLine {
   v: 1;
   ts: number;
@@ -40,6 +46,7 @@ export interface HookLine {
   background_running?: number;
   model?: string;
   prompt?: string;
+  transcript?: string;
   synthetic?: boolean;
   status?: 'working' | 'waiting' | 'blocked';
   // MaitreStatus written by maître while a room starts: the room's SessionStart clears it.

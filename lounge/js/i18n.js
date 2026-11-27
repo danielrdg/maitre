@@ -77,6 +77,8 @@ export const STRINGS = {
     'panel.answerInTerminal': "Answer in the room's terminal",
     'panel.openTerminal': 'Open in terminal',
     'panel.terminalFailed': 'Could not open the terminal: {message}',
+    'panel.queued': 'Waiting for a seat (position {n})',
+    'panel.couch': 'On the couch: {reasons}',
     'live.empty': 'No rooms yet — click the maître at the desk, or run `maitre` in a terminal',
     'live.disconnected': 'Disconnected — reopen the lounge from the terminal',
 
@@ -178,6 +180,8 @@ export const STRINGS = {
     'panel.answerInTerminal': 'Responda no terminal da sala',
     'panel.openTerminal': 'Abrir no terminal',
     'panel.terminalFailed': 'Não deu pra abrir o terminal: {message}',
+    'panel.queued': 'Esperando vaga (posição {n})',
+    'panel.couch': 'No sofá: {reasons}',
     'live.empty': 'Nenhuma sala ainda — clique no maître no balcão, ou rode `maitre` num terminal',
     'live.disconnected': 'Desconectado — abra o lounge de novo pelo terminal',
 

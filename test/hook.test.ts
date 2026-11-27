@@ -131,8 +131,9 @@ test('each fixture line appends exactly one matching event line', () => {
       assert.equal(ev.agent_id, p.agent_id);
       assert.equal(ev.agent_type, p.agent_type);
       assert.ok(ev.ts >= before && ev.ts <= Date.now());
-      const line = JSON.stringify(ev);
-      assert.ok(!line.includes('/tmp/room'), 'cwd and paths are not copied');
+      assert.equal(ev.transcript, p.transcript_path);
+      const line = JSON.stringify({ ...ev, transcript: undefined });
+      assert.ok(!line.includes('/tmp/room'), 'cwd and paths are not copied, except the transcript path');
       assert.ok(!line.includes('permission_suggestions'));
     });
   } finally {
@@ -395,4 +396,13 @@ test('an unwritable MAITRE_HOME exits 0 quietly', () => {
     chmodSync(locked, 0o700);
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test('the hook stores transcript_path as transcript, capped, and omits it when absent', () => {
+  const base = { session_id: 's1', hook_event_name: 'Stop' };
+  assert.equal(hookOne(JSON.stringify({ ...base, transcript_path: '/h/.claude/projects/p/s1.jsonl' })).transcript, '/h/.claude/projects/p/s1.jsonl');
+  assert.equal('transcript' in hookOne(JSON.stringify(base)), false);
+  assert.equal('transcript' in hookOne(JSON.stringify({ ...base, transcript_path: 5 })), false);
+  const long = hookOne(JSON.stringify({ ...base, transcript_path: '/' + 'a'.repeat(5000) })).transcript!;
+  assert.ok(long.length <= 1024 && long.endsWith('…'));
 });

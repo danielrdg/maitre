@@ -3,7 +3,8 @@ import type { HookLine } from './events.js';
 
 export const BRIEF_HEADER = '# Brief from the maître reception';
 
-export type LiveState = 'coffee' | 'work' | 'smoke' | 'blocked' | 'ready' | 'whisky' | 'exit';
+// 'queue' and 'couch' are never the reducer's: LiveRooms shows them from queue.json and the registry.
+export type LiveState = 'coffee' | 'work' | 'smoke' | 'blocked' | 'ready' | 'whisky' | 'exit' | 'queue' | 'couch';
 export type ModelKey = 'haiku' | 'sonnet' | 'opus' | 'fable' | 'unknown';
 
 export interface Block {
@@ -34,6 +35,8 @@ export interface RoomState {
   project?: string;
   branch?: string;
   kind?: 'code' | 'scratch';
+  couchReasons?: string[];
+  queuePosition?: number;
 }
 
 interface Pending {

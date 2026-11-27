@@ -195,7 +195,7 @@ The daemon computes each room's state by combining three sources, in order of tr
    - `gh pr create` → whisky.
 
    **Bell rule:** it only rings for a real block: pending permission, a question with options, or `maitre status blocked`. A `Stop` with no declaration becomes "ready for you to look", silently, even if the last message is a loose question.
-3. **Daemon polling:** `gh pr view` for rooms with a PR (detects the merge → dance floor), idle time (→ couch or exit) and the queue (→ sidewalk).
+3. **Daemon polling:** idle time (→ couch or exit, M3a), the queue (→ sidewalk, M3a) and `gh pr view` for rooms with a PR (detects the merge → dance floor, M3b).
 
 **Measured mapping** (spike 1, Claude Code 2.1.332; details and payloads in [the spike notes](spikes/2026-11-25-hooks-and-herdr.md)). `main` = an event without `agent_id`.
 
@@ -210,7 +210,7 @@ The daemon computes each room's state by combining three sources, in order of tr
 | `SubagentStart` / `SubagentStop` | ignore `agent_type == ""` (a phantom after every `Stop`) | guest added to / removed from the slots |
 | `Stop` (main) | `background_tasks` has a `running` task | still working |
 | `Stop` (main) | otherwise | ready, silently; clears a block |
-| `Notification` | — | no change (the permission one is ~6 s late and generic; the idle one is unreliable) |
+| `Notification` | — | no change (the permission one is ~6 s late and generic; the idle one is unreliable); not activity either: it never resets the janitor's idle clock, makes a couch stale or aborts a close |
 | `SessionEnd` | — | leaves |
 
 **Correlating a block.** `PermissionRequest` has no `tool_use_id`, so the reducer pairs it with the most recent pending `PreToolUse` (main or subagent) that has the same `tool_name` and a deep-equal `tool_input`. The block's id is that `PreToolUse`'s `tool_use_id`, and the later `PostToolUse`/`PostToolUseFailure`/`PermissionDenied` with that id clears it. Hook events can be lost (see the spike notes), so a `PostToolUse` or `PermissionDenied` whose `PreToolUse` never arrived must be tolerated: no crash, and the room goes back to working.
@@ -230,21 +230,35 @@ The stuck agent's panel sends `POST /rooms/:id/answer` to the daemon. The daemon
 
 ### 6.6 Janitor
 
-- Runs every 5 min.
-- A room may close when it is past the idle time (default 4 h) and has nothing pending:
-  - no uncommitted changes;
-  - no unpushed commits (a branch with no upstream counts as unpushed);
-  - no open PR;
-  - no open question for the user.
-- When closing:
-  1. Asks Haiku for the room's minutes from the transcript (what was asked, what was done, links, loose ends).
-  2. Writes the minutes to `memory/minutes/<date>-<room>.md`.
-  3. Closes the herdr workspace.
-  4. Removes the worktree with `git worktree remove`, without `--force`, and keeps the branch.
-  5. Marks the room as closed.
-- With something pending, the room does not close: it goes to the couch and shows the reason in the panel.
-- **Merge exception:** when the room's PR is merged and nothing else is pending, the room does not wait 4 h. It dances on the floor for a few minutes and closes with minutes.
-- Every decision to close or not close goes to the log, with the reason.
+**M3a (done).** The janitor runs inside the lounge process (`maitre serve` or `maitre lounge`), every `janitor.intervalMinutes` (default 5) and once at start; `maitre janitor --dry-run` prints its decisions without acting.
+
+- A room may close when its live state is idle (`ready` or `coffee`), its last hook event is older than `janitor.idleHours` (default 4) and nothing is pending. A room whose Claude is gone waits the same idle time, so that after a reboot the user can still walk back in.
+- **Pending** for a code room, checked in its worktree:
+  - uncommitted changes (`git status --porcelain`, untracked files included; the reason names up to three of them);
+  - an ignored `.env` or `.env.*` file (owner decision: other ignored files may go with the worktree, and the minutes list the top-level ones that went);
+  - unpushed commits, against the branch's upstream, else `origin/<branch>`, else `origin/<base>`; a merged PR whose head is the local HEAD or contains it makes the branch **landed** (squash merges, deleted remote branch);
+  - an open PR for the branch (`gh pr list --head <branch>`; skipped when `origin` is not on GitHub);
+  - an open question for the user (live state `blocked`);
+  - the worktree's HEAD off its branch, or a rebase, merge, cherry-pick, revert or bisect in progress;
+  - commits reachable only from the worktree's own HEAD history (made on a detached HEAD and left behind);
+  - for a running room, text in its input box that was never sent, or an input box that cannot be found (`herdr pane read --format ansi`; Claude Code's dim placeholder is not text): `/exit` would be typed after it, and Claude Code would submit the two as one prompt.
+
+  A scratch room is pending only while `blocked` or holding unsent text. Any check that fails (git, `gh`, herdr) counts as pending, with the error as the reason.
+- When closing (one closer per room, through a `state/rooms/<room>/closing` marker):
+  1. Haiku writes the room's minutes from the transcript (what was asked, what was done, links, loose ends); if the call fails, the minutes are built from the task, the last steps, the last reply, the branch and its commits, marked "no summary".
+  2. The minutes go to `<vault>/minutes/YYYY-MM-DD-<room>.md` (`-2`, `-3` on a clash), with front matter (`room`, `project`, `branch`, `model`, `opened`, `closed`, `closedBy`) and `[[<project>]]` / `[[<room>]]` links. The vault defaults to `$MAITRE_HOME/memory`.
+  3. The room's activity is read again; any event newer than the decision aborts the close (`room became active`), and so does herdr reporting the room working or blocked: a janitor close never cuts a turn. Then the herdr tab closes, with `/exit` first for an idle room whose input box is empty; text there stops the close (the room goes to the couch, `unsent text in its input`).
+  4. A code room's worktree is removed with `git worktree remove`, without `--force`, after the local checks run once more; the branch is always kept. If the removal fails, the room is still closed, and the reason goes to the log and the minutes.
+  5. A scratch room's files move to `<vault>/rooms/<room>/` (never deleted; a file clash gets a suffix), and the empty scratch folder is removed.
+  6. The room is marked closed (`closedAt`, `closedBy: janitor`).
+- `maitre room close` by hand writes minutes too (`closedBy: user`) and keeps the worktree; unsent text in the room's input stops it, with a message, before any minutes are written. Before any destructive step, the room's folder must resolve to exactly `$MAITRE_HOME/worktrees/<project>/<room>` or `$MAITRE_HOME/scratch/<room>`; otherwise nothing is touched.
+- With something pending, the room does not close: it goes to the couch (`couch: { since, reasons }` in its record), keeps running, stops counting toward capacity and shows the reasons in the panel and in `maitre room list`. A newer event makes the couch stale, and the janitor clears it on its next tick. A room whose Claude is gone is never on the couch: its reasons go to `pending: { since, reasons }` in its record, for `maitre room list`, and are dropped once they go. A room closed with minutes (`closedBy` set) shows as `closed` there.
+- A close that died after its tab closed leaves its marker (with the minutes' path and the record's `createdAt`); the next close of that same opening reuses those minutes, and a reopened room gets its own.
+- Every decision goes to `state/janitor.log` (JSON lines `{ ts, room, decision, reasons }`, mode 0600; an unchanged `skip` is not repeated; rolled to `janitor.log.1` past 1 MB).
+
+**Moved to M3b.**
+- **Merge exception:** when the room's PR is merged and nothing else is pending, the room does not wait 4 h. It dances on the floor for a few minutes and closes with minutes. (Until then a merged branch counts as landed, so the room closes after the idle time.)
+- A PR closed without merge, CI and review notices, and the seat release and `--resume` in §7.1.
 
 ### 6.7 Projects and worktrees
 
@@ -332,7 +346,7 @@ A subset of the README's [maître vs firstmate](../README.md#maître-vs-firstmat
 | | firstmate | maître |
 |---|---|---|
 | Who you talk to | One liaison, the first mate, which dispatches and supervises the crew ([README](https://github.com/kunchenguid/firstmate/blob/64254de47a2989add6412949e98c36e3964b24aa/README.md?plain=1#L44)) | A reception that sends each topic to its own named room; any room can be talked to directly (M2a) |
-| Cleaning up | Teardown after a task ships or reports, refusing dirty worktrees and unlanded work ([architecture](https://github.com/kunchenguid/firstmate/blob/64254de47a2989add6412949e98c36e3964b24aa/docs/architecture.md?plain=1#L469)) | The same never-lose-work rule, plus a janitor that closes rooms idle for 4 h with nothing pending and writes minutes (M3) |
+| Cleaning up | Teardown after a task ships or reports, refusing dirty worktrees and unlanded work ([architecture](https://github.com/kunchenguid/firstmate/blob/64254de47a2989add6412949e98c36e3964b24aa/docs/architecture.md?plain=1#L469)) | The same never-lose-work rule, plus a janitor that closes rooms idle for 4 h with nothing pending and writes minutes (M3a) |
 | Choosing a model | A static crew harness or dispatch profiles, with an optional typed resolver ([architecture](https://github.com/kunchenguid/firstmate/blob/64254de47a2989add6412949e98c36e3964b24aa/docs/architecture.md?plain=1#L367-L371)) | A routing table applied by code, with each room's outcome fed back to the router (M2a, M5) |
 | Always-loaded instructions | `AGENTS.md`, imported by `CLAUDE.md` ([CLAUDE.md](https://github.com/kunchenguid/firstmate/blob/64254de47a2989add6412949e98c36e3964b24aa/CLAUDE.md?plain=1#L2)): about 7,350 words | A reception contract capped at 1,500 words (M2a) |
 | Watching the agents | The session backend's panes; shipmate, a separate project, adds a dashboard refreshed every 30 seconds where you can also answer decisions and queue tasks ([shipmate](https://github.com/bpsanti/shipmate/blob/78f90de2cb78f00cf482326ba9a15ef9ef229439/README.md?plain=1#L7-L8)) | A built-in lounge updated live over SSE (M1) |
@@ -346,19 +360,23 @@ A subset of the README's [maître vs firstmate](../README.md#maître-vs-firstmat
 - **M2 · Rooms**, split in two by the owner on 25-11-2026:
   - **M2a · Reception and rooms (done):** `maitre` opens the herdr session with the reception and the lounge; `maitre index` builds the project index; the guarded reception captures each request to a file and runs only id-based `maitre route`/`dispatch`; Haiku classifies, code picks the model from `config/routing.json`; `room open|send|list|close` with a worktree per room; the trust dialog answered on screen, never by editing `~/.claude.json`; the lounge shows each room's project and branch.
   - **M2b · The doors (done):** `./setup` and `maitre setup`; `maitre serve` as a `systemd --user` service, with a stable `lounge.json` and one-time tickets; the clickable maître and the Super+M quick prompt, both going straight to the router; the `.desktop` app icon; and the room panel's "Open in terminal", pulled forward from M5 (§6.8.1).
-- **M3 · Doorman and janitor:** queue, capacity, cleanup with minutes in the vault.
+- **M3 · Doorman and janitor**, split in two by the owner on 27-11-2026:
+  - **M3a · Doorman and janitor (done):** `capacity` and the FIFO queue on the sidewalk (`state/queue.json`, a failed list after three failed opens), the janitor with the never-lose-work checks, the couch, minutes in the vault and `maitre janitor --dry-run`, all running in the lounge process (§6.6, §7.1).
+  - **M3b · Seats and PRs:** an inactive room gives up its seat and wakes with `claude --resume`; PR watching (notices, merge dance, PR closed without merge); the router reading recent minutes, and a new room born with an old room's minutes.
 - **M4 · Building:** facade, floors, terrace, elevator.
 - **M5 · Answer from the lounge** and routing that learns.
 
 ## 7.1 Designer's decisions (open to review)
 
-- **An inactive room gives up its seat.** When the room is on the couch or at the bar (PR open), the `claude` process is stopped after 30 min idle and the doorman's seat is freed.
+**What M3a built.** The doorman caps active rooms at `capacity` (default 6). An active room is registered, not closed, its Claude running, not on the couch and without an open PR; queued rooms are not active. A new room past the cap waits in a FIFO queue (`state/queue.json`, changed only under `state/queue.lock`); a room being opened holds a reservation in `state/opening.json` that counts as active. The doorman runs in the lounge process on every change that can free a seat and on every janitor tick, and opens the oldest queued room. A follow-up to a queued room joins its entry; queued names are taken for the router and listed among its open rooms. A failed open stamps the entry's `lastAttemptAt`, and the doorman tries that head again a minute later at the earliest, however often it is woken; three failed opens in a row move an entry to `state/queue-failed.json`, and the lounge says so in its journal and with a desktop notification. Capacity is soft: a room coming back from the couch or a PR may push the count over the cap, and new rooms wait. Cleanup follows option A (§5) as described in §6.6. The bullets below marked M3b are still to come.
+
+- **An inactive room gives up its seat (M3b).** When the room is on the couch or at the bar (PR open), the `claude` process is stopped after 30 min idle and the doorman's seat is freed. (In M3a, a couched room or one with a PR already stops counting toward capacity, but its `claude` keeps running.)
   - The room keeps its session id, worktree and branch.
   - To wake it, maître runs `claude --resume <id>` in a new tab. This also covers a machine reboot.
   - A new request on the topic of a room on the couch wakes that room. For a closed room, the router creates a new room that is born with the old one's minutes.
-- **After the PR is open: notify only.** The daemon polls CI and review through `gh`. When CI fails or a comment arrives, the room gets a notice in the lounge (orange balloon, no bell) and a line in the reception. maître does not prompt the room on its own. A `pr.autoWake` option (default `false`) exists for whoever wants it to wake the room by itself.
-- **A PR closed without merge** counts as closed: the room closes with minutes and the branch stays.
-- **Room without code:** on close, the files in its scratch folder move to `memory/rooms/<room>/`, never deleted.
+- **After the PR is open: notify only (M3b).** The daemon polls CI and review through `gh`. When CI fails or a comment arrives, the room gets a notice in the lounge (orange balloon, no bell) and a line in the reception. maître does not prompt the room on its own. A `pr.autoWake` option (default `false`) exists for whoever wants it to wake the room by itself.
+- **A PR closed without merge (M3b)** counts as closed: the room closes with minutes and the branch stays.
+- **Room without code (M3a, done):** on close, the files in its scratch folder move to `memory/rooms/<room>/`, never deleted.
 - **Multi-repo room:** a room can have more than one worktree (1:N). It shows on the main project's floor, with a small sign for the others.
 - **The user's global rules apply in rooms**, because they are the user's own Claude Code. `room-AGENTS.md` only pins what belongs to maître: use the worktree and branch maître created, do not create another, and declare waits and blocks with `maitre status`.
 - **The 5k-token target** applies to the `route` call. The reception runs with setting sources off (spike 0), so personal settings, hooks and plugins stay out; Claude Code still loads the user's and organization's `CLAUDE.md`, and the guard hook keeps it to the `maitre` allowlist. The 1,500-word ceiling applies to its contract.

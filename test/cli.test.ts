@@ -99,6 +99,15 @@ test('parseArgs parses room open, send, list and close', () => {
   assert.deepEqual(parseArgs(['room', 'close', 'x']), { cmd: 'room-close', room: 'x' });
 });
 
+test('parseArgs parses janitor and janitor --dry-run, and HELP lists them', () => {
+  assert.deepEqual(parseArgs(['janitor']), { cmd: 'janitor', dryRun: false });
+  assert.deepEqual(parseArgs(['janitor', '--dry-run']), { cmd: 'janitor', dryRun: true });
+  for (const argv of [['janitor', '--dryrun'], ['janitor', '--dry-run', 'x'], ['janitor', 'x']]) {
+    assert.deepEqual(parseArgs(argv), { cmd: 'usage', error: 'usage: maitre janitor [--dry-run]' }, argv.join(' '));
+  }
+  assert.ok(HELP.includes('maitre janitor [--dry-run]'));
+});
+
 test('parseArgs rejects malformed room commands', () => {
   for (const argv of [
     ['room'],

@@ -20,13 +20,13 @@
 </p>
 
 > [!NOTE]
-> **maître is early.** What runs today is **M2b: run `./setup` once, then press Super+M or click the maître in the lounge, type a request, and watch the room walk in.** Each request goes to a room, a Claude Code session in its own git worktree and herdr tab, on the model the task calls for. `maitre` in a terminal still opens herdr with the reception and the lounge, and the demo mode and rooms opened by hand with `maitre room run` still work. The doorman, the janitor, the building and answering from the lounge are the design being built next. Sections below mark what is planned, and the [Roadmap](#roadmap) tracks it.
+> **maître is early.** What runs today is **M3a: run `./setup` once, then press Super+M or click the maître in the lounge, type a request, and watch the room walk in.** Each request goes to a room, a Claude Code session in its own git worktree and herdr tab, on the model the task calls for. A doorman keeps at most 6 rooms active and lines up the rest on the sidewalk, and a janitor closes rooms left idle with nothing pending, writing minutes to a markdown vault. `maitre` in a terminal still opens herdr with the reception and the lounge, and the demo mode and rooms opened by hand with `maitre room run` still work. Waking rooms with `--resume` and watching PRs (M3b), the building (M4) and answering from the lounge (M5) are the design being built next. Sections below mark what is planned, and the [Roadmap](#roadmap) tracks it.
 
 ## What is it
 
 <img alt="The maître mascot: grey slicked hair, moustache, red bow tie and tuxedo" src="lounge/favicon.svg" width="96" align="right" />
 
-This is what maître is being built to do. Today you write requests at the reception, they land in rooms, and you watch the rooms in the lounge; the rest arrives milestone by milestone.
+This is what maître is being built to do. Today you write requests at the reception, they land in rooms, you watch the rooms in the lounge, and the janitor tidies up after them; the rest arrives milestone by milestone.
 
 Running one coding agent is easy. Running five is a juggling act: which tab had the failing test, which conversation was about the login bug, which worktree is safe to delete.
 
@@ -35,7 +35,7 @@ maître runs the room for you, like the maître d' of a busy lounge.
 - **A reception, not a chat log.** You write every request in one place. The reception does no work itself: it sends the request to the room that already handles that topic, or opens a new one.
 - **One room per topic, named for you.** Each room is a real, interactive Claude Code session in its own git worktree, named after its topic (`fix-login`, `weekly-digest`). You can walk into any room and talk to it directly.
 - **The right model for the job.** A routing table maps each kind of task to a model: Haiku for reading, summarizing and naming; Sonnet for the reception, exploration and clear changes; Opus for development; Fable as the advisor before big decisions. Each room records how it went, so routing learns.
-- **A janitor that never loses work.** A room idle for 4 hours with nothing pending (no uncommitted change, no unpushed commit, no open PR, no open question) closes on its own and leaves minutes in a markdown vault. Anything with loose ends goes to the couch instead.
+- **A janitor that never loses work.** A room idle for 4 hours with nothing pending (no uncommitted change, no unpushed commit, no open PR, no open question, no `.env` file) closes on its own and leaves minutes in a markdown vault. Anything with loose ends goes to the couch instead, with the reason.
 - **A lounge you can leave open all day.** A pixel-art building where every agent's place tells you its state at a glance, and where the one agent that needs you rings the bell.
 
 ## Features
@@ -51,8 +51,8 @@ What you can run today is marked **today**: it works with real rooms as well as 
 | <img src="docs/assets/sprites/ready.png" width="48" alt="An agent with a drink and a green check" /> | **Ready, quietly.** An agent that finished its turn without asking anything waits at the bar with a green check. No sound. | **today** |
 | <img src="docs/assets/sprites/reception.png" width="48" alt="The maître at the reception desk" /> | **Reception and rooms.** One request box, one room per topic, automatic names, and the project found from an index of your repos. | **today**, in the terminal, by clicking the maître in the lounge, or with the Super+M prompt |
 | <img src="docs/assets/sprites/routing.png" width="48" alt="Fable, the house advisor, with a cigar" /> | **Model routing** by task type, applied by code, with outcomes that feed back into the router. | **today** by task type; learning in M5 |
-| <img src="docs/assets/sprites/doorman.png" width="48" alt="The doorman in sunglasses" /> | **Doorman.** At most 6 active rooms at once (configurable); the rest queue on the sidewalk. | M3 |
-| <img src="docs/assets/sprites/janitor.png" width="48" alt="The waiter with a tray" /> | **Janitor.** Closes idle rooms with nothing pending and writes minutes to an Obsidian-compatible vault. | M3 |
+| <img src="docs/assets/sprites/doorman.png" width="48" alt="The doorman in sunglasses" /> | **Doorman.** At most 6 active rooms at once (configurable); the rest queue on the sidewalk and walk in, oldest first, when a seat frees. | **today**; a couched room giving up its seat and waking with `--resume` in M3b |
+| <img src="docs/assets/sprites/janitor.png" width="48" alt="The waiter with a tray" /> | **Janitor.** Closes idle rooms with nothing pending and writes minutes to an Obsidian-compatible vault; rooms with loose ends go to the couch. | **today**; watching PRs (CI, reviews, the merge dance) in M3b |
 | <img src="docs/assets/sprites/building.png" width="48" alt="The bartender" /> | **The building.** One themed floor per project, a lobby, a shared smoking terrace and an elevator. | M4 |
 | <img src="docs/assets/sprites/answer.png" width="48" alt="An agent with a coffee" /> | **Answer from anywhere.** Reply to a stuck room from the lounge, chat with a room from its panel, or pick an option straight from a desktop notification. | M5 |
 
@@ -87,9 +87,10 @@ maitre serve [--port <n>]                run the live lounge with no window (wha
 maitre setup [--dry-run] [--uninstall]   install the command, the service, the icon and the shortcut
 maitre index [--root <dir>]...           scan your repos for the project index
 maitre projects                          list the indexed projects
-maitre room list                         rooms, their herdr status and lounge state
+maitre room list                         rooms, their herdr status and lounge state, queued and failed rooms
 maitre room send <room> "<text>"         send a room a message without waiting for its turn
-maitre room close <room>                 exit a room and close its tab (its folder is kept)
+maitre room close <room>                 write a room's minutes, exit it and close its tab (its folder is kept)
+maitre janitor [--dry-run]               run the janitor once now (--dry-run: only print what it would do)
 maitre room open <name> [--project <p>] --model <m> --task <type> (--brief "<text>" | --brief-file <path>)
 maitre route <id> [<id>...] [--json]     what the reception runs: classify a request
 maitre dispatch <id>                     what the reception runs: open or feed the room
@@ -141,7 +142,38 @@ Haiku names the task type and code picks the model, and an unknown type gets Son
 
 **Where the work happens.** A room for a project gets a git worktree at `$MAITRE_HOME/worktrees/<project>/<room>`, on a new branch `maitre/<room>` cut from `origin/<base>` after a `git fetch`, from your local clone (nothing is cloned). A request without a project gets a scratch folder at `$MAITRE_HOME/scratch/<room>`. Each room is a herdr tab named `<project> / <room>` running your own Claude Code with `--permission-mode auto`, so your skills and global rules work there. Walk into the tab to talk to it. Follow-ups typed at the reception go to the room that has the topic; a room that is waiting on you (a permission or a question) is not interrupted, and the reception tells you to answer it in its tab. From any terminal, `maitre room send <room> "<text>"` does the same.
 
-**Closing a room.** Tell the reception "close fix-login", or run `maitre room close fix-login`: an idle room gets `/exit` first, then the tab closes. A room that is still working is closed mid-turn: the tab closes and that turn is cut off, so wait for it to finish if you want its result. The worktree, the branch and the scratch folder stay; M2a never deletes them, and opening a room with the same name later reuses them and says so. When you are done with one, remove it by hand from your clone (`git worktree remove <path>`, then `git branch -d maitre/<room>`). The janitor that closes idle rooms safely comes in M3. If a room's Claude dies or herdr restarts, `maitre room list` shows the room as `not running`, and the next `maitre` closes its leftover tab.
+**Closing a room.** Tell the reception "close fix-login", or run `maitre room close fix-login`: it writes the room's minutes (it prints "writing the minutes…"; the Haiku call takes up to a minute), then an idle room gets `/exit`, then the tab closes. A room that is still working is closed mid-turn: the tab closes and that turn is cut off, so wait for it to finish if you want its result. A room closed by hand keeps its worktree, its branch and its scratch folder, and opening a room with the same name later reuses them and says so; remove a worktree by hand from your clone when you are done with it (`git worktree remove <path>`). On a queued room, `maitre room close` takes it off the sidewalk (or out of the failed list) instead. If a room's Claude dies or herdr restarts, `maitre room list` shows the room as `not running`, and the next `maitre` closes its leftover tab. Rooms left idle are closed for you by [the janitor](#the-doorman-and-the-janitor-works-today).
+
+### The doorman and the janitor (works today)
+
+Both run inside the lounge process: the login service (`maitre serve`) or `maitre lounge` in a terminal. Without a running lounge, queued rooms wait and nothing is closed for you.
+
+**The doorman.** At most `capacity` rooms (default 6) are active at once. A room is active while its Claude runs, it is not on the couch and it has no open PR. A new room asked for past that cap waits on the sidewalk: the reception, the prompt and `maitre dispatch` answer "queued: <room> waits for a seat (position N)", and the lounge shows it behind the velvet rope. When a seat frees (a room closes, goes to the couch, opens a PR or exits), the doorman opens the oldest queued room, first in, first out. A follow-up for a room that already runs is never queued, and a follow-up for a queued room joins its queue entry, so the room's brief carries both when it opens. A queued room whose open fails is tried again a minute later at the earliest, however often seats change; after three failed opens in a row it leaves the queue for a failed list, with the error, and the lounge tells you (a line in its log and a desktop notification). `maitre room list` shows queued rooms with their position and failed ones with the error and their request ids, and `maitre room close <room>` removes either. The cap is soft: a couched room or a room with a PR that gets a new prompt comes back even if that puts the count over the cap, and new rooms wait until it drops. A room you open yourself with `maitre room open` skips the doorman but counts as active. Rooms started with `maitre room run` are not registered rooms: neither the doorman nor the janitor touches them.
+
+**The janitor.** Every 5 minutes, and once when the lounge starts, the janitor looks at every room whose last activity is older than the idle time (4 hours by default) and whose state is idle (ready at the bar, or a coffee that never started). A room whose Claude is gone (a crash, a reboot) also waits the idle time; that keeps it around for you to walk back in. For each such room it checks what is pending, then:
+
+- **nothing pending:** it writes the room's minutes, closes the tab (with `/exit` first, typed only into an empty input box), removes a code room's worktree with `git worktree remove` (never `--force`) and keeps its branch, and moves a scratch room's files to the vault;
+- **something pending:** the room goes to **the couch**, with the reasons. It keeps running, it does not count toward the cap, and the lounge shows it napping on the couch; click it for the reasons. `maitre room list` shows it as `couch: <reasons>`. The janitor checks it again on every tick and closes it once nothing is pending. A new prompt brings it back to work. A room whose Claude is gone is not on the couch, but `maitre room list` shows what keeps it (`pending: <reasons>`), and a room closed with minutes shows as `closed`.
+
+**What counts as pending** (the never-lose-work rule). The janitor never closes a code room when any of these is true:
+
+- a change is not committed: anything in `git status`, untracked files included;
+- an ignored `.env` or `.env.*` file is there (other ignored files, such as `node_modules` or build output, go away with the worktree, and the minutes list them);
+- a commit is not pushed: compared with the branch's upstream, else `origin/<branch>`, else `origin/<base>`. A commit that reached the base through a merged PR (squash merges too) counts as landed;
+- a PR for the branch is open;
+- the room is waiting on you (a permission, a question, or `maitre status blocked`);
+- the worktree is not on its branch (a detached HEAD or another branch checked out);
+- a rebase, merge, cherry-pick, revert or bisect is in progress;
+- some commits exist only in this worktree's history (made on a detached HEAD and left behind);
+- there is text in the room's input box that you never sent (`/exit` would be typed after it and sent along), or maître cannot find the input box on the tab's screen.
+
+A scratch room is pending only while it waits on you or holds unsent text. Uncommitted changes are listed by name, up to three. Any check that fails (git, `gh`, herdr) counts as pending, with the error as the reason: the janitor never guesses. PR checks run only when `origin` is on GitHub, with your `gh` login. Right before closing the tab it reads the room's activity again, and a room with any new event, or one herdr shows working or waiting on you, is left alone (`room became active`; Claude Code's idle notification is not activity); right before removing the worktree it runs the local checks again, and if one finds something, the room is still closed but its worktree stays, with the reason in the minutes and the log.
+
+**Minutes and the vault.** Each closed room leaves a markdown file in the vault, `$MAITRE_HOME/memory` by default (`~/.maitre/memory`): `minutes/YYYY-MM-DD-<room>.md` (a second one on the same day gets `-2`, then `-3`). Haiku writes it from the room's transcript: what was asked, what was done, links (PR, commits) and loose ends. Its front matter has `room`, `project`, `branch`, `model`, `opened`, `closed` and `closedBy` (`janitor` or `user`), and its `[[<project>]]` and `[[<room>]]` links make the vault work as an Obsidian graph. When the Haiku call fails, the minutes are built from what maître knows (the task, the last steps, the last reply, the branch and its commits) and say "no summary". A scratch room's files move to `rooms/<room>/` in the vault, never deleted (a name clash gets a suffix), and the empty scratch folder is removed. Rooms opened before M3a have no transcript path, so their minutes use the fallback.
+
+**See before it acts.** `maitre janitor --dry-run` prints what the janitor would decide right now for every room (`close`, `couch`, `skip` or `error`, with the reasons) and acts on none of it: no room is closed or couched, and no record, log or minutes are written. It still does what its checks need: it starts maître's herdr server if it is not running, and it may `git fetch` a merged PR's head into a room's clone to tell whether its commits landed. It works without a lounge. `maitre janitor` alone runs one pass for real. Every decision the janitor takes for real (not a dry run) goes to `$MAITRE_HOME/state/janitor.log`, one JSON line per decision (`ts`, `room`, `decision`, `reasons`), readable only by you; a `skip` is written only when it changes, and the file rolls over to `janitor.log.1` past 1 MB. The service's log (`journalctl --user -u maitre`) gets a line when the janitor closes or couches a room and when the doorman opens one from the queue.
+
+**Upgrading from before M3a.** Rooms you closed by hand before M3a carry only a "not running" mark, without minutes, so the janitor takes them for rooms whose Claude died. Once one is idle long enough and nothing is pending, the janitor closes it for good: fallback minutes, and a code room's worktree removed with `git worktree remove` (its branch stays; ignored files other than `.env` and `.env.*`, such as `node_modules` or build output, go with it). Before you restart the service on the new version, run `maitre janitor --dry-run` and look at what it would close.
 
 ### Watch a real room by hand (works today)
 
@@ -197,7 +229,7 @@ The service does not read your shell profile. It gets the `PATH` and `MAITRE_HOM
 
 **Who maître trusts.** maître assumes a single-user desktop: nobody else has an account on the machine. On a shared machine, another local user can read a window's ticket from the process list while Chrome starts and redeem it first, or take the lounge's old port after a restart moved the lounge and receive an open window's cookie. Either way they get the token, which lets them open rooms that run as you, and it stays valid until you rotate it as above.
 
-**Uninstall.** `./setup --uninstall` stops and disables the service, removes the files setup wrote (it leaves any you changed, and says so), removes its shortcut and gives Super+M back to GNOME. It keeps maître's data in `$MAITRE_HOME`: the config, the project index, rooms, requests and worktrees; delete that folder by hand if you want it gone. If a setting cannot be undone right now (no `gsettings`, for example), it keeps `$MAITRE_HOME/installed.json`, says what is left, and you can run `./setup --uninstall` again later.
+**Uninstall.** `./setup --uninstall` stops and disables the service, removes the files setup wrote (it leaves any you changed, and says so), removes its shortcut and gives Super+M back to GNOME. It keeps maître's data in `$MAITRE_HOME`: the config, the project index, rooms, requests, worktrees and the vault with the minutes (and a `vault` you set elsewhere); delete that folder by hand if you want it gone. If a setting cannot be undone right now (no `gsettings`, for example), it keeps `$MAITRE_HOME/installed.json`, says what is left, and you can run `./setup --uninstall` again later.
 
 ### Without a terminal (works today)
 
@@ -223,7 +255,7 @@ If the lounge cannot start or no window can open, the icon and the shortcut show
 
 ## How it works
 
-This is the target design (M1 to M5; the dashed answer path is M5). Today (M2b) the reception, the router, rooms in herdr with their own worktrees, the hooks and the lounge exist (highlighted below); the daemon is `maitre serve`, the login service (or `maitre lounge` in a terminal), which reads the rooms' events, streams them over SSE and takes requests from the lounge and the quick prompt. The doorman and the janitor come in M3.
+This is the target design (M1 to M5; the dashed answer path is M5). Today (M3a) the reception, the router, the doorman, rooms in herdr with their own worktrees, the hooks, the lounge and the janitor exist (highlighted below); the daemon is `maitre serve`, the login service (or `maitre lounge` in a terminal), which reads the rooms' events, streams them over SSE, takes requests from the lounge and the quick prompt, and runs the doorman and the janitor.
 
 ```mermaid
 flowchart LR
@@ -242,12 +274,12 @@ flowchart LR
   lounge -.->|"answer a stuck room"| daemon
   daemon -.->|"herdr agent prompt"| roomA
   classDef now fill:#3a130f,stroke:#ff5fa2,stroke-width:3px,color:#ffe0ef
-  class rec,router,roomA,roomB,lounge now
+  class rec,router,doorman,roomA,roomB,daemon,lounge now
 ```
 
 1. **You write in the reception**, a Sonnet session in herdr. It cannot do the work itself: its tools are restricted and a hook denies anything that is not a `maitre` command. A request typed in the lounge or the quick prompt skips the reception and goes to the daemon, which runs the same route and dispatch code.
-2. **`maitre route` asks Haiku** where the request belongs, given the project index and the open rooms (recent minutes and past routing outcomes join in M3 and M5). Haiku picks the project, the room and the task type; code picks the model from `config/routing.json`.
-3. **A known topic goes to its room.** A new topic gets a new room: a worktree on a `maitre/<room>` branch, a herdr tab, and `claude` started with a short brief. From M3, if six rooms are already active, it waits in line.
+2. **`maitre route` asks Haiku** where the request belongs, given the project index and the open rooms (recent minutes join in M3b, past routing outcomes in M5). Haiku picks the project, the room and the task type; code picks the model from `config/routing.json`.
+3. **A known topic goes to its room.** A new topic gets a new room: a worktree on a `maitre/<room>` branch, a herdr tab, and `claude` started with a short brief. If six rooms are already active, it waits in line on the sidewalk until the doorman has a seat.
 4. **Every room reports through Claude Code hooks.** One small hook forwards each event to the daemon and never blocks the agent. Rooms can also declare `maitre status waiting|blocked`.
 5. **The daemon pushes state to the lounge over SSE.** Answers you give in the lounge go back to the room through herdr.
 
@@ -283,7 +315,7 @@ The interface stays out of the way. The stage fills the window; a corner holds *
 
 ## States
 
-**The place tells the state.** You never read a status line: you look at where the agent is. The demo plays every state with simulated agents. Real rooms drive the coffee, the cards, the slots, the terrace, the bell, the bar, the whisky and the exit; the other places (the queue, the couch, the dance floor, Fable) arrive with later milestones.
+**The place tells the state.** You never read a status line: you look at where the agent is. The demo plays every state with simulated agents. Real rooms drive the queue, the coffee, the cards, the slots, the terrace, the bell, the bar, the whisky, the couch and the exit; the dance floor (M3b) and Fable (M5) arrive with later milestones.
 
 <p align="center">
   <img alt="The lounge states, one character each: queued, coffee, cards, slots, smoking, visiting Fable, the house advisor, the bell, ready, whisky, dancing and napping" src="docs/assets/states.png" width="100%" />
@@ -313,10 +345,10 @@ The bell rings only for a real block: a pending permission, a question with opti
 
 **Today** the settings are the CLI flags in [Quick start](#quick-start), a few environment variables and one config file:
 
-- `MAITRE_HOME` (default `~/.maitre`): where maître keeps everything it writes: the config, the project index, room events, briefs, worktrees and scratch folders. The lounge, the reception and the rooms must use the same one. Set it before `./setup` and setup bakes it into the wrapper, the service, the icon and the shortcut.
+- `MAITRE_HOME` (default `~/.maitre`): where maître keeps everything it writes: the config, the project index, room events, briefs, worktrees, scratch folders, the queue, the janitor's log and, unless you set `vault`, the vault with the minutes. The lounge, the reception and the rooms must use the same one. Set it before `./setup` and setup bakes it into the wrapper, the service, the icon and the shortcut.
 - `MAITRE_HERDR_SESSION` (default `maitre`): the herdr session `maitre` opens.
 - `MAITRE_RECEPTION_MODEL` (default `sonnet`): the reception's model, read when the reception tab is created.
-- `$MAITRE_HOME/config.json`: your project roots (`maitre index --root <dir>` adds them) and per-project overrides, as below.
+- `$MAITRE_HOME/config.json`: your project roots (`maitre index --root <dir>` adds them), per-project overrides, the doorman's capacity, the janitor's timing and the vault, as below. An invalid value falls back to its default with a warning, and maître never drops what you wrote there when it saves the file.
 
 **Planned** settings are tagged with their milestone. Versioned defaults live in `config/`, tracked in git; anything personal stays in `$MAITRE_HOME`, out of git.
 
@@ -327,9 +359,11 @@ The bell rings only for a real block: a pending permission, a question with opti
 | Window language | your `LANG` | `lang` in `$MAITRE_HOME/config.json`: `en` or `pt-BR`, for the windows `maitre open`, `maitre prompt` and `maitre` open. | **today** |
 | Base branch | the remote's `HEAD` | Per project, e.g. `"projects": { "backend": { "base": "dev" } }`. Worktrees branch from it. | **today** |
 | Branch prefix | `maitre/` | Per project, `"branchPrefix"`, to match each repo's convention. | **today** |
-| Doorman cap | `6` active rooms | Rooms on the couch or waiting for merge don't count. | M3 |
-| Janitor idle time | `4h` | A room idle this long with nothing pending closes and leaves minutes. Checked every 5 minutes. | M3 |
-| `pr.autoWake` | `false` | After a PR opens, maître only tells you about CI failures and review comments. Set it to `true` to let maître wake the room. | M3 |
+| `capacity` | `6` | The doorman's cap on active rooms, a whole number of at least 1. Rooms on the couch or with an open PR don't count. | **today** |
+| `janitor.idleHours` | `4` | A room idle this long (any number above 0) with nothing pending closes and leaves minutes; with something pending, it goes to the couch. | **today** |
+| `janitor.intervalMinutes` | `5` | How often the janitor (and with it the doorman) runs, any number above 0. Read when the lounge starts: restart it (`systemctl --user restart maitre`) after a change. The other settings apply on the next tick. | **today** |
+| `vault` | `$MAITRE_HOME/memory` | Where the minutes and the scratch rooms' files go. It must be an absolute path: `~` is not expanded, so `"~/notes"` falls back to the default with a warning. | **today** |
+| `pr.autoWake` | `false` | After a PR opens, maître only tells you about CI failures and review comments. Set it to `true` to let maître wake the room. | M3b |
 | Floor theme | automatic | Per project, `theme: <id>` picks a party theme. | M4 |
 
 The routing table as it ships (`config/routing.json`); the task types are described in [Your first reception](#your-first-reception-works-today):
@@ -353,14 +387,14 @@ Every firstmate cell below comes from firstmate's (or, for the dashboard, shipma
 | | firstmate | maître |
 |---|---|---|
 | Who you talk to | One liaison: you talk only to the first mate, which dispatches and supervises the crew ([README][fm-features]) | A reception that sends each topic to its own named room, and any room you can talk to directly (M2a) |
-| Cleaning up | Teardown after a task ships or reports, refusing dirty worktrees and unlanded work ([architecture][fm-teardown]) | The same never-lose-work rule, plus a janitor that closes rooms idle for 4 h with nothing pending and writes minutes (*planned, M3*) |
+| Cleaning up | Teardown after a task ships or reports, refusing dirty worktrees and unlanded work ([architecture][fm-teardown]) | The same never-lose-work rule, plus a janitor that closes rooms idle for 4 h with nothing pending and writes minutes (M3a) |
 | Choosing a model | A static crew harness or dispatch profiles, with an optional typed resolver ([architecture][fm-dispatch]) | A routing table applied by code (M2a), with each room's outcome (model, tokens, time, redo, merged or not) fed back to the router (*planned, M5*) |
 | Always-loaded instructions | `AGENTS.md`, imported by `CLAUDE.md` ([CLAUDE.md][fm-claude]): about 7,350 words at the checked commit | A reception contract capped at 1,500 words, about 600 today (M2a); your own `CLAUDE.md` files still load into it |
 | Watching the agents | The session backend's panes; shipmate, a separate project, adds a dashboard refreshed every 30 seconds where you can also answer decisions and queue tasks ([shipmate][sm]) | A built-in lounge updated live over SSE (M1) |
 | Harnesses | Claude Code, Grok, Pi, Codex, OpenCode, Cursor and more ([README][fm-req]) | Claude Code only |
 | Session backends | tmux by default, herdr, and experimental ones such as Zellij, cmux and Orca ([README][fm-crew], [backends][fm-backends]) | herdr only |
 | Platforms | macOS and Linux ([README][fm-top]) | Linux; macOS later |
-| Maturity | Shipping today, with a large [test suite][fm-tests] | Early: the reception, rooms in worktrees and the lounge (M2a), the setup, login service and quick prompt (M2b) |
+| Maturity | Shipping today, with a large [test suite][fm-tests] | Early: the reception, rooms in worktrees and the lounge (M2a), the setup, login service and quick prompt (M2b), the doorman and the janitor (M3a) |
 
 If you need many harnesses, many backends, macOS, or a mature tool today, use firstmate. If you live in Claude Code and herdr and want each topic in its own room with a lounge to watch, maître is being built for you.
 
@@ -378,7 +412,7 @@ If you need many harnesses, many backends, macOS, or a mature tool today, use fi
 ## FAQ
 
 **Does it work today?**
-Yes. After `./setup`, Super+M or a click on the maître in the lounge sends a request to a room in its own worktree, and the lounge shows the rooms live; in a terminal, `maitre` opens the reception in herdr. It also has a demo mode with simulated agents. The doorman and janitor (M3), the building (M4) and answering from the lounge (M5) are the roadmap.
+Yes. After `./setup`, Super+M or a click on the maître in the lounge sends a request to a room in its own worktree, and the lounge shows the rooms live; in a terminal, `maitre` opens the reception in herdr. It also has a demo mode with simulated agents. The doorman and the janitor run too (M3a). Waking rooms and watching PRs (M3b), the building (M4) and answering from the lounge (M5) are the roadmap.
 
 **Why herdr and not tmux?**
 herdr gives each room a real tab you can walk into, plus the `agent prompt`, `send-keys` and `read` commands that should let the lounge answer a stuck room (spike 2 in the [design](docs/design.md) checks this). v1 targets one session manager to stay small.
@@ -386,8 +420,8 @@ herdr gives each room a real tab you can walk into, plus the `agent prompt`, `se
 **Why only Claude Code?**
 Rooms are your own Claude Code sessions: your skills, plugins and global rules keep working inside them. Other harnesses are a non-goal for v1.
 
-**Will the janitor delete my work?** *(planned, M3)*
-No. A room closes only when it has no uncommitted change, no unpushed commit, no open PR and no open question. The worktree is removed with `git worktree remove`, never `--force`, and the branch stays. Anything else goes to the couch, with the reason shown.
+**Will the janitor delete my work?**
+No. A room closes only when nothing is pending: no uncommitted change or untracked file, no ignored `.env` file, no unpushed commit, no open PR, no question waiting for you, no worktree off its branch or in the middle of a rebase or merge, and no commit that lives only in the worktree's history (the full list is in [The doorman and the janitor](#the-doorman-and-the-janitor-works-today)). A check that fails counts as pending. The worktree is removed with `git worktree remove`, never `--force`, the branch always stays, and a scratch room's files move to the vault. Anything else goes to the couch, with the reason shown. Run `maitre janitor --dry-run` to see what it would do before it does it.
 
 **Does the lounge load anything from the internet?**
 No. The server binds to `127.0.0.1`, the lounge needs its token (a window gets a one-time ticket that becomes a same-site cookie), and the art and music are generated by code in your browser.
@@ -404,7 +438,8 @@ The maître d' greets you at the door, finds you the right table and keeps the r
 - [x] **M1 · Events:** the Claude Code hook, `maitre room run` and `maitre status`, the daemon, and the lounge showing real rooms over SSE.
 - [x] **M2a · Reception and rooms:** `maitre` and `maitre index`; the guarded reception and the Haiku router; rooms in herdr with their own worktrees and the model their task calls for; each room's project and branch in the lounge.
 - [x] **M2b · The doors:** `./setup`, a clickable maître in the lounge, the app icon, the lounge as a login service, the Super+M quick prompt, and an **Open in terminal** button on each room.
-- [ ] **M3 · Doorman and janitor:** the queue and the 6-room cap, cleanup with minutes, and the markdown vault.
+- [x] **M3a · Doorman and janitor:** the sidewalk queue and the 6-room cap, the janitor that closes idle rooms with nothing pending and couches the rest, minutes in a markdown vault, and `maitre janitor --dry-run`.
+- [ ] **M3b · Seats and PRs:** a room on the couch or with an open PR gives up its seat after 30 minutes and wakes with `claude --resume`; PR watching through `gh` (CI and review notices, the merge dance, a PR closed without merge); and the router reading recent minutes.
 - [ ] **M4 · The building:** the facade, themed floors, lobby, terrace and elevator.
 - [ ] **M5 · Answer from the lounge:** reply to a stuck room from its panel, chat with a room, desktop notifications with action buttons, and routing that learns from outcomes.
 

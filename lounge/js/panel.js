@@ -33,8 +33,8 @@ export function panelModel(agent, lang = 'en', now = Date.now()) {
   const info = agent.info || {};
   const modelKey = MODEL[agent.look.model] && agent.look.model !== 'tux' ? agent.look.model : 'queued';
   const b = agent.state === 'blocked' ? info.block : undefined;
-  // Only a live room's main agent has a terminal; a subagent's id is `<room>/<id>`.
-  const room = info.live && !String(agent.id).includes('/') ? String(agent.id) : undefined;
+  // Only a live room's main agent has a terminal; a subagent's id is `<room>/<id>`. A queued room has no tab yet.
+  const room = info.live && !String(agent.id).includes('/') && agent.state !== 'queue' ? String(agent.id) : undefined;
   const block = !b ? undefined : b.kind ? liveBlock(b, lang) : {
     reason: b.reason,
     options: b.options.map((o, i) => ({ key: 'ABC'[i], text: o.text, detail: o.detail, recommended: !!o.recommended })),
@@ -53,8 +53,17 @@ export function panelModel(agent, lang = 'en', now = Date.now()) {
     tokens: info.tokens ?? '—',
     ...usageFor(info, lang, now),
     ...(room === undefined ? {} : { terminal: true, room }),
+    ...waitLine(agent, info, lang),
     block,
   };
+}
+
+// Why a live room is on the sidewalk or the couch.
+function waitLine(agent, info, lang) {
+  if (!info.live) return {};
+  if (agent.state === 'queue' && Number.isInteger(info.queuePosition)) return { wait: t('panel.queued', lang, { n: info.queuePosition }) };
+  if (agent.state === 'sleep' && Array.isArray(info.couchReasons)) return { wait: t('panel.couch', lang, { reasons: info.couchReasons.join('; ') }) };
+  return {};
 }
 
 function el(doc, tag, cls, text) {
@@ -125,8 +134,9 @@ export function renderPanel(root, model, onAnswer, { lang = 'en', portrait = nul
   const list = el(doc, 'ul');
   for (const s of model.steps) list.append(el(doc, 'li', null, s));
 
+  root.append(close, head);
+  if (model.wait) root.append(el(doc, 'div', 'wait', model.wait));
   root.append(
-    close, head,
     el(doc, 'div', 'lbl', t('panel.doing', lang)), el(doc, 'div', null, model.task),
     el(doc, 'div', 'lbl', t('panel.where', lang)), el(doc, 'div', null, model.where),
     el(doc, 'div', 'lbl', t('panel.steps', lang)), list,

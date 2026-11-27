@@ -117,3 +117,17 @@ test('a blocked live room still shows the terminal button', () => {
   renderPanel(root, panelModel(a), () => {}, { onTerminal: async () => null });
   assert.ok(walkNodes(root).some(n => n.tag === 'button' && n.textContent === t('panel.openTerminal')));
 });
+
+test('a queued live room has no terminal to open yet', () => {
+  const m = panelModel(liveAgent('q', { state: 'queue', look: { model: 'queued' } }));
+  assert.equal('terminal' in m, false);
+  assert.equal(m.state, 'Queued, waiting for a seat');
+  assert.equal(panelModel(liveAgent('c', { state: 'sleep' })).terminal, true, 'a couched room keeps running');
+});
+
+test('the queue and couch lines exist in both languages', () => {
+  for (const lang of ['en', 'pt-BR']) {
+    assert.match(t('panel.queued', lang, { n: 2 }), /2/);
+    assert.match(t('panel.couch', lang, { reasons: 'r' }), /: r$/);
+  }
+});

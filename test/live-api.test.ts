@@ -11,6 +11,7 @@ import { EventTail } from '../src/event-tail.js';
 import { LiveRooms, liveRoutes } from '../src/live-api.js';
 import { startLoungeServer, type LoungeServer } from '../src/lounge-server.js';
 import { roomDir } from '../src/paths.js';
+import { writeQueue, type QueueEntry } from '../src/queue.js';
 import { writeRoom as writeRoomRecord } from '../src/rooms.js';
 import { reduce, type RoomState } from '../src/room-state.js';
 
@@ -91,7 +92,7 @@ interface Daemon {
 async function startDaemon(home: string, pingMs?: number): Promise<Daemon> {
   const root = tmp('maitre-live-root-');
   writeFileSync(join(root, 'index.html'), '<!doctype html><title>x</title>');
-  const rooms = new LiveRooms();
+  const rooms = new LiveRooms({ MAITRE_HOME: home });
   const tail = new EventTail(join(home, 'state'), (l) => rooms.apply(l), { pollMs: 50 });
   tail.start();
   const server = await startLoungeServer({
@@ -184,7 +185,7 @@ function sse(port: number): Promise<SseClient> {
 }
 
 test('LiveRooms: emits changes, emits exit once, omits exit rooms from the snapshot', () => {
-  const rooms = new LiveRooms();
+  const rooms = new LiveRooms({ MAITRE_HOME: tmp('maitre-live-') });
   const seen: RoomState[] = [];
   const off = rooms.on((r) => seen.push(r));
   const ev = (event: string, extra: Partial<HookLine> = {}): HookLine => ({ v: 1, ts: Date.now(), room: 'a', session: 's-1', event, ...extra });
@@ -224,7 +225,7 @@ test('LiveRooms: a late same-session line after SessionEnd does not bring the ro
   const end = JSON.parse(lines.at(-1)!) as HookLine;
   assert.equal(end.event, 'SessionEnd');
   const lateLine: HookLine = { v: 1, ts: end.ts + 1, room: 'late', session: end.session, event: 'PostToolUse', tool: 'Bash', tool_use_id: 'toolu_LATE' };
-  const rooms = new LiveRooms();
+  const rooms = new LiveRooms({ MAITRE_HOME: tmp('maitre-live-') });
   const seen: RoomState[] = [];
   rooms.on((r) => seen.push(r));
   for (const l of [...lines, JSON.stringify(lateLine)]) rooms.apply(JSON.parse(l) as HookLine);
@@ -234,7 +235,7 @@ test('LiveRooms: a late same-session line after SessionEnd does not bring the ro
 });
 
 test('LiveRooms: snapshot is sorted by room and holds only public fields', () => {
-  const rooms = new LiveRooms();
+  const rooms = new LiveRooms({ MAITRE_HOME: tmp('maitre-live-') });
   for (const room of ['b', 'a']) rooms.apply({ v: 1, ts: 1, room, session: 's', event: 'SessionStart' });
   const snap = rooms.snapshot();
   assert.deepEqual(
@@ -445,4 +446,206 @@ test('LiveRooms: a registry written after the room first appeared shows up on th
   assert.equal(rooms.snapshot()[0]?.project, undefined);
   writeRoomRecord({ ...REC }, env);
   assert.equal(rooms.snapshot()[0]?.project, 'backend');
+});
+
+const at = (room: string, event: string, ts: number, extra: Partial<HookLine> = {}): HookLine => ({ v: 1, ts, room, session: 's', event, ...extra });
+const COUCH = { since: 100, reasons: ['2 commits not pushed', 'an open PR'] };
+
+function queued(room: string, queuedAt: number, project: string | null = null): QueueEntry {
+  return {
+    room,
+    requestIds: ['1'],
+    route: { project, room: { kind: 'new', name: room }, taskType: 'simple', model: 'haiku', hasCode: project !== null, confidence: 0.9 },
+    queuedAt,
+    attempts: 0,
+  };
+}
+
+test('LiveRooms: a couched idle room shows as couch with its reasons, and goes back to its live state after a new event', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-couch-') };
+  writeRoomRecord({ ...REC, couch: COUCH }, env);
+  const rooms = new LiveRooms(env);
+  const seen: RoomState[] = [];
+  rooms.on((r) => seen.push(r));
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'Stop', 50));
+  assert.deepEqual([rooms.snapshot()[0]?.state, rooms.snapshot()[0]?.couchReasons], ['couch', COUCH.reasons]);
+  assert.equal(seen.at(-1)?.state, 'couch', 'the SSE event carries the couch too');
+  rooms.apply(at('r1', 'UserPromptSubmit', 150, { prompt: 'go on' }));
+  assert.equal(rooms.snapshot()[0]?.state, 'work');
+  assert.equal(rooms.snapshot()[0]?.couchReasons, undefined);
+  assert.equal(seen.at(-1)?.state, 'work');
+  rooms.apply(at('r1', 'Stop', 160));
+  assert.equal(rooms.snapshot()[0]?.state, 'ready', 'stale: an event came after the couch, until the janitor couches it again');
+});
+
+test("LiveRooms: Claude Code's Notification after the couch does not make it stale", () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-couch-') };
+  writeRoomRecord({ ...REC, couch: COUCH }, env);
+  const rooms = new LiveRooms(env);
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'Stop', 50));
+  rooms.apply(at('r1', 'Notification', 160, { notification_type: 'idle_prompt' }));
+  assert.deepEqual([rooms.snapshot()[0]?.state, rooms.snapshot()[0]?.couchReasons], ['couch', COUCH.reasons]);
+});
+
+test('LiveRooms: a couch is shown only for an idle room, and an odd couch is ignored', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-couch-') };
+  writeRoomRecord({ ...REC, couch: COUCH }, env);
+  writeRoomRecord({ ...REC, room: 'odd', couch: { since: 'x', reasons: 'no' } as unknown as typeof COUCH }, env);
+  const rooms = new LiveRooms(env);
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'UserPromptSubmit', 20, { prompt: 'go' }));
+  rooms.apply(at('odd', 'SessionStart', 10));
+  assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.state, 'couchReasons' in r]), [['odd', 'coffee', false], ['r1', 'work', false]]);
+});
+
+test('LiveRooms: refresh emits a couch the janitor wrote, once; nothing when nothing changed', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-couch-') };
+  writeRoomRecord({ ...REC }, env);
+  const rooms = new LiveRooms(env);
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'Stop', 50));
+  const seen: RoomState[] = [];
+  rooms.on((r) => seen.push(r));
+  rooms.refresh();
+  assert.equal(seen.length, 0, 'nothing changed');
+  writeRoomRecord({ ...REC, couch: COUCH }, env);
+  rooms.refresh();
+  rooms.refresh();
+  assert.deepEqual(seen.map((r) => [r.room, r.state, r.couchReasons]), [['r1', 'couch', COUCH.reasons]]);
+  writeRoomRecord({ ...REC }, env);
+  rooms.refresh();
+  assert.deepEqual(seen.map((r) => r.state), ['couch', 'ready'], 'a cleared couch goes back to the live state');
+});
+
+test('LiveRooms: queued rooms are rooms in state queue with their position, without events', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-queue-') };
+  writeQueue([queued('q1', 100, 'web'), queued('q2', 200)], env);
+  const rooms = new LiveRooms(env);
+  rooms.apply(START('r1'));
+  const snap = rooms.snapshot();
+  assert.deepEqual(snap.map((r) => [r.room, r.state, r.queuePosition, r.project, r.kind]), [
+    ['q1', 'queue', 1, 'web', 'code'],
+    ['q2', 'queue', 2, undefined, 'scratch'],
+    ['r1', 'coffee', undefined, undefined, undefined],
+  ]);
+  assert.deepEqual(snap[0], {
+    room: 'q1', session: '', model: 'unknown', state: 'queue', since: 100, updatedAt: 100, task: '', steps: [], subagents: [], project: 'web', kind: 'code', queuePosition: 1,
+  });
+});
+
+test('LiveRooms: a room leaving the queue walks out; the one behind moves up; a corrupt queue keeps the last one', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-queue-') };
+  writeQueue([queued('q1', 100), queued('q2', 200)], env);
+  const rooms = new LiveRooms(env);
+  rooms.snapshot();
+  const seen: RoomState[] = [];
+  rooms.on((r) => seen.push(r));
+  writeQueue([queued('q2', 200)], env);
+  rooms.refresh();
+  assert.deepEqual(seen.map((r) => [r.room, r.state, r.queuePosition]).sort(), [['q1', 'exit', undefined], ['q2', 'queue', 1]]);
+  writeFileSync(join(env.MAITRE_HOME, 'state', 'queue.json'), '{broken');
+  assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.queuePosition]), [['q2', 1]]);
+});
+
+test('LiveRooms: a queued room that opened shows its live state; leaving the queue then drops nothing', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-queue-') };
+  writeQueue([queued('q1', 100)], env);
+  const rooms = new LiveRooms(env);
+  rooms.apply(at('q1', 'SessionStart', 10));
+  rooms.apply(at('q1', 'SessionEnd', 20));
+  assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.state]), [['q1', 'queue']], 'an older session of that name does not hide the queue');
+  const seen: RoomState[] = [];
+  rooms.on((r) => seen.push(r));
+  rooms.apply(at('q1', 'SessionStart', 300, { session: 's2' }));
+  assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.state]), [['q1', 'coffee']]);
+  writeQueue([], env);
+  rooms.refresh();
+  assert.deepEqual(seen.map((r) => r.state), ['coffee'], 'no exit for the room that just opened');
+});
+
+test('LiveRooms: watch polls the queue and the registry on its own', async () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-queue-') };
+  const rooms = new LiveRooms(env);
+  const seen: RoomState[] = [];
+  rooms.on((r) => seen.push(r));
+  const stop = rooms.watch(20);
+  try {
+    writeQueue([queued('q1', 100)], env);
+    await waitFor(() => seen.some((r) => r.room === 'q1' && r.state === 'queue'));
+  } finally {
+    stop();
+  }
+});
+
+test('/api/state lists queued rooms with their positions', async () => {
+  const home = tmp('maitre-live-queue-');
+  writeQueue([queued('q1', 100, 'web'), queued('q2', 200)], { MAITRE_HOME: home });
+  const d = await startDaemon(home);
+  try {
+    const res = await call(d.server.port, '/api/state');
+    const rooms = (JSON.parse(res.body) as { rooms: RoomState[] }).rooms;
+    assert.deepEqual(rooms.map((r) => [r.room, r.state, r.queuePosition]), [['q1', 'queue', 1], ['q2', 'queue', 2]]);
+  } finally {
+    await d.stop();
+  }
+});
+
+test('LiveRooms: a new snapshot never swallows a change the subscribers have not heard of', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-couch-') };
+  writeRoomRecord({ ...REC }, env);
+  const rooms = new LiveRooms(env);
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'Stop', 50));
+  const seen: RoomState[] = [];
+  rooms.on((r) => seen.push(r));
+  writeRoomRecord({ ...REC, couch: COUCH }, env);
+  writeQueue([queued('q1', 100)], env);
+  rooms.snapshot();
+  rooms.refresh();
+  assert.deepEqual(seen.map((r) => [r.room, r.state]).sort(), [['q1', 'queue'], ['r1', 'couch']]);
+});
+
+test('LiveRooms: a room the doorman opened stays on the sidewalk until its first event arrives, never walking out', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-queue-') };
+  writeQueue([queued('q1', 100)], env);
+  const rooms = new LiveRooms(env);
+  rooms.snapshot();
+  const seen: string[] = [];
+  rooms.on((r) => seen.push(`${r.room}:${r.state}`));
+  writeRoomRecord({ ...REC, room: 'q1', fromQueue: 100, createdAt: 200 }, env);
+  writeQueue([], env);
+  rooms.refresh();
+  assert.deepEqual(seen, [], 'opened from this entry: still shown queued while its events are on the way');
+  assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.state]), [['q1', 'queue']]);
+  rooms.apply(at('q1', 'SessionStart', 300));
+  assert.deepEqual(seen, ['q1:coffee']);
+  rooms.refresh();
+  assert.deepEqual(seen, ['q1:coffee']);
+
+  writeQueue([queued('q2', 400)], env);
+  rooms.refresh();
+  writeRoomRecord({ ...REC, room: 'q2', fromQueue: 1 }, env);
+  writeQueue([], env);
+  rooms.refresh();
+  assert.deepEqual(seen.slice(-2), ['q2:queue', 'q2:exit'], 'a record from another opening is not this entry');
+});
+
+test('LiveRooms: a room closed with minutes leaves the lounge even without an exit line; a reopen brings it back', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-closed-') };
+  writeRoomRecord({ ...REC }, env);
+  const rooms = new LiveRooms(env);
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'Stop', 50));
+  const seen: string[] = [];
+  rooms.on((r) => seen.push(`${r.room}:${r.state}`));
+  writeRoomRecord({ ...REC, closedAt: 60, closedBy: 'janitor' }, env);
+  rooms.refresh();
+  assert.deepEqual(seen, ['r1:exit']);
+  assert.deepEqual(rooms.snapshot(), []);
+  rooms.refresh();
+  assert.deepEqual(seen, ['r1:exit'], 'told once');
+  rooms.apply(at('r1', 'SessionStart', 70, { session: 's2' }));
+  assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.state]), [['r1', 'coffee']], 'events after the close: a new opening');
 });

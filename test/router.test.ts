@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +10,10 @@ import { writeIndex, type Project } from '../src/projects.js';
 import { openRoom } from '../src/room-open.js';
 import { readRoom } from '../src/rooms.js';
 import { BRIEF_HEADER } from '../src/room-open.js';
-import { ROUTER_SYSTEM, RouterError, buildRouterPrompt, modelFor, parseRoute, route, routerArgs } from '../src/router.js';
+import { ROUTER_SYSTEM, RouterError, buildRouterPrompt, modelFor, parseRoute, route, routerArgs, type Route } from '../src/router.js';
+import { queuedRooms, readFailed, readQueue } from '../src/doorman.js';
+import { openingFile, queueLock, writeQueue } from '../src/queue.js';
+import { QUEUE_HINT } from '../src/router.js';
 import { herdrSandbox, type HerdrSandbox } from './herdr-sandbox.js';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
@@ -413,4 +416,142 @@ test('maitre route warns on stderr and in --json when herdr cannot be checked, a
   assert.equal(out.project, 'backend');
   const stored = JSON.parse(readFileSync(routeFile(6), 'utf8')) as { route: { warning?: string } };
   assert.equal(stored.route.warning, undefined);
+});
+
+const capacity = (n: number) => writeFileSync(join(sb.home, 'config.json'), JSON.stringify({ roots: [], projects: {}, capacity: n }));
+const MONADS = { project: null, room: { kind: 'new', name: 'monads' }, taskType: 'simple', hasCode: false, confidence: 0.8 };
+
+test('maitre dispatch past capacity queues the new room with a hint when no lounge runs; a follow-up joins it', async () => {
+  writeIndex(PROJECTS);
+  capacity(1);
+  await openRoom({ name: 'busy', model: 'sonnet', taskType: 'change', brief: 'x' }, process.env, FAST);
+  writeRequest(1, 'what is a monad?\nin detail');
+  reply(envelope(MONADS));
+  assert.equal(cli(['route', '1']).status, 0);
+  const d = cli(['dispatch', '1']);
+  assert.equal(d.status, 0, d.stderr);
+  assert.equal(d.stdout, `queued: monads waits for a seat (position 1)\n${QUEUE_HINT}\n`);
+  assert.equal(d.stderr, '');
+  assert.equal(sb.calls().filter((c) => c[0] === 'workspace' && c[1] === 'create').length, 1);
+
+  writeRequest(2, 'and functors');
+  reply(envelope({ ...MONADS, room: { kind: 'existing', name: 'monads' } }));
+  const r = cli(['route', '2']);
+  assert.equal(r.stdout, 'route 2 → existing room monads (simple → haiku)\n');
+  assert.match(claudeCalls().at(-1)!.argv[1], /^- monads \| scratch \| queued \| what is a monad\?$/m);
+  const f = cli(['dispatch', '2']);
+  assert.equal(f.status, 0, f.stderr);
+  assert.equal(f.stdout, `queued: monads waits for a seat (position 1)\n${QUEUE_HINT}\n`);
+  assert.deepEqual(
+    readQueue().map((e) => [e.room, e.requestIds]),
+    [['monads', ['1', '2']]],
+  );
+  const list = cli(['room', 'list']);
+  assert.match(list.stdout, /^monads +scratch +haiku +queued +position 1$/m);
+});
+
+test('the router sees a queued name as taken: another project gets a suffixed slug, the same project feeds the queued room', async () => {
+  writeIndex(PROJECTS);
+  capacity(1);
+  await openRoom({ name: 'busy', model: 'sonnet', taskType: 'change', brief: 'x' }, process.env, FAST);
+  writeRequest(1, 'web bug');
+  reply(envelope({ ...NEW_ROOM, project: 'web' }));
+  cli(['route', '1']);
+  assert.equal(cli(['dispatch', '1']).status, 0);
+  assert.deepEqual(queuedRooms(), [{ room: 'nf-bug', position: 1, project: 'web' }]);
+
+  writeRequest(2, 'backend bug');
+  reply(envelope(NEW_ROOM));
+  assert.equal(cli(['route', '2']).stdout, 'route 2 → new room nf-bug-backend in backend (build → opus)\n');
+  writeRequest(3, 'more on the web bug');
+  reply(envelope({ ...NEW_ROOM, project: 'web' }));
+  assert.equal(cli(['route', '3']).stdout, 'route 3 → existing room nf-bug (build → opus)\n');
+});
+
+test('maitre dispatch with a free seat opens without holding the queue lock and leaves no reservation', () => {
+  writeIndex(PROJECTS);
+  writeRequest(1, 'what is a monad?');
+  reply(envelope(MONADS), { FAKE_HERDR_FAIL_WHILE: queueLock() });
+  assert.equal(cli(['route', '1']).status, 0);
+  const d = cli(['dispatch', '1']);
+  assert.equal(d.status, 0, d.stderr);
+  assert.equal(d.stdout, 'opened monads in scratch on haiku\n');
+  assert.equal(readFileSync(openingFile(), 'utf8').trim(), '[]');
+});
+
+test('concurrent maitre dispatch processes never both take the last seat', async () => {
+  writeIndex(PROJECTS);
+  capacity(1);
+  const names = ['one', 'two', 'three', 'four'];
+  names.forEach((name, i) => {
+    writeRequest(i + 1, `request ${name}`);
+    reply(envelope({ ...MONADS, room: { kind: 'new', name } }));
+    assert.equal(cli(['route', String(i + 1)]).status, 0);
+  });
+  const run = (id: number) =>
+    new Promise<string>((done) => {
+      const c = spawn(process.execPath, [MAITRE, 'dispatch', String(id)], { env: sb.env });
+      let out = '';
+      c.stdout.on('data', (d) => (out += d));
+      c.on('close', () => done(out));
+    });
+  const outs = await Promise.all(names.map((_, i) => run(i + 1)));
+  const opened = outs.filter((o) => o.startsWith('opened '));
+  const queued = outs.flatMap((o) => (o.match(/^queued: \S+ waits for a seat \(position (\d)\)$/m) ?? []).slice(1));
+  assert.equal(opened.length, 1, outs.join('|'));
+  assert.deepEqual(queued.sort(), ['1', '2', '3']);
+  assert.equal(readQueue().length, 3);
+  assert.equal(sb.calls().filter((c) => c[0] === 'workspace' && c[1] === 'create').length, 1);
+});
+
+test('a follow-up to a room that is both queued and running goes to the running room', async () => {
+  writeIndex(PROJECTS);
+  await openRoom({ name: 'monads', model: 'haiku', taskType: 'simple', brief: 'x' }, process.env, FAST);
+  writeQueue([{ room: 'monads', requestIds: ['1'], route: { ...MONADS, model: 'haiku' } as Route, queuedAt: Date.now(), attempts: 0 }]);
+  writeRequest(1, 'first');
+  writeRequest(2, 'and functors');
+  reply(envelope({ ...MONADS, room: { kind: 'existing', name: 'monads' } }));
+  assert.equal(cli(['route', '2']).status, 0);
+  const d = cli(['dispatch', '2']);
+  assert.equal(d.status, 0, d.stderr);
+  assert.equal(d.stdout, 'sent to monads\n');
+  assert.deepEqual(
+    readQueue().map((e) => e.requestIds),
+    [['1']],
+  );
+});
+
+test('a new route naming a queued room the doorman already opened (settle never ran) delivers to that room and clears the entry', async () => {
+  writeIndex(PROJECTS);
+  const queuedAt = Date.now() - 1000;
+  writeQueue([{ room: 'monads', requestIds: ['1'], route: { ...MONADS, model: 'haiku' } as Route, queuedAt, attempts: 0 }]);
+  writeRequest(1, 'first');
+  await openRoom({ name: 'monads', model: 'haiku', taskType: 'simple', brief: 'first', fromQueue: queuedAt }, process.env, FAST);
+  writeRequest(2, 'and functors');
+  mkdirSync(join(sb.home, 'reception', 'routes'), { recursive: true });
+  writeFileSync(routeFile(2), JSON.stringify({ route: { ...MONADS, model: 'haiku' }, requestIds: ['2'] }));
+  const d = cli(['dispatch', '2']);
+  assert.equal(d.status, 0, d.stderr);
+  assert.equal(d.stdout, 'sent to monads\n');
+  assert.equal(sb.calls().filter((c) => c[0] === 'agent' && c[1] === 'prompt').at(-1)?.[3], 'and functors');
+  assert.deepEqual(readQueue(), []);
+  assert.deepEqual(readFailed(), []);
+});
+
+test('a null room.json never breaks a dispatch to a queued name', async () => {
+  writeIndex(PROJECTS);
+  writeQueue([{ room: 'monads', requestIds: ['1'], route: { ...MONADS, model: 'haiku' } as Route, queuedAt: Date.now(), attempts: 0 }]);
+  writeRequest(1, 'first');
+  writeRequest(2, 'more');
+  mkdirSync(roomDir('monads'), { recursive: true });
+  writeFileSync(join(roomDir('monads'), 'room.json'), 'null');
+  mkdirSync(join(sb.home, 'reception', 'routes'), { recursive: true });
+  writeFileSync(routeFile(2), JSON.stringify({ route: { ...MONADS, room: { kind: 'existing', name: 'monads' }, model: 'haiku' }, requestIds: ['2'] }));
+  const d = cli(['dispatch', '2']);
+  assert.equal(d.status, 0, d.stderr);
+  assert.match(d.stdout, /^queued: monads waits for a seat \(position 1\)\n/);
+  assert.deepEqual(
+    readQueue().map((e) => e.requestIds),
+    [['1', '2']],
+  );
 });

@@ -101,7 +101,8 @@ function resumeId(cmd) {
 // (the trust dialog), 'late-picker', each idle from the second `agent get` on. With a SessionStart:
 // 'slow' (unknown for two `agent get`s, then idle), 'start-unregistered' (herdr answers agent_not_found
 // for two `agent get`s, then idle), 'start-exit' (seen once, then exits),
-// 'start-unknown' (herdr never sees it), 'start-blocked' (a question).
+// 'start-unknown' (herdr never sees it), 'start-blocked' (a question). 'flap': idle with no SessionStart (a test
+// writes it), and herdr misses the agent for one look, the second.
 function resume(p, id, wenv) {
   const mode = process.env.FAKE_HERDR_RESUME ?? 'ok';
   p.resume = id;
@@ -115,6 +116,9 @@ function resume(p, id, wenv) {
     p.screen = ' Resume session\n\n ⌕ Search…\n\n ❯ an earlier session\n';
   } else if (mode === 'hang') {
     p.agent = 'idle';
+  } else if (mode === 'flap') {
+    p.agent = 'idle';
+    p.missAfter = 1;
   } else if (mode === 'trust') {
     p.agent = 'blocked';
     p.trust = true;
@@ -292,6 +296,14 @@ function stateful(file) {
           delete p.exitAfter;
         } else p.exitAfter--;
         save();
+      }
+      // A Claude herdr misses for one look after `missAfter` looks.
+      if (p && p.missAfter !== undefined) {
+        const miss = p.missAfter <= 0;
+        if (miss) delete p.missAfter;
+        else p.missAfter--;
+        save();
+        if (miss) return fail('agent_not_found');
       }
       if (!p || p.agent === 'shell') return fail('agent_not_found');
       return { out: ok('agent:get', { type: 'agent_info', agent: agentJson(id) }), code: 0 };

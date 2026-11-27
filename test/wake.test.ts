@@ -351,6 +351,19 @@ test('a slow resume (its SessionStart after the deadline, a Claude in its tab al
   assert.equal(readRoom('a')!.seat, undefined);
 });
 
+test('one look where herdr misses the resuming Claude is not an exit: the resume goes on in its tab', async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'flap';
+  let late: NodeJS.Timeout | undefined;
+  const w = await wakeRoom('a', process.env, { ...QUICK, afterTab: () => void (late = setTimeout(() => event('a', 'SessionStart'), 500)) });
+  clearTimeout(late);
+  assert.deepEqual(w, { resumed: true, lines: ['woke a: resumed its session'], needsYou: false });
+  assert.ok(agentGets() >= 3, `herdr was asked ${agentGets()} times`);
+  assert.equal(tabs().length, 1);
+  assert.equal(runs().filter((r) => r.includes("'--brief-file'")).length, 1, 'no fresh start');
+});
+
 test('a resume whose Claude stays in its tab but never confirms is kept and left to the user: no fresh start', async () => {
   await open('a');
   parkByHand('a');

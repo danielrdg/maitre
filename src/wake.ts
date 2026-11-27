@@ -115,7 +115,8 @@ async function screen(paneId: string): Promise<string> {
 }
 
 // The resume spike's recipe: this session's SessionStart wins over anything else seen; a bare shell is a
-// failure once Claude was seen (or after notFoundMs); the picker fails at once; the trust dialog is
+// failure once Claude was seen (two looks in a row, or one showing "No conversation found"), or after
+// notFoundMs; the picker fails at once; the trust dialog is
 // answered only in maître's own folders. A Claude in the tab whose SessionStart is late is never killed for
 // it (real resumes took up to ~30 s): it is waited for until slowStartMs, then kept, still starting.
 async function verdict(paneId: string, dir: string, from: { file: string; offset: number }, session: string, t: Timing, env: NodeJS.ProcessEnv): Promise<Verdict> {
@@ -126,6 +127,8 @@ async function verdict(paneId: string, dir: string, from: { file: string; offset
   const scope = trustScope(dir, env);
   let deadline = started + t.resumeTimeoutMs;
   let seen = false;
+  // Looks in a row that found no agent after one was seen: herdr can miss a starting Claude once.
+  let missed = 0;
   let answered = false;
   let last: RoomLiveness | undefined;
   let lastTrust = false;
@@ -140,9 +143,14 @@ async function verdict(paneId: string, dir: string, from: { file: string; offset
       last = liveness(info);
       lastTrust = false;
       if (last === 'not running') {
-        if (seen || Date.now() - started >= t.notFoundMs) return failed(NOT_FOUND.test(await screen(paneId)) ? 'its session was not found' : 'Claude exited');
+        missed = seen ? missed + 1 : 0;
+        const notFound = NOT_FOUND.test(await screen(paneId));
+        if (missed >= 2 || (seen && notFound) || (!seen && Date.now() - started >= t.notFoundMs)) {
+          return failed(notFound ? 'its session was not found' : 'Claude exited');
+        }
       } else {
         seen = true;
+        missed = 0;
         if (last === 'blocked') {
           lastTrust = trustDialogShown(await screen(paneId));
           if (lastTrust && scope !== 'answer') return { kind: 'needs-you', trust: true };
@@ -162,7 +170,7 @@ async function verdict(paneId: string, dir: string, from: { file: string; offset
       // Something on screen waits for an answer (a question Claude Code asks on resume): the user's.
       if (last === 'blocked') return { kind: 'needs-you', trust: lastTrust };
       // Another session started instead: the room's conversation is not in that tab.
-      const agent = last !== undefined && last !== 'not running' && !starts().some((l) => typeof l.session === 'string' && l.session !== '' && l.session !== session);
+      const agent = last !== undefined && (last !== 'not running' || missed === 1) && !starts().some((l) => typeof l.session === 'string' && l.session !== '' && l.session !== session);
       if (agent && deadline < started + t.slowStartMs) {
         deadline = started + t.slowStartMs;
         continue;

@@ -27,7 +27,7 @@ import { readFailed, readQueue } from './queue.js';
 import { couchHolds, listRooms, parked, patchRoom, readRoom, writeRoom, type RoomRecord } from './rooms.js';
 import { appendRoomLine } from './status.js';
 import { handleTrust, type TrustResult } from './trust.js';
-import { parkedState } from './wake.js';
+import { offersWake, parkedState, wakeSession } from './wake.js';
 import { createScratch, createWorktree } from './worktree.js';
 
 export { BRIEF_HEADER };
@@ -50,8 +50,18 @@ const PREFIX = 40;
 const ELLIPSIS = '…';
 const LOUNGE_TAIL_BYTES = 256 * 1024;
 
+// A room not offered for waking whose session is known may still be one whose Claude crashed before the
+// upgrade stamped it: only the user can tell it from one closed by hand before M3a.
+const crashedHint = (rec: RoomRecord, env: NodeJS.ProcessEnv): boolean => rec.closedBy === undefined && !offersWake(rec) && wakeSession(rec, env) !== undefined;
+
 const notRunning = (rec: RoomRecord, env: NodeJS.ProcessEnv) =>
-  new Error(`room ${rec.room} is not running — ${parkedState(rec, env) !== undefined ? `wake it with: maitre room wake ${rec.room}` : 'open it again with: maitre room open …'}`);
+  new Error(
+    `room ${rec.room} is not running — ${
+      parkedState(rec, env) !== undefined
+        ? `wake it with: maitre room wake ${rec.room}`
+        : `open it again with: maitre room open …${crashedHint(rec, env) ? ` (or, if its Claude crashed, wake it with: maitre room wake ${rec.room})` : ''}`
+    }`,
+  );
 const waitingOnYou = (room: string) => new Error(`room ${room} is waiting on you — answer it in its tab`);
 const noRoom = (room: string) => new Error(`no room named ${room} — open it with: maitre room open …`);
 
@@ -407,7 +417,8 @@ function loungeColumn(rec: RoomRecord, herdr: RoomLiveness, env: NodeJS.ProcessE
   }
   const parked = herdr === 'not running' && parkedState(rec, env) !== undefined;
   const column = loungeState(rec, herdr, parked ? 'parked' : (state?.state ?? '-'), last);
-  return withNotice(parked ? `${column} — wake: maitre room wake ${rec.room}` : column, rec, prompted, env);
+  const hint = parked ? ` — wake: maitre room wake ${rec.room}` : herdr === 'not running' && crashedHint(rec, env) ? ` — if its Claude crashed, wake: maitre room wake ${rec.room}` : '';
+  return withNotice(`${column}${hint}`, rec, prompted, env);
 }
 
 // A PR notice the room has not read yet (no real prompt since), as the lounge shows it.

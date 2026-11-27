@@ -240,7 +240,7 @@ test('a room closed by hand before M3a (closedAt only: no stamp, no seat) is not
   writeRoom({ ...old, closedAt: Date.now() - 1_000 });
   killTabs();
   assert.equal(parkedState(readRoom('a')), undefined);
-  assert.deepEqual((await listRoomRows()).map((r) => [r.room, r.lounge]), [['a', 'ready']]);
+  assert.deepEqual((await listRoomRows()).map((r) => [r.room, r.lounge]), [['a', 'ready — if its Claude crashed, wake: maitre room wake a']]);
   assert.equal(parkedState({ ...readRoom('a')!, seat: { releasedAt: Date.now(), session: 's1' } }), 'parked', 'a seat is always a park');
   const w = await wakeRoom('a', process.env, QUICK);
   assert.equal(w.resumed, true, 'asked for by name, it is woken');

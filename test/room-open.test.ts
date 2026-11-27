@@ -287,6 +287,10 @@ test('room send to a gone pane says the room is not running and marks it closed'
   await assert.rejects(sendToRoom('x', 'hi'), /^Error: room x is not running — wake it with: maitre room wake x$/);
   assert.equal(typeof readRoom('x')?.closedAt, 'number');
   assert.deepEqual(herdrCalls('agent', 'prompt'), []);
+  // A record from before the wake stamp (its Claude died before the upgrade): not offered, but its session is known.
+  const { resumable: _r, ...old } = readRoom('x')!;
+  writeRoom(old);
+  await assert.rejects(sendToRoom('x', 'hi'), /^Error: room x is not running — open it again with: maitre room open … \(or, if its Claude crashed, wake it with: maitre room wake x\)$/);
   writeFileSync(join(roomDir('x'), 'events.jsonl'), '');
   await assert.rejects(sendToRoom('x', 'hi'), /^Error: room x is not running — open it again with: maitre room open …$/, 'no session to resume');
 });

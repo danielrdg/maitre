@@ -14,6 +14,7 @@ import { liveLounge } from './lounge-file.js';
 import { listRooms, readRoom } from './rooms.js';
 import { isRequestId, readRequests } from './requests.js';
 import { hasMinutes, recentMinutes, withMinutes, type MinutesEntry } from './minutes.js';
+import { shownText } from './pending.js';
 import { parkedState, wakeRoom } from './wake.js';
 
 export type TaskType = 'simple' | 'explore' | 'change' | 'build' | 'decide';
@@ -132,6 +133,21 @@ function extractJson(text: string): unknown {
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const unusable = (why: string) => new RouterError(`the router returned an unusable answer: ${why}`);
+const REASON_MAX = 200;
+
+// With --output-format json, claude puts its own error (an expired login, say) in `result` on stdout and
+// leaves stderr empty. '' when stdout says nothing usable.
+function reasonOf(out: unknown): string {
+  return isObject(out) && typeof out.result === 'string' ? shownText(oneLine(out.result, REASON_MAX * 4), REASON_MAX) : '';
+}
+
+function claudeReason(stdout: string): string {
+  try {
+    return reasonOf(JSON.parse(stdout));
+  } catch {
+    return '';
+  }
+}
 
 function numbered(base: string, n: number): string {
   const tail = `-${n}`;
@@ -151,7 +167,10 @@ export function parseRoute(raw: string, projects: Project[], openRooms: string[]
   const outer = extractJson(raw);
   let body: unknown = outer;
   if (isObject(outer) && ('result' in outer || 'is_error' in outer)) {
-    if (outer.is_error === true) throw unusable('claude reported an error');
+    if (outer.is_error === true) {
+      const why = reasonOf(outer);
+      throw unusable(`claude reported an error${why === '' ? '' : `: ${why}`}`);
+    }
     if (typeof outer.result !== 'string') throw unusable('the envelope has no result');
     body = extractJson(outer.result);
   }
@@ -225,8 +244,8 @@ function callClaude(prompt: string, env: NodeJS.ProcessEnv, timeoutMs: number): 
         if (e.code === 'ENOENT') return fail(new RouterError('`claude` was not found on PATH; install Claude Code first'));
         if (e.killed === true) return fail(new RouterError(`the router timed out after ${Math.round(timeoutMs / 1000)}s`));
         if (typeof e.code === 'number') {
-          const first = oneLine(stderr.split('\n')[0] ?? '', 120);
-          return fail(new RouterError(`the router failed (exit ${e.code})${first === '' ? '' : `: ${first}`}`));
+          const why = [claudeReason(stdout), shownText(oneLine(stderr.split('\n')[0] ?? '', 120), 120)].filter((w) => w !== '');
+          return fail(new RouterError(`the router failed (exit ${e.code})${why.length === 0 ? '' : `: ${why.join('; ')}`}`));
         }
         return fail(new RouterError(`the router could not run: ${oneLine(e.message, 120)}`));
       },

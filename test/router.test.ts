@@ -196,6 +196,18 @@ test('route fails with one RouterError line when claude is missing, exits non-ze
   await assert.rejects(route('hi', slow), /^RouterError: the router timed out/);
 });
 
+test("a failed claude call says why, from claude's JSON on stdout: filtered and clipped", async () => {
+  const failed = (result: unknown, code = '1') => reply(JSON.stringify({ type: 'result', subtype: 'success', is_error: true, result }), { FAKE_CLAUDE_EXIT: code });
+  await assert.rejects(
+    route('hi', failed('Failed to authenticate: OAuth session expired\u202e\u001b[0m\nand more')),
+    (e: unknown) => e instanceof RouterError && e.message === 'the router failed (exit 1): Failed to authenticate: OAuth session expired??[0m and more',
+  );
+  await assert.rejects(route('hi', failed('x'.repeat(500))), (e: unknown) => e instanceof RouterError && /^the router failed \(exit 1\): x+…$/.test(e.message) && e.message.length < 250);
+  await assert.rejects(route('hi', failed(42)), (e: unknown) => e instanceof RouterError && e.message === 'the router failed (exit 1)');
+  await assert.rejects(route('hi', reply('{"is_error": tru', { FAKE_CLAUDE_EXIT: '1' })), (e: unknown) => e instanceof RouterError && e.message === 'the router failed (exit 1)');
+  await assert.rejects(route('hi', failed('Credit balance is too low', '0')), (e: unknown) => e instanceof RouterError && e.message === 'the router returned an unusable answer: claude reported an error: Credit balance is too low');
+});
+
 test('parseArgs parses route and dispatch, and rejects non-numeric ids', () => {
   assert.deepEqual(parseArgs(['route', '7', '8']), { cmd: 'route', ids: ['7', '8'], json: false });
   assert.deepEqual(parseArgs(['route', '--json', '7']), { cmd: 'route', ids: ['7'], json: true });

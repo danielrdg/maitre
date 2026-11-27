@@ -82,10 +82,18 @@ function elsewhere(rec: RoomRecord, env: NodeJS.ProcessEnv): boolean {
   return rec.seat === undefined && rec.herdr !== undefined && rec.herdr.session !== herdrSession(env);
 }
 
-// Disk only: registered, not closed, and a session this herdr session may resume. Whether its Claude is
-// gone is herdr's call.
+// A Claude that stopped without a seat (a crash, a reboot) is offered for waking only on a record maître
+// stamped: a room closed by hand before M3a looks the same, and was meant to stay closed. Asked for by name
+// (`maitre room wake`), any room is woken.
+export function offersWake(rec: RoomRecord): boolean {
+  const seat: unknown = rec.seat;
+  return (typeof seat === 'object' && seat !== null) || rec.resumable === true;
+}
+
+// Disk only: registered, not closed, offered, and a session this herdr session may resume. Whether its
+// Claude is gone is herdr's call.
 export function canWake(rec: RoomRecord, env: NodeJS.ProcessEnv = process.env): boolean {
-  return rec.closedBy === undefined && !elsewhere(rec, env) && wakeSession(rec, env) !== undefined;
+  return rec.closedBy === undefined && offersWake(rec) && !elsewhere(rec, env) && wakeSession(rec, env) !== undefined;
 }
 
 // A room whose Claude is gone (parked, or died) but that can be woken with its session: the router offers

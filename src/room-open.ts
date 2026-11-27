@@ -85,9 +85,10 @@ export function markNotRunning(rec: RoomRecord, env: NodeJS.ProcessEnv = process
 
 const withoutClosedAt = ({ closedAt: _c, ...r }: RoomRecord): RoomRecord => r;
 
-// A room found running again: a closedAt stamped by a probe that missed it says nothing any more.
+// A room found running again: a closedAt stamped by a probe that missed it says nothing any more. Found
+// running, it was not closed by hand: once its Claude is gone it may be woken (rooms open at the upgrade).
 export function markRunning(rec: RoomRecord, env: NodeJS.ProcessEnv = process.env): RoomRecord {
-  return patchRoom(rec, (r) => (r.closedAt === undefined || r.closedBy !== undefined ? r : withoutClosedAt(r)), env);
+  return patchRoom(rec, (r) => (r.closedBy !== undefined || (r.closedAt === undefined && r.resumable === true) ? r : { ...withoutClosedAt(r), resumable: true }), env);
 }
 
 // Every tab with this label except `keep`: herdr may have restored copies under new ids.
@@ -189,6 +190,7 @@ export async function openRoom(
       herdr: { session: herdrSession(env), workspaceId: ws.workspaceId, paneId: ws.paneId },
       createdAt: Date.now(),
       ...(opts.fromQueue !== undefined ? { fromQueue: opts.fromQueue } : {}),
+      resumable: true,
     };
     dropPrState(room, env);
     writeRoom(rec, env);

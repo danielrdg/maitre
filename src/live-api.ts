@@ -11,7 +11,7 @@ import { ownsPr, patchPr, readPr, readsNotice, type PrState } from './pr-state.j
 import { queueFile, readQueue, type QueueEntry } from './queue.js';
 import { couchHolds, parked, readRoom, type RoomRecord } from './rooms.js';
 import { isStartingNote, modelKey, reduce, type RoomState } from './room-state.js';
-import { isSessionId } from './wake.js';
+import { isSessionId, offersWake } from './wake.js';
 
 const PING_MS = 15_000;
 const WATCH_MS = 1_000;
@@ -98,7 +98,7 @@ export class LiveRooms {
     if (rec === undefined || rec.closedBy !== undefined) return false;
     const dead =
       state.state === 'exit' || (typeof rec.closedAt === 'number' && (this.lastEvent.get(state.room) ?? state.updatedAt) <= rec.closedAt);
-    if (!dead) return false;
+    if (!dead || !offersWake(rec)) return false;
     const seat: unknown = rec.seat;
     if (typeof seat === 'object' && seat !== null && isSessionId((seat as { session?: unknown }).session)) return true;
     if (!isSessionId(state.session)) return false;

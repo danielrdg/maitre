@@ -15,7 +15,7 @@ import { BRIEF_HEADER, MAX_BRIEF_BYTES, STARTING_TEXT, TRUST_BLOCKED_TEXT, listR
 import { LiveRooms } from '../src/live-api.js';
 import type { HookLine } from '../src/events.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
-import { wakeRoom, wakeSession, type WakeDeps } from '../src/wake.js';
+import { parkedState, wakeRoom, wakeSession, type WakeDeps } from '../src/wake.js';
 import { herdrSandbox, type HerdrSandbox } from './herdr-sandbox.js';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
@@ -216,6 +216,40 @@ test('a dead room (a reboot, no seat) with a session in its events is woken the 
   const w = await wakeRoom('a', process.env, QUICK);
   assert.equal(w.resumed, true);
   assert.match(runs()[1], /'--resume' 's1'$/);
+});
+
+test('every open stamps its record resumable, and a wake keeps the stamp', async () => {
+  const rec = await open('a');
+  assert.equal(rec.resumable, true);
+  assert.equal(readRoom('a')!.resumable, true);
+  parkByHand('a');
+  await wakeRoom('a', process.env, QUICK);
+  assert.equal(readRoom('a')!.resumable, true);
+});
+
+test('a room closed by hand before M3a (closedAt only: no stamp, no seat) is not offered for waking, yet room wake resumes it', async () => {
+  await open('a');
+  event('a', 'Stop');
+  const { resumable: _r, ...old } = readRoom('a')!;
+  writeRoom({ ...old, closedAt: Date.now() - 1_000 });
+  killTabs();
+  assert.equal(parkedState(readRoom('a')), undefined);
+  assert.deepEqual((await listRoomRows()).map((r) => [r.room, r.lounge]), [['a', 'ready']]);
+  assert.equal(parkedState({ ...readRoom('a')!, seat: { releasedAt: Date.now(), session: 's1' } }), 'parked', 'a seat is always a park');
+  const w = await wakeRoom('a', process.env, QUICK);
+  assert.equal(w.resumed, true, 'asked for by name, it is woken');
+  assert.match(runs()[1], /'--resume' 's1'$/);
+});
+
+test('a room that crashed a week ago with work pending is still offered for waking', async () => {
+  await open('a');
+  event('a', 'Stop');
+  const lines = readFileSync(eventsFile('a'), 'utf8').trim().split('\n').map((l) => JSON.stringify({ ...JSON.parse(l), ts: Date.now() - 7 * 24 * 3_600_000 }));
+  writeFileSync(eventsFile('a'), lines.join('\n') + '\n');
+  writeRoom({ ...readRoom('a')!, closedAt: Date.now() - 6 * 24 * 3_600_000, pending: { since: Date.now() - 6 * 24 * 3_600_000, reasons: ['2 commits not pushed'] } });
+  killTabs();
+  assert.equal(parkedState(readRoom('a')), 'parked');
+  assert.match((await listRoomRows())[0]!.lounge, /^parked, pending: 2 commits not pushed — wake: maitre room wake a$/);
 });
 
 test('the seat names the session to resume, before the events tail', async () => {

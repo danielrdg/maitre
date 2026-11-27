@@ -23,6 +23,9 @@ export interface RoomRecord {
   seat?: { releasedAt: number; session: string };
   // The queuedAt of the queue entry the doorman opened this room from.
   fromQueue?: number;
+  // Set on every open since rooms could be woken, and on a room found running: a room closed by hand
+  // before M3a has only closedAt, like one whose Claude died, and is never offered for waking.
+  resumable?: true;
 }
 
 function roomFile(room: string, env: NodeJS.ProcessEnv): string {

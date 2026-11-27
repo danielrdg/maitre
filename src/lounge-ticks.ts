@@ -10,7 +10,7 @@ import { liveReservations } from './queue.js';
 import { deliverToRoom, isRecord, probeRoom, unsentInput, type RoomLiveness } from './room-open.js';
 import { listRooms, readRoom, type RoomRecord } from './rooms.js';
 import type { RoomState } from './room-state.js';
-import { wakeRoom, type WakeDeps, type Woken } from './wake.js';
+import { offersWake, wakeRoom, type WakeDeps, type Woken } from './wake.js';
 
 // The janitor and the doorman, run by the long-lived lounge process.
 export interface TickDeps {
@@ -237,13 +237,14 @@ export function startTicks(env: NodeJS.ProcessEnv = process.env, deps: TickDeps 
     const pr = readPr(room, env);
     if (pr === undefined || pr.state !== 'OPEN' || !PR_URL.test(pr.url)) return;
     const lines = events.map((e) => noticeLine(e.kind as 'ci' | 'review', pr.url, e.login));
+    const skip = (why: string) => log(`maitre: pr: did not tell ${room} about its PR: ${why}`);
     if ((await probe(rec, env)) === 'not running') {
+      if (!offersWake(rec)) return skip('it is not running, and its record predates waking');
       const woken = await wake(room, env, { request: lines.join('\n') });
       for (const l of woken.lines) log(`maitre: pr: ${l}`);
       // A fresh Claude has the lines in its brief; one asking something in its tab cannot take them now.
       if (!woken.resumed || woken.needsYou) return;
     }
-    const skip = (why: string) => log(`maitre: pr: did not tell ${room} about its PR: ${why}`);
     // The closing marker keeps the janitor's park or close (its /exit) off the room while it is told.
     const held = takeClosing(room, env);
     if (held === 'busy') return skip('it is closing');

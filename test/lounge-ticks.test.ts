@@ -623,7 +623,7 @@ interface Told {
 
 // A code room with an OPEN PR already seen once (the baseline), and a gh that answers with `view`.
 function prRoom(name: string, view: Record<string, unknown>): { rec: RoomRecord; gh: Gh } {
-  const rec: RoomRecord = { room: name, project: 'proj', kind: 'code', dir: join(sb.dir, `wt-${name}`), branch: `maitre/${name}`, model: 'opus', taskType: 'code', createdAt: 1 };
+  const rec: RoomRecord = { room: name, project: 'proj', kind: 'code', dir: join(sb.dir, `wt-${name}`), branch: `maitre/${name}`, model: 'opus', taskType: 'code', createdAt: 1, resumable: true };
   mkdirSync(rec.dir, { recursive: true });
   writeRoom(rec);
   writePr(name, { url: PR_URL, number: 7, state: 'OPEN', headRefName: rec.branch!, seenAt: 2, failing: [], lastFeedbackAt: '2026-11-27T09:00:00Z' });
@@ -683,6 +683,20 @@ test('autoWake on: a parked room is woken once and told one line with only the k
   assert.deepEqual(told.wakes, [`alpha:${line}`], 'a fresh Claude would get the same line in its brief');
   assert.ok(out.some((l) => l.includes('woke alpha')), out.join('\n'));
   assert.ok(![...told.wakes, ...told.sent.map((s) => s.text)].some((t) => t.includes('Ignore')));
+});
+
+test('autoWake on: a room closed by hand before M3a (no stamp, no seat) is never woken on its own', async () => {
+  writeFileSync(join(sb.home, 'config.json'), JSON.stringify({ roots: [], projects: {}, pr: { autoWake: true } }));
+  const { gh, rec } = prRoom('alpha', failingCheck);
+  const { resumable: _r, ...old } = rec;
+  writeRoom({ ...old, closedAt: 1 });
+  const { told, deps } = autoWakeDeps(gh, 'not running');
+  const out: string[] = [];
+  ticks = startTicks(process.env, { ...deps, log: (l) => out.push(l) });
+  await ticks.idle();
+  assert.equal(readPr('alpha')?.notice?.kind, 'ci', 'the notice is recorded');
+  assert.deepEqual(told, { wakes: [], sent: [] });
+  assert.ok(out.some((l) => l.includes('did not tell alpha')), out.join('\n'));
 });
 
 test('autoWake on: a review is told with its author login and the URL, never the comment body; an odd login is left out', async () => {

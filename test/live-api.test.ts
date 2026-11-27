@@ -397,7 +397,7 @@ test('a fresh start that replays files drops rooms that ended (SessionEnd or Mai
   }
 });
 
-const REC = { room: 'r1', project: 'backend', kind: 'code', dir: '/w', branch: 'maitre/nf-bug', model: 'sonnet', taskType: 'bug', createdAt: 1 } as const;
+const REC = { room: 'r1', project: 'backend', kind: 'code', dir: '/w', branch: 'maitre/nf-bug', model: 'sonnet', taskType: 'bug', createdAt: 1, resumable: true } as const;
 const START = (room: string): HookLine => ({ v: 1, ts: 1, room, session: 's', event: 'SessionStart' });
 
 test('LiveRooms: a registered room carries project and branch, and the registry model fills unknown', () => {
@@ -694,6 +694,19 @@ test('LiveRooms: a dead room with a session is parked; one being closed, or with
   releaseClosing('closing', (held as { token: string }).token, env);
   rooms.refresh();
   assert.deepEqual(seen, ['closing:parked'], 'a close that stopped before closing the room leaves it parked');
+});
+
+test('LiveRooms: a room closed by hand before M3a (no stamp, no seat) is not parked: it keeps its last state; with a seat it is', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-legacy-') };
+  const { resumable: _r, ...old } = REC;
+  writeRoomRecord({ ...old, closedAt: 75 }, env);
+  writeRoomRecord({ ...old, room: 'seated', closedAt: 75, seat: { releasedAt: 60, session: 's' } }, env);
+  const rooms = new LiveRooms(env);
+  for (const room of ['r1', 'seated']) {
+    rooms.apply(at(room, 'SessionStart', 10));
+    rooms.apply(at(room, 'Stop', 50));
+  }
+  assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.state]), [['r1', 'ready'], ['seated', 'parked']]);
 });
 
 test('LiveRooms: a parked room that wakes is back at its live state', () => {

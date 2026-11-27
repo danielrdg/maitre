@@ -302,6 +302,20 @@ test('room run --run <id> stamps its exit line with that id, on every way it end
   }
 });
 
+test('room run that cannot prepare the room still writes its exit line, with its run id', () => {
+  const sb = sandbox('touch "$FAKE_OUT/ran"');
+  try {
+    writeFileSync(join(sb.home, 'settings'), 'not a folder');
+    const r = spawnSync(process.execPath, [MAITRE, 'room', 'run', 't1', '--run', 'r-0002'], { env: sb.env, encoding: 'utf8' });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /^maitre: could not prepare the room: /);
+    assert.equal(existsSync(join(sb.out, 'ran')), false);
+    assert.deepEqual(lines(sb.home, 't1').map((l) => [l.event, l.run]), [['MaitreExit', 'r-0002']]);
+  } finally {
+    sb.cleanup();
+  }
+});
+
 test('room run without claude on PATH prints one line and exits 127', () => {
   const sb = sandbox('exit 0');
   try {

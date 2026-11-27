@@ -201,6 +201,7 @@ test('PROMPT.md is short, English, and every maitre command it names exists in H
 
 test('PROMPT.md replies follow what the commands print: queued, closed with minutes, removed from the queue', () => {
   assert.match(PROMPT, /"queued: nf-bug waits for a seat \(position 2\)"/);
+  assert.match(PROMPT, /"not confirmed: the request may be typed in nf-bug's input — check its tab and press Enter there"/);
   assert.match(PROMPT, /`maitre room close <slug>` — write a room's minutes/);
   assert.match(PROMPT, /"removed nf-bug from the queue"/);
   assert.doesNotMatch(PROMPT, /reply "closed nf-bug"\./);

@@ -354,7 +354,7 @@ test('replayed text that quotes the failure messages, while the resume starts, i
   parkByHand('a');
   process.env.FAKE_HERDR_RESUME = 'delayed';
   process.env.FAKE_HERDR_APPEAR_MS = '1500';
-  process.env.FAKE_HERDR_RESUME_SCREEN = '> the regex matches "No conversation found with session ID: s1"\n> and "maitre: `claude` was not found on PATH" too\n';
+  process.env.FAKE_HERDR_RESUME_SCREEN = '> the regex matches "No conversation found with session ID: s1"\n> and "maitre: `claude` was not found on PATH" too\nNo conversation found with session ID: another-session\n';
   const w = await wakeRoom('a', process.env, QUICK);
   assert.deepEqual(w, { resumed: true, lines: ['woke a: resumed its session'], needsYou: false });
 });

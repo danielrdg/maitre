@@ -11,6 +11,7 @@ import { HELP, parseArgs } from '../src/cli.js';
 import { shellQuote } from '../src/herdr.js';
 import { receptionSettings, writeReceptionSettings } from '../src/hook-settings.js';
 import { buildReceptionCommand, startMaitre } from '../src/reception.js';
+import { reserve } from '../src/queue.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
 import { trustScope } from '../src/trust.js';
 import { fakeBin } from './fake-bin.js';
@@ -344,6 +345,23 @@ test('maitre: stale room tabs are closed and marked not running; live rooms are 
   assert.equal(readRoom('live')!.closedAt, undefined);
   assert.equal(typeof readRoom('gone')!.closedAt, 'number');
   assert.equal(readRoom('closed')!.closedAt, 5);
+});
+
+test('maitre: a room being woken (its opening reservation held) keeps its new tab while the record still names the old one', async () => {
+  writeRoom({
+    room: 'waking', kind: 'scratch', dir: join(sb.home, 'scratch', 'waking'), model: 'sonnet', taskType: 'simple',
+    herdr: { session: 'maitre-test', workspaceId: 'w2', paneId: 'w2:p1' }, createdAt: 1, closedAt: 5,
+  });
+  sb.setState({ next: 4, workspaces: { w3: { label: 'scratch / waking' } }, panes: { 'w3:p1': { ws: 'w3', agent: 'idle' } } });
+  const release = await reserve('waking');
+  try {
+    const r = await startMaitre(process.env, { ...FAST, open: () => {} });
+    assert.deepEqual(r.closedRooms, []);
+    assert.equal(sb.state().workspaces.w3?.label, 'scratch / waking', 'the resume in it goes on');
+    assert.equal(readRoom('waking')!.closedAt, 5);
+  } finally {
+    release();
+  }
 });
 
 test('maitre: the reception trust dialog is answered on screen', async () => {

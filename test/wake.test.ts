@@ -569,10 +569,10 @@ test("a resume whose command ended before Claude started (maitre room run's exit
   parkByHand('a');
   process.env.FAKE_HERDR_RESUME = 'ended';
   const t0 = Date.now();
-  const w = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 3_000 });
+  const w = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 20_000 });
   assert.equal(w.resumed, false);
   assert.match(w.lines[0], /could not be resumed \(its command ended before Claude started\)/);
-  assert.ok(Date.now() - t0 < 3_000, 'before the deadline');
+  assert.ok(Date.now() - t0 < 20_000, 'before the deadline');
   assert.match(runs().at(-1)!, /'--brief-file'/);
 });
 

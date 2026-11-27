@@ -8,7 +8,8 @@ import type { HookLine } from '../src/events.js';
 import { HerdrError, shellQuote } from '../src/herdr.js';
 import { roomDir } from '../src/paths.js';
 import { writeIndex, type Project } from '../src/projects.js';
-import { BRIEF_HEADER, closeRoom, listRoomRows, openRoom, promptMatches, roomLabel, sendToRoom, unwrapPasted } from '../src/room-open.js';
+import { closeRoom } from '../src/janitor.js';
+import { BRIEF_HEADER, inputText, listRoomRows, markNotRunning, openRoom, promptMatches, roomLabel, sendToRoom, unwrapPasted } from '../src/room-open.js';
 import { reduce, type RoomState } from '../src/room-state.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
 import { herdrSandbox, type HerdrSandbox } from './herdr-sandbox.js';
@@ -380,6 +381,7 @@ test('room list shows each room with its herdr status and lounge state; restored
 test('room close exits an idle room, closes its tab, keeps its directory and marks it closed', async () => {
   const rec = await openScratch();
   const closed = await closeRoom('x', process.env, { exitTimeoutMs: 2000 });
+  assert.ok(!('dequeued' in closed));
   assert.deepEqual(herdrCalls('agent', 'prompt'), [['agent', 'prompt', 'w1:p1', '/exit']]);
   assert.deepEqual(herdrCalls('workspace', 'close'), [['workspace', 'close', 'w1']]);
   assert.deepEqual(sb.state().workspaces, {});
@@ -434,7 +436,7 @@ test('maitre room open/list/send/close end to end with the fake herdr', () => {
 
   const close = cli(['room', 'close', 'nf-bug']);
   assert.equal(close.status, 0, close.stderr);
-  assert.equal(close.stdout, 'closed nf-bug\n');
+  assert.match(close.stdout, /^writing the minutes…\nclosed nf-bug\nminutes: \S+-nf-bug\.md\n$/);
 
   const gone = cli(['room', 'send', 'nf-bug', 'hi']);
   assert.equal(gone.status, 1);
@@ -482,4 +484,118 @@ test('a hand-made registry entry without herdr ids is not running', async () => 
   assert.deepEqual(await listRoomRows(), [{ room: 'old', model: 'haiku', herdr: 'not running', lounge: '-' }]);
   writeRoom({ room: 'old', kind: 'scratch', dir: '/nowhere', taskType: 'simple', createdAt: 1 } as unknown as RoomRecord);
   assert.deepEqual(await listRoomRows(), [{ room: 'old', model: '-', herdr: 'not running', lounge: '-' }]);
+});
+
+test('reopening a not-running room writes a fresh record without closedAt, closedBy or couch', async () => {
+  await openScratch();
+  writeRoom({ ...readRoom('x')!, closedAt: 1, closedBy: 'janitor', couch: { since: 2, reasons: ['idle'] } });
+  sb.setState({ next: 2, workspaces: {}, panes: {} });
+  await openScratch();
+  const rec = readRoom('x')!;
+  assert.equal(rec.closedAt, undefined);
+  assert.equal(rec.closedBy, undefined);
+  assert.equal(rec.couch, undefined);
+  assert.ok(rec.herdr);
+});
+
+// Shaped like `herdr pane read --source visible --format ansi` of a real Claude Code room (scrubbed):
+// grey rules, the input line between them.
+const ESC = '\x1b';
+const RULE = `${ESC}[0m${ESC}[38;2;136;136;136m${'─'.repeat(60)}${ESC}[0m\r`;
+const HISTORY = `${ESC}[0m${ESC}[38;2;153;153;153m${ESC}[48;2;55;55;55m❯ ${ESC}[0m${ESC}[38;2;255;255;255m${ESC}[48;2;55;55;55mReply with ok.${ESC}[0m\r`;
+const boxed = (...inner: string[]) => [HISTORY, '● ok', '✻ Baked for 2s', RULE, ...inner, RULE, '  ⏵⏵ auto mode on (shift+tab to cycle)', ''].join('\n');
+
+test('inputText: an empty box, and the dim placeholder of a fresh room, are empty', () => {
+  assert.equal(inputText(boxed('❯\u00a0\r')), '');
+  assert.equal(inputText(boxed('❯')), '');
+  assert.equal(inputText(boxed(`❯\u00a0${ESC}[0m${ESC}[2mTry "edit <filepath> to…"${ESC}[0m\r`)), '');
+});
+
+test('inputText: typed text is a draft, plain, coloured (truecolor holds a 2) or on several lines', () => {
+  assert.equal(inputText(boxed('❯\u00a0draft text\r')), 'draft text');
+  assert.equal(inputText(boxed(`❯\u00a0${ESC}[38;2;255;255;255m${ESC}[48;2;55;55;55mdraft${ESC}[0m`)), 'draft');
+  assert.equal(inputText(boxed(`❯\u00a0${ESC}[38;5;2mdraft${ESC}[0m`)), 'draft');
+  assert.equal(inputText(boxed('❯\u00a0first line', '  second line')), 'first line\n  second line');
+  assert.equal(inputText(boxed('❯\u00a0', '  only the second line')), '\n  only the second line');
+  assert.equal(inputText(boxed(`❯\u00a0${ESC}[2mdim ${ESC}[22mbold-off text`)), 'dim bold-off text');
+});
+
+test('inputText: spaces are text: a box holding only spaces is a draft, only the one separator after ❯ is not', () => {
+  assert.equal(inputText(boxed('❯\u00a0   \r')), '   ');
+  assert.equal(inputText(boxed('❯\u00a0 ')), ' ');
+  assert.equal(inputText(boxed('❯ ')), '');
+  assert.equal(inputText(boxed('❯\u00a0', '')), '\n', 'an empty second line is a newline typed');
+});
+
+test('inputText: dim text is dropped only when it is the placeholder alone; other dim content is a draft', () => {
+  assert.equal(inputText(boxed(`❯\u00a0${ESC}[2mTry "fix the tests"${ESC}[0m`)), '');
+  assert.equal(inputText(boxed(`❯\u00a0${ESC}[2m[Pasted text #1 +3 lines]${ESC}[0m`)), '[Pasted text #1 +3 lines]');
+  assert.equal(inputText(boxed(`❯\u00a0${ESC}[2m[Image #1]${ESC}[0m`)), '[Image #1]');
+  assert.equal(inputText(boxed(`❯\u00a0${ESC}[2mTry "fix the tests"${ESC}[0m and more`)), 'Try "fix the tests" and more');
+  assert.equal(inputText(boxed(`❯\u00a0${ESC}[2mTry "fix the tests"${ESC}[0m`, `${ESC}[2mmore${ESC}[0m`)), 'Try "fix the tests"\nmore');
+});
+
+test('inputText: only the bottom pair of rules is the box: a rule typed in a draft, or a box without ❯, never falls back', () => {
+  for (const rule of ['  ────────────', '────────────']) {
+    assert.notEqual(inputText(boxed('❯\u00a0', rule, '  real text')), '', 'a rule inside a draft');
+  }
+  assert.equal(inputText([RULE, '❯\u00a0', RULE, '! ls -la', RULE, ''].join('\n')), undefined, 'a bash-mode box below an empty ❯ line');
+  assert.equal(inputText([RULE, '❯\u00a0', RULE, '# remember this', RULE, ''].join('\n')), undefined, 'a memory-mode box');
+});
+
+test('inputText: no input box on screen (a history line, a dialog, a shell) is undefined', () => {
+  assert.equal(inputText(`${HISTORY}\n● ok\n`), undefined);
+  assert.equal(inputText(' Is this a project you trust?\n ❯ 1. No, exit\n   2. Yes, I trust this folder\n'), undefined);
+  assert.equal(inputText('$ \n'), undefined);
+  assert.equal(inputText(`${RULE}\n  something else\n${RULE}\n`), undefined);
+});
+
+test('a room list racing a close by hand keeps closedBy: only closedAt is ever added, to the record on disk', async () => {
+  const rec = await openRoom({ name: 'a', model: 'sonnet', taskType: 'change', brief: 'do it' }, process.env, FAST);
+  sb.setState({ ...sb.state(), workspaces: {}, panes: {} });
+  const file = join(roomDir('a'), 'room.json');
+  const closed = join(sb.dir, 'closed-room.json');
+  writeFileSync(closed, JSON.stringify({ ...rec, closedAt: 1, closedBy: 'user' }));
+  // The close lands between the list reading the records and marking this one not running.
+  process.env.FAKE_HERDR_THEN_workspace_list = JSON.stringify([closed, file]);
+  await listRoomRows(process.env, { queue: false });
+  assert.deepEqual([readRoom('a')!.closedBy, readRoom('a')!.closedAt], ['user', 1]);
+
+  const reopened = { ...rec, createdAt: rec.createdAt + 1 };
+  writeRoom(reopened);
+  markNotRunning(rec);
+  assert.deepEqual(readRoom('a'), reopened, 'a reopen in between is never overwritten');
+  markNotRunning(reopened);
+  assert.equal(typeof readRoom('a')!.closedAt, 'number');
+});
+
+test('room list shows a couch that holds with its reasons, a dead room\'s pending reasons, and closed rooms as closed', async () => {
+  for (const name of ['a', 'b', 'c', 'd', 'e']) await openScratch(name);
+  const now = Date.now() + 1000;
+  const append = (room: string, line: Partial<HookLine>) =>
+    appendFileSync(join(roomDir(room), 'events.jsonl'), JSON.stringify({ v: 1, room, session: 's1', ...line }) + '\n');
+  writeRoom({ ...readRoom('a')!, couch: { since: now, reasons: ['uncommitted changes: f.txt', 'an open PR'] } });
+  append('a', { ts: now + 5, event: 'Notification', notification_type: 'idle_prompt' });
+  writeRoom({ ...readRoom('b')!, couch: { since: now, reasons: ['uncommitted changes'] } });
+  append('b', { ts: now + 5, event: 'UserPromptSubmit', prompt: 'more' });
+  append('b', { ts: now + 6, event: 'Stop' });
+  writeRoom({ ...readRoom('c')!, couch: { since: now, reasons: ['left from when it ran'] }, pending: { since: now, reasons: ['2 commits not pushed'] } });
+  writeRoom({ ...readRoom('d')!, closedAt: now, closedBy: 'user' });
+  const s = sb.state();
+  for (const room of ['c', 'd']) {
+    const ws = readRoom(room)!.herdr!.workspaceId;
+    delete s.workspaces[ws];
+    delete s.panes[`${ws}:p1`];
+  }
+  sb.setState(s);
+  assert.deepEqual(
+    (await listRoomRows()).map((r) => [r.room, r.herdr, r.lounge]),
+    [
+      ['a', 'idle', 'couch: uncommitted changes: f.txt; an open PR'],
+      ['b', 'idle', 'ready'],
+      ['c', 'not running', 'coffee, pending: 2 commits not pushed'],
+      ['d', 'not running', 'closed'],
+      ['e', 'idle', 'coffee'],
+    ],
+  );
 });

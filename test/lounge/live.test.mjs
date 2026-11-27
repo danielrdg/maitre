@@ -5,7 +5,7 @@ import { STATE_KEYS, t } from '../../lounge/js/i18n.js';
 import { MODEL } from '../../lounge/js/sprites.js';
 import { panelModel, renderPanel } from '../../lounge/js/panel.js';
 import { createWorld, stepWorld, makeRngs, STEP } from '../../lounge/js/sim.js';
-import { createCast } from '../../lounge/js/agents.js';
+import { createCast, SPOTS } from '../../lounge/js/agents.js';
 import { mulberry32 } from '../../lounge/js/rng.js';
 
 const room = (over = {}) => ({
@@ -490,4 +490,72 @@ test('the panel shows the last reply as text, in both languages', () => {
   assert.ok(allText(root).includes('<b>oi</b>'));
   assert.ok(!doc.made.some(n => n.tag === 'b' && n.textContent === 'oi'));
   assert.equal(panelModel({ ...agent, info: { ...agent.info, reply: '' } }, 'en').reply, undefined);
+});
+
+test('a queued room stands on the sidewalk and a couched room sits on the couch', () => {
+  const q = roomToAgents(room({ state: 'queue', model: 'unknown', queuePosition: 2, project: 'web', kind: 'code' })).main;
+  assert.equal(q.state, 'queue');
+  assert.equal(q.model, 'queued');
+  assert.equal(q.info.queuePosition, 2);
+  assert.equal(q.info.where, 'web');
+  const c = roomToAgents(room({ state: 'couch', couchReasons: ['2 commits not pushed'] })).main;
+  assert.equal(c.state, 'sleep');
+  assert.deepEqual(c.info.couchReasons, ['2 commits not pushed']);
+  assert.equal('queuePosition' in roomToAgents(room()).main.info, false, 'no extra keys on other rooms');
+  assert.equal('couchReasons' in roomToAgents(room()).main.info, false);
+});
+
+test('several couched or queued rooms each get their own clickable place', () => {
+  for (const [state, n] of [['couch', 3], ['queue', 4]]) {
+    const w = liveWorld();
+    w.cast.snapshot(Array.from({ length: n }, (_, i) => room({ room: `${state}${i}`, state, ...(state === 'queue' ? { queuePosition: i + 1 } : { couchReasons: ['x'] }) })));
+    settled(w.world, w.hooks);
+    const live = w.world.agents.filter(a => a.liveId);
+    assert.equal(live.length, n);
+    assert.equal(new Set(live.map(a => `${a.x},${a.y}`)).size, n, `${state}: ${live.map(a => `${a.x},${a.y}`)}`);
+    for (const a of live) assert.ok(clickable(live, a), `${n} ${state}: ${a.liveId}@${a.x} can be clicked`);
+  }
+});
+
+test('a queued room that opens walks from the sidewalk to its table', () => {
+  const { world, cast } = liveWorld();
+  cast.snapshot([room({ room: 'q', state: 'queue', queuePosition: 1 })]);
+  const [a] = byId(world, 'q');
+  assert.equal(a.state, 'queue');
+  cast.room(room({ room: 'q', state: 'coffee' }));
+  assert.equal(a.state, 'coffee');
+  assert.ok(a.walking, 'the same agent walks in');
+});
+
+test('the panel says where a queued room stands and why a room is on the couch, as text, in both languages', () => {
+  const { doc, root } = fakeDoc();
+  const queued = { id: 'q', label: 'q', state: 'queue', look: { model: 'queued' }, info: { live: true, task: '', steps: [], where: 'scratch', since: 1, queuePosition: 3 } };
+  const couched = { id: 'c', label: 'c', state: 'sleep', look: { model: 'opus' }, info: { live: true, task: 'x', steps: [], where: 'web', since: 1, couchReasons: ['<b>2 commits</b> not pushed', 'an open PR'] } };
+  assert.equal(panelModel(queued).wait, 'Waiting for a seat (position 3)');
+  assert.equal(panelModel(queued, 'pt-BR').wait, 'Esperando vaga (posição 3)');
+  assert.equal(panelModel(couched).wait, 'On the couch: <b>2 commits</b> not pushed; an open PR');
+  assert.equal(panelModel(couched, 'pt-BR').wait, 'No sofá: <b>2 commits</b> not pushed; an open PR');
+  assert.equal('wait' in panelModel({ ...couched, state: 'ready' }), false);
+  renderPanel(root, panelModel(couched), () => {}, {});
+  assert.ok(doc.made.some(n => n.className === 'wait' && n.textContent === 'On the couch: <b>2 commits</b> not pushed; an open PR'));
+  assert.ok(!doc.made.some(n => n.tag === 'b' && n.textContent === '2 commits'), 'never parsed as markup');
+});
+
+test('the sidewalk line follows the queue: position 1 at the front by the rope, the rest move up when it opens', () => {
+  const frontFirst = [...SPOTS.queue].sort((p, q) => q[0] - p[0]);
+  const q = (name, queuePosition) => room({ room: name, state: 'queue', model: 'unknown', queuePosition });
+  for (const walkIn of [false, true]) {
+    const { world, hooks, cast } = liveWorld();
+    if (walkIn) cast.snapshot([]);
+    // Names out of order on purpose: the snapshot comes sorted by name.
+    cast.snapshot([q('a', 3), q('b', 1), q('c', 4), q('d', 2)]);
+    if (!walkIn) assert.ok(world.agents.every(a => !a.walking), 'the first snapshot seats the line in place');
+    settled(world, hooks);
+    const at = id => { const [a] = byId(world, id); return [a.x, a.y]; };
+    assert.deepEqual(['b', 'd', 'a', 'c'].map(at), frontFirst.slice(0, 4), walkIn ? 'walked in' : 'seated');
+    cast.room(room({ room: 'b', state: 'coffee' }));
+    for (const [id, p] of [['d', 1], ['a', 2], ['c', 3]]) cast.room(q(id, p));
+    settled(world, hooks);
+    assert.deepEqual(['d', 'a', 'c'].map(at), frontFirst.slice(0, 3));
+  }
 });

@@ -61,6 +61,7 @@ body { margin: 0; overflow: hidden; display: grid; place-items: center; backgrou
 .panel h4 { margin: 0; font: 700 max(14px, calc(20 * var(--px)))/1.1 var(--font-pixel); color: #ffd45c; }
 .panel .chip { display: inline-block; padding: 1px calc(6 * var(--px)); margin: 4px 4px 0 0; font-size: max(10px, calc(12 * var(--px))); border: 2px solid var(--ink); color: var(--ink); }
 .panel .reply { white-space: pre-wrap; overflow-wrap: anywhere; max-height: max(6lh, calc(110 * var(--px))); overflow-y: auto; }
+.panel .wait { margin-top: calc(6 * var(--px)); color: var(--gold); overflow-wrap: anywhere; }
 .panel .lbl { font: max(8px, calc(9 * var(--px)))/1 var(--font-tag); color: var(--gold); letter-spacing: .06em; margin: calc(10 * var(--px)) 0 calc(4 * var(--px)); }
 .panel ul { margin: 0; padding-left: 0; list-style: none; } .panel li::before { content: '› '; color: var(--gold); }
 .panel .x { position: absolute; right: calc(8 * var(--px)); top: calc(6 * var(--px)); background: none; border: none; color: #f7e7c6;

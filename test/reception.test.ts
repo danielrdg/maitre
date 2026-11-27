@@ -189,6 +189,13 @@ test('PROMPT.md is short, English, and every maitre command it names exists in H
   assert.match(PROMPT, /never reuse an earlier id/);
 });
 
+test('PROMPT.md replies follow what the commands print: queued, closed with minutes, removed from the queue', () => {
+  assert.match(PROMPT, /"queued: nf-bug waits for a seat \(position 2\)"/);
+  assert.match(PROMPT, /`maitre room close <slug>` — write a room's minutes/);
+  assert.match(PROMPT, /"removed nf-bug from the queue"/);
+  assert.doesNotMatch(PROMPT, /reply "closed nf-bug"\./);
+});
+
 test('parseArgs: no arguments is the entrypoint, reception is the pane command', () => {
   assert.deepEqual(parseArgs([]), { cmd: 'start' });
   assert.deepEqual(parseArgs(['reception']), { cmd: 'reception' });

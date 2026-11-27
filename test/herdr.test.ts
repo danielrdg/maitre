@@ -204,3 +204,11 @@ test("shellQuote round-trips through sh -c 'printf %s ' + q", () => {
     assert.equal(out, s);
   }
 });
+
+test('a herdr call that never answers is killed after the timeout and fails with a clear error', async () => {
+  process.env.FAKE_HERDR_HANG_workspace_list = '1';
+  process.env.MAITRE_HERDR_TIMEOUT_MS = '300';
+  const t0 = Date.now();
+  await assert.rejects(listWorkspaces(), { code: 'exec_failed', message: 'herdr workspace list: timed out after 0.3 s' });
+  assert.ok(Date.now() - t0 < 5_000);
+});

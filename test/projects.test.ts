@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeF
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, saveConfig } from '../src/config.js';
+import { loadConfig, saveConfig, settings } from '../src/config.js';
 import { readIndex, scanProjects, writeIndex } from '../src/projects.js';
 
 const MAITRE = fileURLToPath(new URL('../../bin/maitre', import.meta.url));
@@ -174,5 +174,70 @@ test('config keeps a valid lang through a load and save, and drops an unknown on
     assert.equal(loadConfig(env).lang, 'pt-BR');
     writeFileSync(join(dir, 'home', 'config.json'), JSON.stringify({ roots: [], projects: {}, lang: 'fr' }));
     assert.deepEqual(loadConfig(env), { roots: [], projects: {} });
+  });
+});
+
+function withConfig(raw: unknown, fn: (env: { MAITRE_HOME: string }) => void): void {
+  withTmp((dir) => {
+    const env = { MAITRE_HOME: join(dir, 'home') };
+    mkdirSync(env.MAITRE_HOME, { recursive: true });
+    if (raw !== undefined) writeFileSync(join(env.MAITRE_HOME, 'config.json'), JSON.stringify(raw));
+    fn(env);
+  });
+}
+
+test('settings: defaults with no config', () => {
+  withConfig(undefined, (env) => {
+    assert.deepEqual(settings(env), {
+      capacity: 6,
+      idleMs: 4 * 3_600_000,
+      intervalMs: 5 * 60_000,
+      vault: join(env.MAITRE_HOME, 'memory'),
+      warnings: [],
+    });
+  });
+});
+
+test('settings: valid values are used', () => {
+  withConfig({ roots: [], projects: {}, capacity: 2, janitor: { idleHours: 0.5, intervalMinutes: 1 }, vault: '/srv/vault' }, (env) => {
+    assert.deepEqual(settings(env), { capacity: 2, idleMs: 1_800_000, intervalMs: 60_000, vault: '/srv/vault', warnings: [] });
+  });
+});
+
+test('settings: each invalid value falls back to its default with one warning', () => {
+  const bad: [string, unknown][] = [
+    ['capacity', 0],
+    ['capacity', 2.5],
+    ['capacity', '3'],
+    ['janitor.idleHours', 0],
+    ['janitor.idleHours', -1],
+    ['janitor.idleHours', '4'],
+    ['janitor.intervalMinutes', 0],
+    ['janitor.intervalMinutes', null],
+    ['vault', 'relative/dir'],
+    ['vault', 7],
+  ];
+  for (const [key, value] of bad) {
+    const raw: Record<string, unknown> = { roots: [], projects: {} };
+    if (key.startsWith('janitor.')) raw.janitor = { [key.slice(8)]: value };
+    else raw[key] = value;
+    withConfig(raw, (env) => {
+      const s = settings(env);
+      assert.equal(s.warnings.length, 1, `${key}=${JSON.stringify(value)}`);
+      assert.match(s.warnings[0]!, new RegExp(key.replace('.', '\\.')));
+      assert.deepEqual({ ...s, warnings: [] }, { ...settings({ MAITRE_HOME: env.MAITRE_HOME + '-none' }), warnings: [], vault: s.vault });
+    });
+  }
+  withConfig({ roots: [], projects: {}, janitor: 'x' }, (env) => assert.equal(settings(env).warnings.length, 1));
+});
+
+test('config keeps capacity, janitor, vault and lang through a load and save', () => {
+  withTmp((dir) => {
+    const env = { MAITRE_HOME: join(dir, 'home') };
+    const cfg = { roots: ['/x'], projects: {}, lang: 'pt-BR' as const, capacity: 3, janitor: { idleHours: 2, intervalMinutes: 10 }, vault: '/v' };
+    saveConfig(cfg, env);
+    assert.deepEqual(loadConfig(env), cfg);
+    saveConfig({ ...loadConfig(env), roots: ['/y'] }, env);
+    assert.deepEqual(loadConfig(env), { ...cfg, roots: ['/y'] });
   });
 });

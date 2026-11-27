@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { VERSION } from './version.js';
 import { EventTail } from './event-tail.js';
 import { LiveRooms, liveRoutes } from './live-api.js';
+import { startTicks, type Ticks } from './lounge-ticks.js';
 import { ReceptionQueue, receptionRoutes } from './lounge-reception.js';
 import { claimLounge, liveLounge, loungeToken, releaseLounge } from './lounge-file.js';
 import { startLoungeServer, TicketStore } from './lounge-server.js';
@@ -12,7 +13,9 @@ import { ensureLounge, hasDisplay, notifyDesktop, openWindow, ticketUrl, uiLang 
 import { loadConfig, saveConfig } from './config.js';
 import { maitreHome, roomSlug } from './paths.js';
 import { readIndex, scanProjects, writeIndex } from './projects.js';
-import { closeRoom, deliverToRoom, describeDelivery, describeOpen, listRoomRows, openRoom, type RoomRow } from './room-open.js';
+import { closeRoom, formatDecisions, janitorTick } from './janitor.js';
+import { readFailed, readQueue, reserve } from './queue.js';
+import { deliverToRoom, describeDelivery, describeOpen, listRoomRows, openRoom, type RoomRow } from './room-open.js';
 import { attach, runReception, startMaitre } from './reception.js';
 import { parseSetupArgs, runSetup, type SetupOptions } from './setup.js';
 import { reservedFlag, runRoom } from './room-run.js';
@@ -34,6 +37,7 @@ export type CliArgs =
   | { cmd: 'room-send'; room: string; text: string }
   | { cmd: 'room-list' }
   | { cmd: 'room-close'; room: string }
+  | { cmd: 'janitor'; dryRun: boolean }
   | { cmd: 'status'; status: RoomStatus; text: string; options: string[] }
   | { cmd: 'index'; roots: string[] }
   | { cmd: 'projects' }
@@ -52,6 +56,7 @@ const ROOM_USAGE = 'usage: maitre room <open|send|list|close|run> ...';
 const INDEX_USAGE = 'usage: maitre index [--root <dir>]...';
 const ROUTE_USAGE = 'usage: maitre route <id> [<id>...] [--json]';
 const DISPATCH_USAGE = 'usage: maitre dispatch <id>';
+const JANITOR_USAGE = 'usage: maitre janitor [--dry-run]';
 const STATUS_USAGE = `usage: maitre status <${STATUSES.join('|')}> "<text>" [--option <o>]...`;
 
 const usage = (error: string): CliArgs => ({ cmd: 'usage', error });
@@ -164,6 +169,10 @@ export function parseArgs(argv: string[]): CliArgs {
   if (argv[0] === 'route') return parseRoute(argv.slice(1));
   if (argv[0] === 'dispatch') return argv.length === 2 && isRequestId(argv[1]) ? { cmd: 'dispatch', id: argv[1] } : usage(DISPATCH_USAGE);
   if (argv[0] === 'projects') return argv.length === 1 ? { cmd: 'projects' } : { cmd: 'usage', error: 'usage: maitre projects' };
+  if (argv[0] === 'janitor') {
+    if (argv.length === 1) return { cmd: 'janitor', dryRun: false };
+    return argv.length === 2 && argv[1] === '--dry-run' ? { cmd: 'janitor', dryRun: true } : usage(JANITOR_USAGE);
+  }
   const out: LoungeArgs = { cmd: 'help', demo: false, port: 8737, open: true, lang: 'en' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -207,6 +216,7 @@ Usage:
   maitre projects
   maitre route <id> [<id>...] [--json]
   maitre dispatch <id>
+  maitre janitor [--dry-run]
   maitre reception
   maitre --version
 
@@ -220,12 +230,13 @@ Commands:
   room open     Open a room in its own herdr tab (a git worktree with --project, else a scratch dir)
   room send     Send a message to a running room without waiting for its turn
   room list     List rooms with their herdr status and lounge state
-  room close    Exit a room and close its tab (its directory is kept)
+  room close    Write a room's minutes, exit it and close its tab (its directory is kept)
   room run      Start Claude Code in a named room the lounge can see
   index         Scan roots for git repos and write the project index
   projects      List indexed projects
   route         Classify captured reception requests and store the route
   dispatch      Open or feed the room a stored route points to
+  janitor       Close rooms idle with nothing pending, with minutes (--dry-run: only print the decisions)
   reception     Run the reception in this terminal (the maître session starts it for you)
   status        Inside a room, declare what it is doing (blocked: offer --option choices)
 
@@ -265,6 +276,15 @@ async function openDoor(cmd: 'open' | 'prompt', env: NodeJS.ProcessEnv = process
   return 1;
 }
 
+// Only decides whether to say the minutes are being written; closeRoom reads the queue again.
+function waiting(room: string): boolean {
+  try {
+    return readQueue().some((e) => e.room === room) || readFailed().some((e) => e.room === room);
+  } catch {
+    return false;
+  }
+}
+
 async function roomCommand(args: Extract<CliArgs, { cmd: 'room-open' | 'room-send' | 'room-list' | 'room-close' }>): Promise<void> {
   if (args.cmd === 'room-open') {
     let brief = args.brief;
@@ -275,17 +295,29 @@ async function roomCommand(args: Extract<CliArgs, { cmd: 'room-open' | 'room-sen
         throw new Error(`could not read the brief file: ${(err as Error).message}`);
       }
     }
-    const rec = await openRoom({ name: args.name, project: args.project, model: args.model, taskType: args.taskType, brief });
+    const release = await reserve(args.name);
+    let rec;
+    try {
+      rec = await openRoom({ name: args.name, project: args.project, model: args.model, taskType: args.taskType, brief });
+    } finally {
+      release();
+    }
     for (const w of rec.warnings) console.error(`maitre: warning: ${w}`);
     console.log(describeOpen(rec));
   } else if (args.cmd === 'room-send') {
     const room = roomSlug(args.room);
     console.log(describeDelivery(room, await deliverToRoom(room, args.text, process.env, sendConfirm())));
   } else if (args.cmd === 'room-list') {
-    const rows = await listRoomRows();
+    const rows = await listRoomRows(process.env, { warn: (w) => console.error(`maitre: warning: ${w}`) });
     console.log(rows.length === 0 ? 'no rooms' : formatRows(rows).join('\n'));
   } else {
-    console.log(`closed ${(await closeRoom(args.room)).room}`);
+    if (!waiting(roomSlug(args.room))) console.log('writing the minutes…');
+    const rec = await closeRoom(args.room);
+    if ('dequeued' in rec) console.log(rec.dequeued === 'queue' ? `removed ${rec.room} from the queue` : `removed ${rec.room} from the failed queue`);
+    else {
+      console.log(`closed ${rec.room}`);
+      if (rec.minutes !== undefined) console.log(`minutes: ${rec.minutes}`);
+    }
   }
 }
 
@@ -387,6 +419,16 @@ export async function main(argv: string[]): Promise<void> {
     }
     return;
   }
+  if (args.cmd === 'janitor') {
+    try {
+      const ds = await janitorTick(process.env, { dryRun: args.dryRun });
+      for (const line of formatDecisions(ds)) console.log(line);
+    } catch (err) {
+      console.error(`maitre: ${(err as Error).message}`);
+      process.exitCode = 1;
+    }
+    return;
+  }
   if (args.cmd === 'status') {
     process.exitCode = runStatus(args.status, args.text, args.options);
     return;
@@ -447,7 +489,11 @@ export async function main(argv: string[]): Promise<void> {
   const tail = rooms && new EventTail(join(maitreHome(), 'state'), (line) => rooms.apply(line));
   // The first scan is synchronous: existing rooms are replayed before the URL is printed.
   tail?.start();
+  const unwatch = rooms?.watch();
+  let ticks: Ticks | undefined;
   const stop = () => {
+    ticks?.stop();
+    unwatch?.();
     tail?.stop();
     if (live) releaseLounge();
     void server.close().then(() => process.exit(0));
@@ -464,5 +510,11 @@ export async function main(argv: string[]): Promise<void> {
     // The window gets a one-time ticket: the key URL above is for this terminal only.
     if (args.open) openWindow('lounge', `http://127.0.0.1:${server.port}/?ticket=${tickets.issue()}${query}`);
     console.log('Press Ctrl+C to stop.');
+  }
+  if (rooms) {
+    const t = startTicks(process.env, { after: () => rooms.refresh() });
+    ticks = t;
+    // After the replay above, so only changes from here on wake the doorman.
+    rooms.on((room) => t.roomUpdate(room));
   }
 }

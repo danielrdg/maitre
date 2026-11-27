@@ -18,8 +18,11 @@ import {
 } from '../src/lounge-reception.js';
 import { startLoungeServer, type LoungeServer } from '../src/lounge-server.js';
 import { writeIndex, type Project } from '../src/projects.js';
-import { closeRoom, openRoom } from '../src/room-open.js';
+import { closeRoom } from '../src/janitor.js';
+import { openRoom } from '../src/room-open.js';
 import { readRoom } from '../src/rooms.js';
+import { claimLounge } from '../src/lounge-file.js';
+import { QUEUE_HINT } from '../src/router.js';
 import { herdrSandbox, type HerdrSandbox } from './herdr-sandbox.js';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
@@ -241,6 +244,29 @@ test('reception: a request is stored verbatim, routed and dispatched to a new sc
   assert.equal(readFileSync(join(requestsDir(), '1.md'), 'utf8'), 'what is a monad?\n');
   assert.equal(readRoom('monads')?.kind, 'scratch');
   assert.equal(herdrCalls('workspace', 'create').length, 1);
+});
+
+test('reception: past capacity the new room is queued; with the lounge live there is no hint', async () => {
+  writeIndex([]);
+  writeFileSync(join(sb.home, 'config.json'), JSON.stringify({ roots: [], projects: {}, capacity: 1 }));
+  await openRoom({ name: 'busy', model: 'sonnet', taskType: 'change', brief: 'x' }, process.env, FAST);
+  routerSays(SCRATCH_ROUTE);
+  const port = await start();
+  const res = await post(port, { text: 'what is a monad?' });
+  assert.equal(res.status, 200, res.body);
+  assert.deepEqual(res.json, {
+    kind: 'dispatched',
+    id: '1',
+    room: 'monads',
+    lines: ['queued: monads waits for a seat (position 1)', QUEUE_HINT],
+    needsYou: false,
+    queued: true,
+  });
+  claimLounge(port);
+  const again = await post(port, { text: 'and functors?' });
+  assert.deepEqual(again.json, { kind: 'dispatched', id: '2', room: 'monads', lines: ['queued: monads waits for a seat (position 1)'], needsYou: false, queued: true });
+  assert.equal(herdrCalls('workspace', 'create').length, 1);
+  assert.equal(readRoom('monads'), undefined);
 });
 
 test('reception: a router question comes back with the id, and the reply with answers routes both ids', async () => {

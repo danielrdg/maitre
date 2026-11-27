@@ -14,6 +14,13 @@ export interface RoomRecord {
   herdr?: { session: string; workspaceId: string; paneId: string };
   createdAt: number;
   closedAt?: number;
+  closedBy?: 'janitor' | 'user';
+  couch?: { since: number; reasons: string[] };
+  // A room found not running with something pending: why the janitor leaves it alone (a dead room is
+  // never on the couch, which is for running rooms).
+  pending?: { since: number; reasons: string[] };
+  // The queuedAt of the queue entry the doorman opened this room from.
+  fromQueue?: number;
 }
 
 function roomFile(room: string, env: NodeJS.ProcessEnv): string {
@@ -48,4 +55,34 @@ export function listRooms(env: NodeJS.ProcessEnv = process.env): RoomRecord[] {
     }
   }
   return out;
+}
+
+// The record still names the same opening of the room: a reopen writes a new createdAt and tab.
+export function sameRoom(a: RoomRecord | undefined, b: RoomRecord): a is RoomRecord {
+  return a !== undefined && a.createdAt === b.createdAt && a.herdr?.workspaceId === b.herdr?.workspaceId;
+}
+
+// Read-modify-write against the record on disk, so a close or reopen in between is never overwritten.
+// A patch that returns the record unchanged writes nothing.
+export function patchRoom(rec: RoomRecord, patch: (r: RoomRecord) => RoomRecord, env: NodeJS.ProcessEnv = process.env): RoomRecord {
+  const fresh = readRoom(rec.room, env);
+  if (!sameRoom(fresh, rec)) return rec;
+  const next = patch(fresh);
+  if (next !== fresh) writeRoom(next, env);
+  return next;
+}
+
+export type Parked = { since: number; reasons: string[] };
+
+// A couch (or pending) as written by the janitor; anything else is ignored.
+export function parked(v: unknown): Parked | undefined {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return undefined;
+  const c = v as Record<string, unknown>;
+  if (typeof c.since !== 'number' || !Number.isFinite(c.since) || !Array.isArray(c.reasons)) return undefined;
+  return { since: c.since, reasons: c.reasons.filter((r): r is string => typeof r === 'string') };
+}
+
+// A couch holds only while the room stays idle (ready or coffee) with no event after it was set.
+export function couchHolds(c: Parked, state: string, lastEventAt: number | undefined): boolean {
+  return (state === 'ready' || state === 'coffee') && (lastEventAt ?? -Infinity) <= c.since;
 }

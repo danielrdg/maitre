@@ -22,6 +22,13 @@ export class RoomBlockedError extends HerdrError {
 }
 
 const SERVER_START_TIMEOUT_MS = 10_000;
+// Every call answers within this; a hung herdr is killed so its caller (the lounge's ticks) moves on.
+const CALL_TIMEOUT_MS = 30_000;
+
+function callTimeout(env: NodeJS.ProcessEnv): number {
+  const ms = Number(env.MAITRE_HERDR_TIMEOUT_MS);
+  return Number.isFinite(ms) && ms > 0 ? ms : CALL_TIMEOUT_MS;
+}
 const SERVER_POLL_MS = 100;
 
 export function herdrSession(env: NodeJS.ProcessEnv = process.env): string {
@@ -40,18 +47,24 @@ interface Raw {
 }
 
 // The arguments may hold the user's text: an error names the subcommand and the errno or signal only.
-function execFailed(args: string[], argv: string[], err: { code?: unknown; signal?: unknown }): HerdrError {
-  const why = err.code === 'ENOENT' ? 'not found on PATH' : String(err.code ?? err.signal ?? 'failed');
+function execFailed(args: string[], argv: string[], err: { code?: unknown; signal?: unknown; killed?: unknown }, timeoutMs?: number): HerdrError {
+  const why =
+    err.code === 'ENOENT'
+      ? 'not found on PATH'
+      : err.killed === true && timeoutMs !== undefined
+        ? `timed out after ${timeoutMs / 1000} s`
+        : String(err.code ?? err.signal ?? 'failed');
   return new HerdrError('exec_failed', `herdr ${args.slice(0, 2).join(' ')}: ${why}`, argv);
 }
 
-function rawHerdr(args: string[], env: NodeJS.ProcessEnv = process.env): Promise<Raw> {
+// timeoutMs 0: no limit, for a call that waits on purpose.
+function rawHerdr(args: string[], env: NodeJS.ProcessEnv = process.env, timeoutMs = callTimeout(env)): Promise<Raw> {
   const argv = ['--session', herdrSession(env), ...args];
   return new Promise((resolve, reject) => {
     try {
-      execFile('herdr', argv, { env, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+      execFile('herdr', argv, { env, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMs, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
         if (err && typeof err.code !== 'number') {
-          reject(execFailed(args, argv, err));
+          reject(execFailed(args, argv, err, timeoutMs > 0 ? timeoutMs : undefined));
           return;
         }
         resolve({ argv, code: err ? (err.code as number) : 0, stdout, stderr });
@@ -82,8 +95,8 @@ function toError(raw: Raw, json: any): HerdrError {
   return new HerdrError('exec_failed', raw.stderr.trim() || `herdr exited with ${raw.code}`, raw.argv);
 }
 
-async function herdr(args: string[], env: NodeJS.ProcessEnv = process.env): Promise<any> {
-  const raw = await rawHerdr(args, env);
+async function herdr(args: string[], env: NodeJS.ProcessEnv = process.env, timeoutMs?: number): Promise<any> {
+  const raw = await rawHerdr(args, env, timeoutMs);
   const json = parseJson(raw.stdout);
   if (raw.code !== 0 || json?.error) throw toError(raw, json);
   return json;
@@ -173,9 +186,11 @@ export async function runInPane(paneId: string, command: string): Promise<void> 
   await herdr(['pane', 'run', paneId, command]);
 }
 
-export async function readPane(paneId: string, lines?: number): Promise<string> {
+// ansi: keeps the escape codes, e.g. to tell Claude Code's dim placeholder from typed text.
+export async function readPane(paneId: string, lines?: number, opts: { ansi?: boolean } = {}): Promise<string> {
   const args = ['pane', 'read', paneId, '--source', 'visible'];
   if (lines !== undefined) args.push('--lines', String(lines));
+  if (opts.ansi === true) args.push('--format', 'ansi');
   const raw = await rawHerdr(args);
   if (raw.code !== 0) throw toError(raw, parseJson(raw.stdout));
   return raw.stdout;
@@ -196,7 +211,8 @@ export async function prompt(
   const args = ['agent', 'prompt', paneId, text];
   if (wait) args.push('--wait');
   if (opts.timeoutMs !== undefined) args.push('--timeout', String(opts.timeoutMs));
-  const json = await herdr(args);
+  // --wait answers when the turn ends: herdr's own --timeout, plus the usual margin, or no limit.
+  const json = await herdr(args, process.env, wait ? (opts.timeoutMs !== undefined ? opts.timeoutMs + callTimeout(process.env) : 0) : undefined);
   if (json?.result?.type !== 'agent_prompted') {
     throw new HerdrError('bad_response', 'agent prompt returned an unexpected response', args);
   }

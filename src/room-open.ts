@@ -1,7 +1,8 @@
 import { chmodSync, closeSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { HookLine } from './events.js';
+import { isClosing } from './closing.js';
+import { countsAsActivity, type HookLine } from './events.js';
 import {
   HerdrError,
   RoomBlockedError,
@@ -12,6 +13,7 @@ import {
   herdrSession,
   listWorkspaces,
   prompt,
+  readPane,
   runInPane,
   shellQuote,
   type AgentInfo,
@@ -19,7 +21,8 @@ import {
 import { maitreHome, roomDir, roomSlug } from './paths.js';
 import { readIndex, type Project } from './projects.js';
 import { BRIEF_HEADER, reduce, type RoomState } from './room-state.js';
-import { listRooms, readRoom, writeRoom, type RoomRecord } from './rooms.js';
+import { readFailed, readQueue } from './queue.js';
+import { couchHolds, listRooms, parked, patchRoom, readRoom, writeRoom, type RoomRecord } from './rooms.js';
 import { appendRoomLine } from './status.js';
 import { handleTrust } from './trust.js';
 import { createScratch, createWorktree } from './worktree.js';
@@ -70,11 +73,10 @@ export function liveness(info: AgentInfo): RoomLiveness {
   return info.agent !== undefined && info.status === 'unknown' ? 'unknown' : 'not running';
 }
 
+// Only `closedAt`, on the record as it is on disk: the caller's copy may predate a close (closedBy, its
+// minutes) or a reopen.
 export function markNotRunning(rec: RoomRecord, env: NodeJS.ProcessEnv = process.env): RoomRecord {
-  if (rec.closedAt !== undefined) return rec;
-  const out = { ...rec, closedAt: Date.now() };
-  writeRoom(out, env);
-  return out;
+  return patchRoom(rec, (r) => (r.closedAt !== undefined || r.closedBy !== undefined ? r : { ...r, closedAt: Date.now() }), env);
 }
 
 // Every tab with this label except `keep`: herdr may have restored copies under new ids.
@@ -124,15 +126,21 @@ export function describeOpen(r: OpenedRoom): string {
 }
 
 export async function openRoom(
-  opts: { name: string; project?: string; model: string; taskType: string; brief: string },
+  opts: { name: string; project?: string; model: string; taskType: string; brief: string; fromQueue?: number },
   env: NodeJS.ProcessEnv = process.env,
   timing: { trustTimeoutMs?: number; pollMs?: number } = {},
 ): Promise<OpenedRoom> {
   const room = roomSlug(opts.name);
+  // Only the doorman opens a queued name: its requests would otherwise reach no room.
+  if (opts.fromQueue === undefined) {
+    const queued = queuedPosition(room, env);
+    if (queued !== undefined) throw new Error(`${room} is queued (position ${queued}); it opens when a seat frees, or remove it with: maitre room close ${room}`);
+  }
   if (!MODEL.test(opts.model)) throw new Error(`invalid model ${JSON.stringify(opts.model)}`);
   if (Buffer.byteLength(opts.brief) > MAX_BRIEF_BYTES) throw new Error(`the brief is too long (at most ${MAX_BRIEF_BYTES} bytes)`);
   const project = opts.project === undefined ? undefined : findProject(opts.project, env);
 
+  if (isClosing(room, env)) throw new Error(`${room} is closing`);
   await ensureServer(env);
   const prev = readRoom(room, env);
   if (prev !== undefined) {
@@ -179,12 +187,23 @@ export async function openRoom(
       taskType: opts.taskType,
       herdr: { session: herdrSession(env), workspaceId: ws.workspaceId, paneId: ws.paneId },
       createdAt: Date.now(),
+      ...(opts.fromQueue !== undefined ? { fromQueue: opts.fromQueue } : {}),
     };
     writeRoom(rec, env);
     return { ...rec, warnings, needsTrust: trust === 'needs-you' };
   } catch (err) {
     if (ws !== undefined) await closeWorkspace(ws.workspaceId).catch(() => {});
     throw err;
+  }
+}
+
+// An unreadable queue holds no name that can be shown to be queued.
+function queuedPosition(room: string, env: NodeJS.ProcessEnv): number | undefined {
+  try {
+    const i = readQueue(env).findIndex((e) => e.room === room);
+    return i >= 0 ? i + 1 : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -285,6 +304,7 @@ export async function deliverToRoom(
   const slug = roomSlug(room);
   const rec = readRoom(slug, env);
   if (rec === undefined) throw noRoom(slug);
+  if (isClosing(slug, env)) throw new Error(`${slug} is closing`);
   if (text.trim() === '') throw new Error('nothing to send');
   if (Buffer.byteLength(text) > MAX_BRIEF_BYTES) throw new Error(`the message is too long (at most ${MAX_BRIEF_BYTES} bytes)`);
   await ensureServer(env);
@@ -316,18 +336,36 @@ export interface RoomRow {
   room: string;
   project?: string;
   model: string;
-  herdr: RoomLiveness;
+  // 'queued': waiting for a seat; 'failed': left the queue after failing to open.
+  herdr: RoomLiveness | 'queued' | 'failed';
   lounge: string;
 }
 
-function loungeState(room: string, env: NodeJS.ProcessEnv): string {
+// The newest LOUNGE_TAIL_BYTES of a room's hook events: all the doorman, janitor and CLI read of a room.
+export function readEventsTail(room: string, env: NodeJS.ProcessEnv): HookLine[] {
   const file = join(roomDir(room, env), 'events.jsonl');
   const size = fileSize(file);
   let text = readFrom(file, Math.max(0, size - LOUNGE_TAIL_BYTES));
   if (size > LOUNGE_TAIL_BYTES) text = text.slice(text.indexOf('\n') + 1);
+  return parseLines(text);
+}
+
+// The lounge's view of a room: its live state, a couch that still holds, a dead room's pending reasons.
+function loungeColumn(rec: RoomRecord, herdr: RoomLiveness, env: NodeJS.ProcessEnv): string {
+  if (rec.closedBy !== undefined) return 'closed';
   let state: RoomState | undefined;
-  for (const l of parseLines(text)) state = reduce(state, l);
-  return state?.state ?? '-';
+  let last: number | undefined;
+  for (const l of readEventsTail(rec.room, env)) {
+    state = reduce(state, l);
+    if (countsAsActivity(l)) last = l.ts;
+  }
+  const shown = state?.state ?? '-';
+  const couch = parked(rec.couch);
+  const up = herdr === 'idle' || herdr === 'unknown';
+  if (couch !== undefined && up && couchHolds(couch, shown, last)) return `couch: ${couch.reasons.join('; ')}`;
+  const pending = parked(rec.pending);
+  if (pending !== undefined && herdr === 'not running' && (last ?? -Infinity) <= pending.since) return `${shown}, pending: ${pending.reasons.join('; ')}`;
+  return shown;
 }
 
 export function isRecord(rec: RoomRecord): boolean {
@@ -339,22 +377,47 @@ export function isRecord(rec: RoomRecord): boolean {
   }
 }
 
-export async function listRoomRows(env: NodeJS.ProcessEnv = process.env): Promise<RoomRow[]> {
+// Open rooms, then the queue and the rooms that failed to leave it (`queue: false` lists open rooms only).
+// With `warn`, an unreadable queue file is reported there and the other rows are still listed.
+export async function listRoomRows(env: NodeJS.ProcessEnv = process.env, opts: { queue?: boolean; warn?: (w: string) => void } = {}): Promise<RoomRow[]> {
   const recs = listRooms(env).filter(isRecord);
-  if (recs.length === 0) return [];
-  await ensureServer(env);
-  const workspaces = await listWorkspaces();
   const rows: RoomRow[] = [];
-  for (const rec of recs) {
-    const herdr = await probeRoom(rec, workspaces, env);
-    if (herdr === 'not running') markNotRunning(rec, env);
-    rows.push({
-      room: rec.room,
-      ...(rec.project !== undefined ? { project: rec.project } : {}),
-      model: typeof rec.model === 'string' ? rec.model : '-',
-      herdr,
-      lounge: loungeState(rec.room, env),
-    });
+  if (recs.length > 0) {
+    await ensureServer(env);
+    const workspaces = await listWorkspaces();
+    for (const rec of recs) {
+      const herdr = await probeRoom(rec, workspaces, env);
+      if (herdr === 'not running') markNotRunning(rec, env);
+      rows.push({
+        room: rec.room,
+        ...(rec.project !== undefined ? { project: rec.project } : {}),
+        model: typeof rec.model === 'string' ? rec.model : '-',
+        herdr,
+        lounge: loungeColumn(rec, herdr, env),
+      });
+    }
+  }
+  if (opts.queue === false) return rows;
+  const waiting = (e: { room: string; route: { project?: unknown; model?: unknown } }) => ({
+    room: e.room,
+    ...(typeof e.route.project === 'string' ? { project: e.route.project } : {}),
+    model: typeof e.route.model === 'string' ? e.route.model : '-',
+  });
+  const read = <T>(f: () => T[]): T[] => {
+    if (opts.warn === undefined) return f();
+    try {
+      return f();
+    } catch (err) {
+      opts.warn((err as Error).message);
+      return [];
+    }
+  };
+  read(() => readQueue(env)).forEach((e, i) => {
+    const last = e.lastError !== undefined ? `, last try failed: ${e.lastError}` : '';
+    rows.push({ ...waiting(e), herdr: 'queued', lounge: `position ${i + 1}${last}` });
+  });
+  for (const e of read(() => readFailed(env))) {
+    rows.push({ ...waiting(e), herdr: 'failed', lounge: `gave up: ${e.lastError ?? 'unknown error'} (requests ${e.requestIds.join(', ')})` });
   }
   return rows;
 }
@@ -367,17 +430,123 @@ async function waitForExit(paneId: string, ms: number): Promise<void> {
   }
 }
 
-export async function closeRoom(
-  room: string,
+// Why a close stopped before touching the tab: the room is not idle (a janitor close never cuts a turn),
+// or its input box may hold text the user has not sent, which `/exit` would be typed after.
+export class CloseStopped extends Error {
+  constructor(
+    readonly room: string,
+    readonly kind: 'active' | 'input',
+    readonly reason: string,
+  ) {
+    const next = reason === UNSENT_TEXT ? 'send or clear it in its tab' : 'check the room in its tab (or exit it there)';
+    super(kind === 'active' ? `room ${room} became active` : `${room} was not closed: ${reason} — ${next}, then close it again`);
+    this.name = 'CloseStopped';
+  }
+}
+
+export const UNSENT_TEXT = 'unsent text in its input';
+const NO_INPUT_LINE = 'could not find its input line';
+const RULE = /^─{8,}$/;
+const PROMPT_MARK = '❯';
+// Claude Code's placeholder in an empty box, drawn dim. Only this, dim and alone, counts as empty:
+// anything else dim (a pasted-text chip, a suggestion) would be sent along with `/exit`.
+const PLACEHOLDER = /^Try "[^"\n]*"$/;
+
+type Cell = { c: string; dim: boolean };
+
+// The visible characters of one line of `pane read --format ansi`, each with whether it is dim (SGR 2).
+// Truecolor parameters (38;2;r;g;b) are skipped whole, so a 2 inside a colour is never read as dim.
+function cells(line: string): Cell[] {
+  const out: Cell[] = [];
+  let dim = false;
+  for (let i = 0; i < line.length; ) {
+    const c = line[i]!;
+    if (c === '\x1b') {
+      const next = line[i + 1];
+      if (next === '[') {
+        let j = i + 2;
+        while (j < line.length && !/[@-~]/.test(line[j]!)) j++;
+        if (line[j] === 'm') dim = sgrDim(line.slice(i + 2, j), dim);
+        i = j + 1;
+      } else if (next === ']') {
+        const bel = line.indexOf('\x07', i);
+        const st = line.indexOf('\x1b\\', i + 2);
+        if (bel < 0 && st < 0) i = line.length;
+        else if (st < 0 || (bel >= 0 && bel < st)) i = bel + 1;
+        else i = st + 2;
+      } else i += 2;
+      continue;
+    }
+    if (c !== '\r') out.push({ c, dim });
+    i++;
+  }
+  return out;
+}
+
+const plainOf = (cs: Cell[]): string => cs.map((x) => x.c).join('');
+
+function sgrDim(params: string, dim: boolean): boolean {
+  const ps = params === '' ? ['0'] : params.split(';');
+  for (let k = 0; k < ps.length; k++) {
+    const p = ps[k]!;
+    if (p.includes(':')) continue;
+    const n = p === '' ? 0 : Number(p);
+    if (n === 0 || n === 22) dim = false;
+    else if (n === 2) dim = true;
+    else if (n === 38 || n === 48 || n === 58) k += ps[k + 1] === '5' ? 2 : ps[k + 1] === '2' ? 4 : 0;
+  }
+  return dim;
+}
+
+// What Claude Code's input box (the bottom pair of rules, starting with ❯) holds, exactly: ''
+// only for nothing after the ❯ and its one separating space, or the dim placeholder alone. Spaces count.
+// undefined when no such box is on screen.
+export function inputText(screen: string): string | undefined {
+  const lines = screen.split('\n').map(cells);
+  const plain = lines.map(plainOf);
+  const rules = plain.flatMap((l, i) => (RULE.test(l.trim()) ? [i] : []));
+  // Only the bottom pair of rules: a rule typed inside a draft, or a mode without ❯ (bash `!`, memory `#`),
+  // must never make an earlier, empty-looking pair the input box.
+  if (rules.length < 2) return undefined;
+  const top = rules[rules.length - 2]!;
+  const bottom = rules[rules.length - 1]!;
+  if (bottom - top < 2 || !plain[top + 1]!.trimStart().startsWith(PROMPT_MARK)) return undefined;
+  const first = lines[top + 1]!;
+  let rest = first.slice(first.findIndex((x) => x.c === PROMPT_MARK) + 1);
+  if (rest[0]?.c === '\u00a0' || rest[0]?.c === ' ') rest = rest.slice(1);
+  for (const l of lines.slice(top + 2, bottom)) rest = [...rest, { c: '\n', dim: false }, ...l];
+  const text = plainOf(rest);
+  if (text === '' || (rest.every((x) => x.dim) && PLACEHOLDER.test(text))) return '';
+  return text;
+}
+
+// A reason not to /exit the room: what its input box holds, or that it could not be read (the safe side).
+export async function unsentInput(paneId: string): Promise<string | undefined> {
+  let screen: string;
+  try {
+    screen = await readPane(paneId, undefined, { ansi: true });
+  } catch (err) {
+    return `could not read its input: ${(err as Error).message.split('\n')[0]}`;
+  }
+  const typed = inputText(screen);
+  if (typed === undefined) return NO_INPUT_LINE;
+  return typed === '' ? undefined : UNSENT_TEXT;
+}
+
+// The herdr half of closing: /exit an idle room with an empty input, then close its tab and any restored
+// copies. A janitor close never cuts a turn: only an idle room (or one already gone) is closed by it.
+export async function closeRoomTab(
+  rec: RoomRecord,
   env: NodeJS.ProcessEnv = process.env,
-  opts: { exitTimeoutMs?: number } = {},
-): Promise<RoomRecord> {
-  const slug = roomSlug(room);
-  const rec = readRoom(slug, env);
-  if (rec === undefined) throw noRoom(slug);
+  opts: { exitTimeoutMs?: number; by?: 'janitor' | 'user' } = {},
+): Promise<void> {
   await ensureServer(env);
   const workspaces = await listWorkspaces();
-  if ((await probeRoom(rec, workspaces, env)) === 'idle') {
+  const live = await probeRoom(rec, workspaces, env);
+  if (opts.by === 'janitor' && live !== 'idle' && live !== 'not running') throw new CloseStopped(rec.room, 'active', 'room became active');
+  if (live === 'idle') {
+    const unsent = await unsentInput(rec.herdr!.paneId);
+    if (unsent !== undefined) throw new CloseStopped(rec.room, 'input', unsent);
     try {
       await prompt(rec.herdr!.paneId, '/exit', { wait: false });
       await waitForExit(rec.herdr!.paneId, opts.exitTimeoutMs ?? EXIT_MS);
@@ -386,7 +555,12 @@ export async function closeRoom(
     }
   }
   await closeRoomTabs(rec, workspaces);
-  const closed = { ...rec, closedAt: rec.closedAt ?? Date.now() };
-  writeRoom(closed, env);
-  return closed;
+}
+
+// For a close by hand, before its minutes are written: the same input check closeRoomTab makes again.
+export async function checkInput(rec: RoomRecord, env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  await ensureServer(env);
+  if ((await probeRoom(rec, undefined, env)) !== 'idle') return;
+  const unsent = await unsentInput(rec.herdr!.paneId);
+  if (unsent !== undefined) throw new CloseStopped(rec.room, 'input', unsent);
 }

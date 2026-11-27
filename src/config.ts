@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { maitreHome } from './paths.js';
 
 export interface ProjectOverride {
@@ -13,6 +13,17 @@ export interface MaitreConfig {
   roots: string[];
   projects: Record<string, ProjectOverride>;
   lang?: UiLang;
+  capacity?: number;
+  janitor?: { idleHours?: number; intervalMinutes?: number };
+  vault?: string;
+}
+
+export interface Settings {
+  capacity: number;
+  idleMs: number;
+  intervalMs: number;
+  vault: string;
+  warnings: string[];
 }
 
 export function writeJsonAtomic(path: string, value: unknown): void {
@@ -39,7 +50,35 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MaitreConfig {
   const raw = readJson(configPath(env)) as Partial<MaitreConfig> | undefined;
   const roots = Array.isArray(raw?.roots) ? raw.roots.filter((r): r is string => typeof r === 'string') : [];
   const projects = raw?.projects && typeof raw.projects === 'object' && !Array.isArray(raw.projects) ? raw.projects : {};
-  return raw?.lang === 'en' || raw?.lang === 'pt-BR' ? { roots, projects, lang: raw.lang } : { roots, projects };
+  const cfg: MaitreConfig = { roots, projects };
+  if (raw?.lang === 'en' || raw?.lang === 'pt-BR') cfg.lang = raw.lang;
+  // Kept as written, valid or not: settings() validates and warns, and a save must not drop what the user typed.
+  if (raw?.capacity !== undefined) cfg.capacity = raw.capacity;
+  if (raw?.janitor !== undefined) cfg.janitor = raw.janitor;
+  if (raw?.vault !== undefined) cfg.vault = raw.vault;
+  return cfg;
+}
+
+const HOUR_MS = 3_600_000;
+const MINUTE_MS = 60_000;
+
+export function settings(env: NodeJS.ProcessEnv = process.env): Settings {
+  const cfg = loadConfig(env);
+  const warnings: string[] = [];
+  const pick = <T>(name: string, v: unknown, ok: (x: unknown) => x is T, fallback: T, want: string): T => {
+    if (v === undefined) return fallback;
+    if (ok(v)) return v;
+    warnings.push(`config: ${name} must be ${want}; using ${String(fallback)}`);
+    return fallback;
+  };
+  const positive = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x) && x > 0;
+  const janitor = cfg.janitor !== null && typeof cfg.janitor === 'object' && !Array.isArray(cfg.janitor) ? cfg.janitor : {};
+  if (cfg.janitor !== undefined && janitor !== cfg.janitor) warnings.push('config: janitor must be an object; using the defaults');
+  const capacity = pick('capacity', cfg.capacity, (x): x is number => Number.isInteger(x) && (x as number) >= 1, 6, 'an integer of at least 1');
+  const idleHours = pick('janitor.idleHours', janitor.idleHours, positive, 4, 'a number above 0');
+  const intervalMinutes = pick('janitor.intervalMinutes', janitor.intervalMinutes, positive, 5, 'a number above 0');
+  const vault = pick('vault', cfg.vault, (x): x is string => typeof x === 'string' && isAbsolute(x), join(maitreHome(env), 'memory'), 'an absolute path');
+  return { capacity, idleMs: idleHours * HOUR_MS, intervalMs: intervalMinutes * MINUTE_MS, vault, warnings };
 }
 
 export function saveConfig(cfg: MaitreConfig, env: NodeJS.ProcessEnv = process.env): void {

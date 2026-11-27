@@ -1,5 +1,5 @@
 import { mulberry32 } from './rng.js';
-import { addAgent, moveTo, hasFreeSpot, DOOR } from './agents.js';
+import { addAgent, moveTo, hasFreeSpot, planPath, DOOR, SPOTS } from './agents.js';
 import { HAIR_STYLES, OUTFITS } from './sim.js';
 import { DingScheduler } from './timing.js';
 import { t } from './i18n.js';
@@ -7,10 +7,11 @@ import { t } from './i18n.js';
 // Live mode: rooms streamed by the daemon over SSE become lounge agents.
 
 const MODELS = ['haiku', 'sonnet', 'opus', 'fable'];
-const LIVE_STATES = ['coffee', 'work', 'smoke', 'blocked', 'ready', 'whisky', 'exit'];
+const LIVE_STATES = ['coffee', 'work', 'smoke', 'blocked', 'ready', 'whisky', 'exit', 'queue'];
 
 const colorKey = model => (MODELS.includes(model) ? model : 'queued');
-const liveState = state => (LIVE_STATES.includes(state) ? state : 'work');
+// A couched room is parked with a loose end: the demo's couch.
+const liveState = state => (state === 'couch' ? 'sleep' : LIVE_STATES.includes(state) ? state : 'work');
 
 const whereOf = (room, id) => {
   if (typeof room.project === 'string' && room.project) return typeof room.branch === 'string' && room.branch ? `${room.project} · ${room.branch}` : room.project;
@@ -23,6 +24,8 @@ export function roomToAgents(room) {
   const info = { task: room.task, steps: [...(room.steps || [])], where, since: room.since, live: true };
   if (typeof room.reply === 'string' && room.reply) info.reply = room.reply;
   if (room.block) info.block = structuredClone(room.block);
+  if (Number.isInteger(room.queuePosition)) info.queuePosition = room.queuePosition;
+  if (Array.isArray(room.couchReasons)) info.couchReasons = room.couchReasons.filter(r => typeof r === 'string');
   return {
     main: { id, label: id, model: colorKey(room.model), state: liveState(room.state), info },
     subagents: (room.subagents || []).map(s => {
@@ -97,6 +100,25 @@ export function createLiveCast(world) {
     return a;
   }
 
+  // The sidewalk line follows queuePosition: 1 stands at the front, by the rope (the largest x).
+  const frontFirst = SPOTS.queue.map((_, i) => i).sort((i, j) => SPOTS.queue[j][0] - SPOTS.queue[i][0]);
+  function lineUp(seat) {
+    const line = [...mains.values()].filter(a => a.state === 'queue')
+      .sort((p, q) => (p.info.queuePosition ?? Infinity) - (q.info.queuePosition ?? Infinity));
+    line.forEach((a, k) => {
+      // Past the last spot, a room shares one the usual way.
+      if (k >= frontFirst.length) { if (!a.overflow) moveTo(agents, a, 'queue'); return; }
+      const i = frontFirst[k];
+      if (a.spot === i && !a.overflow) return;
+      const to = SPOTS.queue[i];
+      Object.assign(a, { spot: i, overflow: false, tier: 0, tx: to[0] });
+      // The first snapshot seats everyone in place, as for the other states.
+      if (seat && !a.walking) { a.x = to[0]; a.y = to[1]; a.path = []; return; }
+      a.path = planPath([a.x, a.y], to, 'queue').map(p => [...p]);
+      a.walking = true;
+    });
+  }
+
   function apply(room, walkIn) {
     const { main, subagents } = roomToAgents(room);
     if (main.state === 'exit') return drop(main.id);
@@ -118,9 +140,11 @@ export function createLiveCast(world) {
       const walkIn = seated; seated = true;
       const open = rooms.filter(r => r.state !== 'exit');
       const { remove } = diffRooms([...mains.keys()], open.map(r => String(r.room)));
-      return [...remove.flatMap(drop), ...open.flatMap(r => apply(r, walkIn))];
+      const touched = [...remove.flatMap(drop), ...open.flatMap(r => apply(r, walkIn))];
+      lineUp(!walkIn);
+      return touched;
     },
-    room: room => apply(room, true),
+    room: room => { const touched = apply(room, true); lineUp(false); return touched; },
     ids: () => [...mains.keys()],
   };
 }

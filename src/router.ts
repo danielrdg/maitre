@@ -7,8 +7,12 @@ import { readJson, writeJsonAtomic } from './config.js';
 import { cleanEnv } from './env.js';
 import { maitreHome, roomDir, roomSlug } from './paths.js';
 import { readIndex, type Project } from './projects.js';
-import { BRIEF_HEADER, deliverToRoom, describeDelivery, describeOpen, listRoomRows, openRoom } from './room-open.js';
-import { listRooms } from './rooms.js';
+import { BRIEF_HEADER, deliverToRoom, describeDelivery, describeOpen, isRecord, listRoomRows, openRoom, probeRoom } from './room-open.js';
+import { ensureServer } from './herdr.js';
+import { admit, appendToQueued, queuedRooms, readQueue, type QueueEntry } from './doorman.js';
+import { liveLounge } from './lounge-file.js';
+import { listRooms, readRoom } from './rooms.js';
+import { isRequestId, readRequests } from './requests.js';
 
 export type TaskType = 'simple' | 'explore' | 'change' | 'build' | 'decide';
 export type RouteModel = 'haiku' | 'sonnet' | 'opus';
@@ -231,19 +235,45 @@ function taskLine(room: string, env: NodeJS.ProcessEnv, fallback: string): strin
   }
 }
 
+function queuedTask(e: QueueEntry, env: NodeJS.ProcessEnv): string {
+  try {
+    const line = readRequests(e.requestIds, env).split('\n').find((l) => l.trim() !== '');
+    return line === undefined ? '-' : oneLine(line, MAX_TASK_CHARS);
+  } catch {
+    return '-';
+  }
+}
+
+// Queued rooms take requests too: a follow-up joins the room's queue entry.
+function queuedFor(env: NodeJS.ProcessEnv): { rooms: RouterRoom[]; warning?: string } {
+  try {
+    const rooms = readQueue(env).map((e) => ({
+      name: e.room,
+      ...(typeof e.route.project === 'string' ? { project: e.route.project } : {}),
+      task: queuedTask(e, env),
+      state: 'queued',
+    }));
+    return { rooms };
+  } catch (err) {
+    return { rooms: [], warning: `could not read the queue (${oneLine((err as Error).message, 100)})` };
+  }
+}
+
 // Without herdr there is no way to tell which rooms are alive, so none is offered.
 async function openRoomsFor(env: NodeJS.ProcessEnv): Promise<{ rooms: RouterRoom[]; warning?: string }> {
+  const queued = queuedFor(env);
   let rows;
   try {
-    rows = await listRoomRows(env);
+    rows = await listRoomRows(env, { queue: false });
   } catch (err) {
     const why = oneLine((err as Error).message, 100);
-    return { rooms: [], warning: `could not check open rooms (${why}) — routed as if none were open` };
+    const warning = [`could not check open rooms (${why}) — routed as if none were open`, queued.warning].filter((w) => w !== undefined).join('; ');
+    return { rooms: queued.rooms, warning };
   }
   const rooms = rows
     .filter((r) => r.herdr !== 'not running')
     .map((r) => ({ name: r.room, ...(r.project !== undefined ? { project: r.project } : {}), task: taskLine(r.room, env, '-'), state: r.herdr }));
-  return { rooms };
+  return { rooms: [...rooms, ...queued.rooms], ...(queued.warning !== undefined ? { warning: queued.warning } : {}) };
 }
 
 export async function route(request: string, env: NodeJS.ProcessEnv = process.env): Promise<Route> {
@@ -256,24 +286,13 @@ export async function routeDetailed(request: string, env: NodeJS.ProcessEnv = pr
   const ms = Number(env.MAITRE_ROUTER_TIMEOUT_MS);
   const raw = await callClaude(buildRouterPrompt(request, projects, rooms), env, Number.isFinite(ms) && ms > 0 ? ms : TIMEOUT_MS);
   const taken = listRooms(env).flatMap((r) => (typeof r.room === 'string' ? [{ name: r.room, ...(r.project !== undefined ? { project: r.project } : {}) }] : []));
+  taken.push(...rooms.filter((r) => r.state === 'queued').map((r) => ({ name: r.name, ...(r.project !== undefined ? { project: r.project } : {}) })));
   return { route: parseRoute(raw, projects, rooms.map((r) => r.name), taken), ...(warning !== undefined ? { warning } : {}) };
 }
 
-const requestsDir = (env: NodeJS.ProcessEnv) => join(maitreHome(env), 'reception', 'requests');
 const routeFile = (id: string, env: NodeJS.ProcessEnv) => join(maitreHome(env), 'reception', 'routes', `${id}.json`);
 
-export const isRequestId = (s: string): boolean => /^[0-9]{1,12}$/.test(s);
-
-export function readRequests(ids: string[], env: NodeJS.ProcessEnv = process.env): string {
-  const parts = ids.map((id) => {
-    if (!isRequestId(id)) throw new Error(`invalid request id ${JSON.stringify(id)}`);
-    const file = join(requestsDir(env), `${id}.md`);
-    if (!existsSync(file)) throw new Error(`request ${id} not found`);
-    return readFileSync(file, 'utf8');
-  });
-  if (parts.length === 1) return parts[0];
-  return parts.map((p, i) => (i < parts.length - 1 && !p.endsWith('\n') ? `${p}\n` : p)).join('---\n');
-}
+export { isRequestId, readRequests };
 
 export async function routeRequests(ids: string[], env: NodeJS.ProcessEnv = process.env): Promise<{ id: string; route: Route; warning?: string }> {
   const text = readRequests(ids, env);
@@ -323,21 +342,56 @@ export async function dispatchRoute(id: string, env: NodeJS.ProcessEnv = process
   return (await dispatchRouteDetailed(id, env, opts)).lines;
 }
 
+export interface Dispatched {
+  room: string;
+  lines: string[];
+  needsYou: boolean;
+  queued?: true;
+}
+
+export const QUEUE_HINT = 'the queue moves only while the lounge runs: open it with maitre open, or start the service';
+
+async function queuedReply(room: string, line: string, env: NodeJS.ProcessEnv): Promise<Dispatched> {
+  const hint = (await liveLounge(env)) === undefined ? [QUEUE_HINT] : [];
+  return { room, lines: [line, ...hint], needsYou: false, queued: true };
+}
+
+// A name both queued and open: the open room takes the follow-up. herdr is asked only for a queued name.
+async function runningRoom(room: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+  if (position(room, env) === undefined) return false;
+  const rec = readRoom(room, env);
+  if (typeof rec !== 'object' || rec === null || !isRecord(rec) || rec.closedBy !== undefined) return false;
+  await ensureServer(env);
+  return (await probeRoom(rec, undefined, env)) !== 'not running';
+}
+
+const position = (room: string, env: NodeJS.ProcessEnv) => queuedRooms(env).find((q) => q.room === room)?.position;
+
 // needsYou: the room waits on the user (folder-trust question) or the dispatch produced a warning.
-export async function dispatchRouteDetailed(
-  id: string,
-  env: NodeJS.ProcessEnv = process.env,
-  opts: { confirmMs?: number } = {},
-): Promise<{ room: string; lines: string[]; needsYou: boolean }> {
+// A new room past capacity joins the queue; a follow-up to a queued room joins its entry.
+export async function dispatchRouteDetailed(id: string, env: NodeJS.ProcessEnv = process.env, opts: { confirmMs?: number } = {}): Promise<Dispatched> {
   if (!isRequestId(id)) throw new Error(`invalid request id ${JSON.stringify(id)}`);
   const { route: r, requestIds } = loadStored(id, env);
   if (r.question !== undefined) throw new Error(`route ${id} needs an answer first: ${r.question}`);
   const text = readRequests(requestIds, env);
   if (r.room.kind === 'existing') {
     const room = roomSlug(r.room.name);
+    if (!(await runningRoom(room, env)) && appendToQueued(room, requestIds, env)) {
+      const n = position(room, env);
+      return queuedReply(room, `queued: ${room} waits for a seat${n !== undefined ? ` (position ${n})` : ''}`, env);
+    }
     return { room, lines: [describeDelivery(room, await deliverToRoom(room, text, env, opts))], needsYou: false };
   }
-  const rec = await openRoom({ name: r.room.name, ...(r.project !== null ? { project: r.project } : {}), model: r.model, taskType: r.taskType, brief: text }, env);
+  const seat = await admit(r, requestIds, env);
+  const room = roomSlug(r.room.name);
+  if (seat.kind === 'queued') return queuedReply(room, `queued: ${room} waits for a seat (position ${seat.position})`, env);
+  if (seat.kind === 'running') return { room, lines: [describeDelivery(room, await deliverToRoom(room, text, env, opts))], needsYou: false };
+  let rec;
+  try {
+    rec = await openRoom({ name: r.room.name, ...(r.project !== null ? { project: r.project } : {}), model: r.model, taskType: r.taskType, brief: text }, env);
+  } finally {
+    seat.release();
+  }
   const warnings = rec.warnings.map((w) => `warning: ${w}`);
   return { room: rec.room, lines: [describeOpen(rec), ...warnings], needsYou: rec.needsTrust || warnings.length > 0 };
 }

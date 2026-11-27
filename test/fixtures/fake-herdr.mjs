@@ -5,7 +5,7 @@
 // `server` records its env to $FAKE_HERDR_LOG.serverenv and flips status to running (state file $FAKE_HERDR_LOG.running).
 // With $FAKE_HERDR_STATE set, workspaces, panes and agents live in that JSON file instead (see stateful()).
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -19,6 +19,10 @@ const key = rest.slice(0, 2).join('_').replace(/-/g, '_');
 const ws = { active_tab_id: 'w1:t1', agent_status: 'unknown', focused: true, label: 'probe', number: 1, pane_count: 1, tab_count: 1, workspace_id: 'w1' };
 const pane = { agent_status: 'unknown', cwd: '/tmp', focused: true, pane_id: 'w1:p1', tab_id: 'w1:t1', terminal_id: 'term_1', workspace_id: 'w1' };
 const agent = { agent: 'claude', agent_status: 'idle', pane_id: 'w1:p1', workspace_id: 'w1', tab_id: 'w1:t1', terminal_id: 'term_1', focused: true, revision: 0 };
+// Claude Code's input box with nothing typed, as `pane read` shows it: ❯ and a no-break space between two rules.
+const RULE = '─'.repeat(40);
+const EMPTY_INPUT = `${RULE}\n❯\u00a0\n${RULE}\n  ⏵⏵ auto mode on (shift+tab to cycle)\n`;
+
 const ok = (id, result) => JSON.stringify({ id: `cli:${id}`, result });
 
 const canned = {
@@ -34,6 +38,9 @@ const canned = {
   pane_read: () => '$ echo hi\nhi\n$\n',
 };
 
+// FAKE_HERDR_HANG_<cmd>_<sub>=1: that subcommand never answers.
+if (process.env[`FAKE_HERDR_HANG_${key}`] === '1') await new Promise(() => setInterval(() => {}, 1 << 30));
+
 // A bare `herdr --session <s>` is the attaching client.
 if (rest.length === 0) process.exit(Number(process.env.FAKE_HERDR_ATTACH_EXIT ?? 0));
 
@@ -47,6 +54,12 @@ if (rest[0] === 'server') {
 
 if (process.env.FAKE_HERDR_STATE) {
   const r = stateful(process.env.FAKE_HERDR_STATE);
+  // FAKE_HERDR_THEN_<key>='["from","to"]': once that subcommand ran, renames from to to (once: from is gone).
+  const then = process.env[`FAKE_HERDR_THEN_${key}`];
+  if (then) {
+    const [from, to] = JSON.parse(then);
+    if (existsSync(from)) renameSync(from, to);
+  }
   // herdr 0.8.2 prints its error JSON on stderr and exits 1.
   if (r.code === 0) process.stdout.write(r.out);
   else process.stderr.write(r.out);
@@ -74,8 +87,9 @@ process.exit(code);
 
 // State: { next, workspaces: { <id>: { label, cwd, env } }, panes: { <id>: { ws, agent, trust?, screen?, ran? } } }.
 // agent is 'shell' (bare shell, no agent) or an agent_status. FAKE_HERDR_FAIL_<key>=<code> fails that
-// subcommand without touching the state. FAKE_HERDR_ON_RUN sets what `pane run` starts: 'idle' (default),
+// subcommand without touching the state; any call fails while the file $FAKE_HERDR_FAIL_WHILE exists. FAKE_HERDR_ON_RUN sets what `pane run` starts: 'idle' (default),
 // 'trust' (blocked on the folder-trust dialog; FAKE_HERDR_TRUST_STICKY=1 ignores the keys) or 'shell' (nothing).
+// `pane read` shows a pane's `screen` when set, else the trust dialog, a shell prompt or an empty input box.
 // A started Claude (on run, or once the trust keys are accepted) fires its SessionStart hook: the room
 // hook for a room tab, the reception hook for the reception, unless FAKE_HERDR_SESSION_START=0.
 // A `lounge` command instead leaves a bare shell showing the lounge's URL line ($FAKE_HERDR_LOUNGE_URL,
@@ -102,6 +116,8 @@ function stateful(file) {
   const fail = (c, message = c) => ({ out: JSON.stringify({ error: { code: c, message } }), code: 1 });
   const injected = process.env[`FAKE_HERDR_FAIL_${key}`];
   if (injected) return fail(injected, `fake-herdr: injected ${injected}`);
+  const watched = process.env.FAKE_HERDR_FAIL_WHILE;
+  if (watched && existsSync(watched)) return fail('called_while_locked', `fake-herdr: called while ${watched} exists`);
   const wsJson = (id) => ({ ...ws, workspace_id: id, label: st.workspaces[id].label });
   const paneJson = (id) => ({ ...pane, pane_id: id, workspace_id: st.panes[id].ws, tab_id: `${st.panes[id].ws}:t1` });
   const agentJson = (id) => ({ ...agent, pane_id: id, workspace_id: st.panes[id].ws, agent_status: st.panes[id].agent });
@@ -178,7 +194,7 @@ function stateful(file) {
       if (!p) return fail('pane_not_found');
       const screen = p.screen !== undefined ? p.screen : p.trust
         ? ' Accessing workspace:\n\n /x\n\n Is this a project you created or one you trust?\n\n ❯ 1. No, exit\n   2. Yes, I trust this folder\n'
-        : p.agent === 'shell' ? '$ \n' : ' > \n';
+        : p.agent === 'shell' ? '$ \n' : EMPTY_INPUT;
       return { out: screen, code: 0 };
     }
     case 'agent_get': {

@@ -13,7 +13,7 @@ import { storeRequest } from './requests.js';
 
 export type ReceptionReply =
   | { kind: 'question'; id: string; text: string }
-  | { kind: 'dispatched'; id: string; room: string; lines: string[]; needsYou: boolean }
+  | { kind: 'dispatched'; id: string; room: string; lines: string[]; needsYou: boolean; queued?: true }
   | { kind: 'error'; message: string };
 
 export interface ReceptionDeps {
@@ -127,7 +127,7 @@ export async function handleReception(body: unknown, env: NodeJS.ProcessEnv, dep
     const { route: found } = await route([...before, id], env);
     if (found.question !== undefined) return { status: 200, json: { kind: 'question', id, text: found.question } };
     const d = await dispatch(id, env, confirmOpts(env));
-    return { status: 200, json: { kind: 'dispatched', id, room: d.room, lines: d.lines, needsYou: d.needsYou } };
+    return { status: 200, json: { kind: 'dispatched', id, room: d.room, lines: d.lines, needsYou: d.needsYou, ...(d.queued === true ? { queued: true as const } : {}) } };
   } catch (err) {
     return { status: 500, json: { kind: 'error', message: (err as Error).message } };
   }

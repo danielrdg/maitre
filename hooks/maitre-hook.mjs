@@ -16,6 +16,7 @@ const CAP = {
   answers: { bytes: 300 },
   tool: { chars: 96, bytes: 96 },
   id: { chars: 48, bytes: 48 },
+  path: { chars: 1024, bytes: 4096 },
 };
 const MAX_DEPTH = 8;
 const ELLIPSIS = '…';
@@ -129,6 +130,7 @@ function buildLine(p, room) {
     last_message: str(p.last_assistant_message, CAP.last_message),
     background_running: tasks && tasks.filter((t) => isObject(t) && t.type === 'subagent' && t.status === 'running').length,
     model: str(p.model, CAP.id),
+    transcript: str(p.transcript_path, CAP.path),
     prompt: prompt === undefined ? undefined : clip(prompt, CAP.prompt),
     synthetic: prompt === undefined ? undefined : SYNTHETIC.test(prompt.trimStart()),
   };

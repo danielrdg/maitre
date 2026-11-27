@@ -50,7 +50,9 @@ export function receptionSettings(opts: { requestHook: string; guardHook: string
     PreToolUse: [{ hooks: [{ type: 'command', command: `${node} ${quote(resolve(opts.guardHook))} || exit 2` }] }],
     SessionStart: sessionStart,
   };
-  return { permissions: { allow: ['Bash(maitre:*)'] }, hooks };
+  // `maitre dispatch` to a parked room wakes it and delivers: up to about two minutes under load, past the
+  // Bash tool's default 120 s, which would cut the reply (and what it says about the room) short.
+  return { permissions: { allow: ['Bash(maitre:*)'] }, env: { BASH_DEFAULT_TIMEOUT_MS: '300000' }, hooks };
 }
 
 export function writeReceptionSettings(env: NodeJS.ProcessEnv = process.env, userHome: string = homedir()): string {

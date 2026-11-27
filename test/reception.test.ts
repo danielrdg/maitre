@@ -11,6 +11,10 @@ import { HELP, parseArgs } from '../src/cli.js';
 import { shellQuote } from '../src/herdr.js';
 import { receptionSettings, writeReceptionSettings } from '../src/hook-settings.js';
 import { buildReceptionCommand, startMaitre } from '../src/reception.js';
+import { roomDir } from '../src/paths.js';
+import { reserve } from '../src/queue.js';
+import { WORST_DELIVERY_MS } from '../src/room-open.js';
+import { WORST_WAKE_MS } from '../src/wake.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
 import { trustScope } from '../src/trust.js';
 import { fakeBin } from './fake-bin.js';
@@ -41,12 +45,18 @@ test('receptionSettings: Bash(maitre:*), the request hook (also the started mark
   const request = { type: 'command', command: '"/opt/node" "/opt/m/hooks/reception-request.mjs"' };
   assert.deepEqual(s, {
     permissions: { allow: ['Bash(maitre:*)'] },
+    env: { BASH_DEFAULT_TIMEOUT_MS: '300000' },
     hooks: {
       UserPromptSubmit: [{ hooks: [request] }],
       PreToolUse: [{ hooks: [{ type: 'command', command: '"/opt/node" "/opt/m/hooks/reception-guard.mjs" || exit 2' }] }],
       SessionStart: [{ hooks: [request] }],
     },
   });
+});
+
+test("the terminal reception's Bash timeout covers a dispatch's worst case (wake and delivery) with a margin", () => {
+  const s = receptionSettings({ requestHook: '/r.mjs', guardHook: '/g.mjs', nodePath: '/n' }) as { env: Record<string, string> };
+  assert.ok(Number(s.env.BASH_DEFAULT_TIMEOUT_MS) >= WORST_WAKE_MS + WORST_DELIVERY_MS + 60_000);
 });
 
 test('receptionSettings re-adds herdr\'s own state hook the way herdr registers it', () => {
@@ -191,6 +201,7 @@ test('PROMPT.md is short, English, and every maitre command it names exists in H
 
 test('PROMPT.md replies follow what the commands print: queued, closed with minutes, removed from the queue', () => {
   assert.match(PROMPT, /"queued: nf-bug waits for a seat \(position 2\)"/);
+  assert.match(PROMPT, /"not confirmed: the request may be typed in nf-bug's input — check its tab and press Enter there"/);
   assert.match(PROMPT, /`maitre room close <slug>` — write a room's minutes/);
   assert.match(PROMPT, /"removed nf-bug from the queue"/);
   assert.doesNotMatch(PROMPT, /reply "closed nf-bug"\./);
@@ -344,6 +355,38 @@ test('maitre: stale room tabs are closed and marked not running; live rooms are 
   assert.equal(readRoom('live')!.closedAt, undefined);
   assert.equal(typeof readRoom('gone')!.closedAt, 'number');
   assert.equal(readRoom('closed')!.closedAt, 5);
+});
+
+test('maitre: a room being woken (its opening reservation held) keeps its new tab while the record still names the old one', async () => {
+  writeRoom({
+    room: 'waking', kind: 'scratch', dir: join(sb.home, 'scratch', 'waking'), model: 'sonnet', taskType: 'simple',
+    herdr: { session: 'maitre-test', workspaceId: 'w2', paneId: 'w2:p1' }, createdAt: 1, closedAt: 5,
+  });
+  sb.setState({ next: 4, workspaces: { w3: { label: 'scratch / waking' } }, panes: { 'w3:p1': { ws: 'w3', agent: 'idle' } } });
+  const release = await reserve('waking');
+  try {
+    const r = await startMaitre(process.env, { ...FAST, open: () => {} });
+    assert.deepEqual(r.closedRooms, []);
+    assert.equal(sb.state().workspaces.w3?.label, 'scratch / waking', 'the resume in it goes on');
+    assert.equal(readRoom('waking')!.closedAt, 5);
+  } finally {
+    release();
+  }
+});
+
+test("maitre: a room left still starting in its tab (its wake's starting note is the newest event) keeps its tab", async () => {
+  writeRoom({
+    room: 'slow', kind: 'scratch', dir: join(sb.home, 'scratch', 'slow'), model: 'sonnet', taskType: 'simple',
+    herdr: { session: 'maitre-test', workspaceId: 'w3', paneId: 'w3:p1' }, createdAt: 1, resumable: true,
+  });
+  mkdirSync(roomDir('slow'), { recursive: true });
+  const line = (l: Record<string, unknown>) => JSON.stringify({ v: 1, ts: Date.now(), room: 'slow', session: 's1', ...l });
+  writeFileSync(join(roomDir('slow'), 'events.jsonl'), [line({ event: 'SessionStart' }), line({ event: 'SessionEnd' }), line({ event: 'MaitreStatus', session: '', status: 'blocked', text: 'Room is still starting — check its tab', options: [], starting: true, resumes: 's1' })].join('\n') + '\n');
+  sb.setState({ next: 4, workspaces: { w3: { label: 'scratch / slow' } }, panes: { 'w3:p1': { ws: 'w3', agent: 'shell' } } });
+  const r = await startMaitre(process.env, { ...FAST, open: () => {} });
+  assert.deepEqual(r.closedRooms, []);
+  assert.equal(sb.state().workspaces.w3?.label, 'scratch / slow');
+  assert.equal(readRoom('slow')!.closedAt, undefined);
 });
 
 test('maitre: the reception trust dialog is answered on screen', async () => {

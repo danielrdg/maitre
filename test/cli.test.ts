@@ -68,6 +68,9 @@ test('parseArgs parses room run with extra claude args after --', () => {
     extra: ['--model', 'haiku', '--port', '1', '--help'],
   });
   assert.deepEqual(parseArgs(['room', 'run', 'x']), { cmd: 'room-run', room: 'x', extra: [] });
+  assert.deepEqual(parseArgs(['room', 'run', 'x', '--run', 'r-1', '--brief-file', '/b.md', '--', '--model', 'm']), { cmd: 'room-run', room: 'x', extra: ['--model', 'm'], briefFile: '/b.md', run: 'r-1' });
+  assert.equal(parseArgs(['room', 'run', 'x', '--run', 'bad id']).cmd, 'usage');
+  assert.equal(parseArgs(['room', 'run', 'x', '--run']).cmd, 'usage');
   assert.deepEqual(parseArgs(['room', 'run', 'x', '--']), { cmd: 'room-run', room: 'x', extra: [] });
   assert.deepEqual(parseArgs(['room', 'run', 'x', '--brief-file', '/b.md', '--', '--model', 'm']), {
     cmd: 'room-run',
@@ -557,4 +560,12 @@ test('maitre lounge --demo opens its window with a ticket too', async () => {
     fb.cleanup();
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test('parseArgs parses room wake; HELP lists it; room run passes --resume through to claude', () => {
+  assert.deepEqual(parseArgs(['room', 'wake', 'Nf Bug']), { cmd: 'room-wake', room: 'Nf Bug' });
+  for (const argv of [['room', 'wake'], ['room', 'wake', 'x', 'y'], ['room', 'wake', '-x']]) assert.equal(parseArgs(argv).cmd, 'usage', argv.join(' '));
+  assert.match(HELP, /^ {2}maitre room wake <room>$/m);
+  assert.match(HELP, /^ {2}room wake {5}\S/m);
+  assert.deepEqual(parseArgs(['room', 'run', 'x', '--', '--model', 'sonnet', '--resume', 's1']), { cmd: 'room-run', room: 'x', extra: ['--model', 'sonnet', '--resume', 's1'] });
 });

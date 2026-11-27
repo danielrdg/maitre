@@ -3,6 +3,7 @@ import { settings } from './config.js';
 import { ensureServer, listWorkspaces } from './herdr.js';
 import { logDecision } from './janitor.js';
 import { roomSlug } from './paths.js';
+import { roomPr } from './pr-state.js';
 import {
   dropUnderLock,
   liveReservations,
@@ -19,6 +20,7 @@ import {
 import { readRequests } from './requests.js';
 import { isRecord, openRoom, probeRoom } from './room-open.js';
 import { listRooms, readRoom, type RoomRecord } from './rooms.js';
+import { withMinutes } from './minutes.js';
 import type { Route } from './router.js';
 
 export { appendToQueued, queuedRooms, readFailed, readQueue, withQueueLock, type QueueEntry } from './queue.js';
@@ -51,13 +53,13 @@ async function probeActive(env: NodeJS.ProcessEnv): Promise<Probe> {
   const names = new Set<string>();
   const candidates = listRooms(env)
     .filter(isRecord)
-    .map((rec) => ({ rec, activity: roomActivity(rec.room, env) }))
-    .filter(({ rec, activity }) => isActive(rec, activity, true));
+    .map((rec) => ({ rec, activity: roomActivity(rec.room, env), pr: rec.kind === 'code' ? roomPr(rec, env) : undefined }))
+    .filter(({ rec, activity, pr }) => isActive(rec, activity, true, pr));
   if (candidates.length > 0) {
     await ensureServer(env);
     const workspaces = await listWorkspaces();
-    for (const { rec, activity } of candidates) {
-      if (isActive(rec, activity, (await probeRoom(rec, workspaces, env)) !== 'not running')) names.add(rec.room);
+    for (const { rec, activity, pr } of candidates) {
+      if (isActive(rec, activity, (await probeRoom(rec, workspaces, env)) !== 'not running', pr)) names.add(rec.room);
     }
   }
   return { names, at };
@@ -132,7 +134,7 @@ export async function openQueued(entry: QueueEntry, env: NodeJS.ProcessEnv = pro
       ...(typeof r.project === 'string' ? { project: r.project } : {}),
       model: r.model,
       taskType: r.taskType,
-      brief: readRequests(entry.requestIds, env),
+      brief: withMinutes(readRequests(entry.requestIds, env), r.continues, r.project, env),
       fromQueue: entry.queuedAt,
     },
     env,

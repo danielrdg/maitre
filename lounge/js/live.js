@@ -7,11 +7,18 @@ import { t } from './i18n.js';
 // Live mode: rooms streamed by the daemon over SSE become lounge agents.
 
 const MODELS = ['haiku', 'sonnet', 'opus', 'fable'];
-const LIVE_STATES = ['coffee', 'work', 'smoke', 'blocked', 'ready', 'whisky', 'exit', 'queue'];
+const LIVE_STATES = ['coffee', 'work', 'smoke', 'blocked', 'ready', 'whisky', 'exit', 'queue', 'dance'];
+const NOTICE_KINDS = ['ci', 'review', 'merged', 'closed'];
+export const PR_LINK = /^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/pull\/\d+$/;
 
 const colorKey = model => (MODELS.includes(model) ? model : 'queued');
-// A couched room is parked with a loose end: the demo's couch.
-const liveState = state => (state === 'couch' ? 'sleep' : LIVE_STATES.includes(state) ? state : 'work');
+// A couched room has a loose end, a parked one gave up its Claude: both sit on the demo's couch.
+const liveState = state => (state === 'couch' || state === 'parked' ? 'sleep' : LIVE_STATES.includes(state) ? state : 'work');
+
+function noticeOf(n) {
+  if (!n || typeof n !== 'object' || !NOTICE_KINDS.includes(n.kind) || typeof n.text !== 'string') return undefined;
+  return { kind: n.kind, text: n.text, ...(typeof n.url === 'string' && PR_LINK.test(n.url) ? { url: n.url } : {}) };
+}
 
 const whereOf = (room, id) => {
   if (typeof room.project === 'string' && room.project) return typeof room.branch === 'string' && room.branch ? `${room.project} · ${room.branch}` : room.project;
@@ -26,6 +33,9 @@ export function roomToAgents(room) {
   if (room.block) info.block = structuredClone(room.block);
   if (Number.isInteger(room.queuePosition)) info.queuePosition = room.queuePosition;
   if (Array.isArray(room.couchReasons)) info.couchReasons = room.couchReasons.filter(r => typeof r === 'string');
+  if (room.state === 'parked' || room.parked === true) info.parked = true;
+  const notice = noticeOf(room.notice);
+  if (notice) info.notice = notice;
   return {
     main: { id, label: id, model: colorKey(room.model), state: liveState(room.state), info },
     subagents: (room.subagents || []).map(s => {

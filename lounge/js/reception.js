@@ -86,6 +86,20 @@ export async function openTerminal(room, fetchImpl = fetch, lang = 'en') {
   return { ok: false, message };
 }
 
+// Resolves to { ok: true, lines } with the wake's own lines, or { ok: false, message }.
+export async function wakeRoom(room, fetchImpl = fetch, lang = 'en') {
+  let res;
+  try {
+    res = await post(`api/rooms/${encodeURIComponent(room)}/wake`, {}, fetchImpl);
+  } catch {
+    return { ok: false, message: t('reception.offline', lang) };
+  }
+  const b = res.body;
+  if (res.ok && b?.kind === 'woken' && Array.isArray(b.lines) && b.lines.every(isStr)) return { ok: true, lines: [...b.lines] };
+  const message = !res.ok && isStr(b?.message) ? b.message : t('reception.badReply', lang, { status: res.status });
+  return { ok: false, message };
+}
+
 // Chrome ignores size and position flags when the profile already runs, so the page places itself.
 export function promptPlacement(screen) {
   const left = screen.availLeft ?? 0, top = screen.availTop ?? 0;

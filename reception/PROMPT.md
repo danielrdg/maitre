@@ -29,6 +29,7 @@ Every user message reaches you with a note such as "This message is request 12."
    - "opened nf-bug in backend on opus — answer the folder-trust question in its tab"
    - "sent to nf-bug — it's busy and will see it during this turn"
    - "queued: nf-bug waits for a seat (position 2)"
+   - "not confirmed: the request may be typed in nf-bug's input — check its tab and press Enter there"
 
 Do not add commentary, summaries or advice. If a command fails, say what failed in one line, using its error message, and stop. Do not retry with other arguments.
 

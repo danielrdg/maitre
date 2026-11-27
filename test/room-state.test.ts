@@ -509,20 +509,27 @@ test('an exited room stays exited for its own late lines; a SessionStart or a ne
     ev('PreToolUse', { session: '', tool: 'Bash', tool_use_id: 'e', input: {} }),
   ];
   for (const l of late) assert.equal(reduce(gone, l), gone, `${l.event} must not revive the room`);
-  // --resume keeps the session id: its SessionStart reopens the room with a fresh state.
+  // --resume keeps the session id: its SessionStart reopens the room, live again, with what it had done.
   const resumed = reduce(gone, ev('SessionStart', sid));
   assert.equal(resumed.state, 'coffee');
   assert.equal(resumed.session, 's-0001');
   assert.equal(resumed.since, resumed.updatedAt);
   assert.deepEqual(resumed.subagents, []);
-  assert.deepEqual(resumed.steps, []);
-  assert.equal(resumed.prUrl, undefined);
-  assert.equal(resumed.task, '');
+  assert.ok(gone.task !== '' && gone.steps.length > 0);
+  assert.deepEqual([resumed.task, resumed.steps, resumed.reply, resumed.prUrl], [gone.task, gone.steps, gone.reply, gone.prUrl]);
   assert.equal(resumed.model, 'haiku');
   const next = reduce(gone, ev('SessionStart', { session: 's-0002' }));
   assert.equal(next.state, 'coffee');
   assert.equal(next.session, 's-0002');
   assert.equal(next.since, next.updatedAt);
+  assert.deepEqual([next.task, next.steps, next.reply, next.prUrl], ['', [], undefined, undefined], 'a new session starts from nothing');
+  for (const opener of [ev('UserPromptSubmit', { session: 's-0003', prompt: 'new work' }), ev('PreToolUse', { session: 's-0003', tool: 'Bash', tool_use_id: 'n', input: { command: 'ls' } })]) {
+    const other = reduce(gone, opener);
+    assert.equal(other.session, 's-0003');
+    assert.deepEqual([other.reply, other.prUrl], [undefined, undefined], `${opener.event} of a new session starts from nothing`);
+    assert.deepEqual(other.steps, opener.event === 'PreToolUse' ? ['Bash: ls'] : [], `${opener.event}: only its own step`);
+    assert.equal(other.task, opener.event === 'UserPromptSubmit' ? 'new work' : '');
+  }
   assert.equal(reduce(gone, ev('UserPromptSubmit', { session: 's-0003', prompt: 'hi', synthetic: false })).state, 'work');
   assert.equal(reduce(gone, pre('n', 'Bash', { command: 'ls' }, { session: 's-0004' })).state, 'work');
   // A room that only ever saw the CLI's MaitreExit (no session id yet) reopens on the first hook session.
@@ -770,6 +777,51 @@ test('a starting block from maître clears on the room\'s SessionStart; a declar
   assert.equal(reduce(declared, ev('SessionStart', {})).state, 'blocked', 'only a starting block clears on SessionStart');
   const replaced = fold([ev('MaitreStatus', { session: '', status: 'blocked', text: 's', starting: true }), declare('blocked', 'Merge now?')]);
   assert.equal(reduce(replaced, ev('SessionStart', {})).state, 'blocked', 'a later declared block is not a starting one');
+});
+
+test("maître's starting block reopens an exited room on the same session (a wake that stops before SessionStart)", () => {
+  const sid = { session: 's-0001' };
+  const gone = fold(FIXTURE);
+  assert.equal(gone.state, 'exit');
+  const starting = reduce(gone, ev('MaitreStatus', { session: '', status: 'blocked', text: "Trust this folder? Answer in the room's tab", options: [], starting: true, resumes: 's-0001' }));
+  assert.equal(starting.state, 'blocked');
+  assert.equal(starting.block?.detail, "Trust this folder? Answer in the room's tab");
+  assert.equal(starting.session, 's-0001', "the session the note says it resumes, not the line's blank one");
+  assert.equal(starting.since, starting.updatedAt);
+  assert.deepEqual([starting.task, starting.steps, starting.reply, starting.prUrl], [gone.task, gone.steps, gone.reply, gone.prUrl], 'the resumed session is the same room');
+  const up = reduce(starting, ev('SessionStart', sid));
+  assert.equal(up.state, 'coffee');
+  assert.equal(up.block, undefined);
+  assert.equal(up.session, 's-0001');
+  assert.deepEqual([up.task, up.steps], [gone.task, gone.steps]);
+  const died = reduce(starting, ev('MaitreExit', { session: '' }));
+  assert.equal(died.state, 'exit');
+  assert.equal(died.session, 's-0001', 'a Claude that dies at the question leaves a session to wake');
+  assert.equal(reduce(gone, ev('MaitreStatus', { session: '', status: 'blocked', text: 'x', options: [] })), gone, 'only the starting block reopens');
+  assert.equal(reduce(gone, ev('MaitreStatus', { session: '', status: 'working', text: 'x', starting: true })), gone);
+  const fresh = reduce(starting, ev('SessionStart', { session: 's-0002' }));
+  assert.equal(fresh.state, 'coffee', "a fresh Claude's own session takes over");
+  assert.equal(fresh.session, 's-0002');
+  assert.deepEqual([fresh.task, fresh.steps, fresh.reply, fresh.prUrl], ['', [], undefined, undefined], 'and starts from nothing');
+});
+
+test("a starting note that names no session (a fresh open of a reused name) or another one starts from nothing", () => {
+  const gone = fold(FIXTURE);
+  assert.equal(gone.state, 'exit');
+  assert.ok(gone.task !== '');
+  const note = (extra: Partial<HookLine> = {}) => ev('MaitreStatus', { session: '', status: 'blocked', text: 'Room is still starting — check its tab', options: [], starting: true, ...extra });
+  const open = reduce(gone, note());
+  assert.deepEqual([open.state, open.session, open.task, open.steps, open.reply, open.prUrl], ['blocked', '', '', [], undefined, undefined]);
+  const other = reduce(gone, note({ resumes: 's-0009' }));
+  assert.deepEqual([other.session, other.task, other.prUrl], ['s-0009', '', undefined]);
+  // The earlier opening died without an exit line (a crash), then the name was opened again.
+  const crashed = fold(FIXTURE.filter((l) => l.event !== 'SessionEnd'));
+  assert.notEqual(crashed.state, 'exit');
+  assert.ok(crashed.task !== '');
+  const reopened = reduce(crashed, note());
+  assert.deepEqual([reopened.state, reopened.session, reopened.task, reopened.prUrl], ['blocked', '', '', undefined]);
+  const woken = reduce(crashed, note({ resumes: crashed.session }));
+  assert.deepEqual([woken.state, woken.session, woken.task], ['blocked', crashed.session, crashed.task], 'a wake of that crashed room keeps it');
 });
 
 test('Stop keeps the last reply; the next prompt clears it', () => {

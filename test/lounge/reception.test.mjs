@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { sendRequest, replyView, openTerminal, receptionSession, promptPlacement, loungePlacement, CLOSE_AFTER_MS } from '../../lounge/js/reception.js';
+import { sendRequest, replyView, openTerminal, wakeRoom, receptionSession, promptPlacement, loungePlacement, CLOSE_AFTER_MS } from '../../lounge/js/reception.js';
 import { t } from '../../lounge/js/i18n.js';
 
 const json = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
@@ -172,4 +172,17 @@ test('the lounge and the prompt ask Chrome not to offer a translation', () => {
     assert.match(html, /<html lang="en" translate="no">/, page);
     assert.match(html, /<meta name="google" content="notranslate">/, page);
   }
+});
+
+test('wakeRoom posts to the room wake endpoint and hands back the wake lines or the error', async () => {
+  const ok = fakeFetch(json(200, { kind: 'woken', room: 'my room', lines: ['woke my room: resumed its session'], needsYou: false }));
+  assert.deepEqual(await wakeRoom('my room', ok), { ok: true, lines: ['woke my room: resumed its session'] });
+  assert.equal(ok.calls[0].url, 'api/rooms/my%20room/wake');
+  assert.equal(ok.calls[0].init.method, 'POST');
+  assert.equal(ok.calls[0].init.headers['x-maitre-request'], '1');
+  assert.deepEqual(await wakeRoom('p', fakeFetch(json(409, { kind: 'error', message: 'p is closing' }))), { ok: false, message: 'p is closing' });
+  assert.deepEqual(await wakeRoom('p', async () => { throw new TypeError('Failed to fetch'); }), { ok: false, message: t('reception.offline') });
+  const odd = await wakeRoom('p', fakeFetch(json(200, { kind: 'woken', lines: [5] })));
+  assert.equal(odd.ok, false);
+  assert.ok(odd.message.length > 0);
 });

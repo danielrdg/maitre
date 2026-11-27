@@ -23,7 +23,9 @@ import { openWindow, ticketUrl, uiLang } from './open-app.js';
 import { maitreHome } from './paths.js';
 import { closeLabeledTabs, closeRoomTabs, isRecord, liveness, markNotRunning, probeRoom, roomLabel } from './room-open.js';
 import { runForeground } from './room-run.js';
-import { listRooms } from './rooms.js';
+import { stillStarting } from './wake.js';
+import { isOpening } from './queue.js';
+import { listRooms, readRoom } from './rooms.js';
 import { handleTrust, type TrustResult } from './trust.js';
 
 export const RECEPTION_LABEL = 'reception';
@@ -172,18 +174,23 @@ async function waitForUrl(paneId: string, ms: number, pollMs: number): Promise<s
 }
 
 // Every room in the registry is probed, closed or not: herdr may have restored its tab as a bare shell.
+// A room being opened or woken is left alone: its new tab is not on its record yet.
 async function sweepRooms(env: NodeJS.ProcessEnv, warnings: string[]): Promise<string[]> {
   const workspaces = await listWorkspaces();
   const closed: string[] = [];
-  for (const rec of listRooms(env).filter(isRecord)) {
+  for (const listed of listRooms(env).filter(isRecord)) {
     try {
-      if ((await probeRoom(rec, workspaces, env)) !== 'not running') continue;
+      // The reservation first, then the record: an opener writes the new ids before it lets go.
+      if (isOpening(listed.room, env)) continue;
+      const rec = readRoom(listed.room, env);
+      if (rec === undefined || !isRecord(rec)) continue;
+      if ((await probeRoom(rec, workspaces, env)) !== 'not running' || stillStarting(rec, workspaces, env)) continue;
       const hadTab = workspaces.some((w) => w.label === roomLabel(rec));
       await closeRoomTabs(rec, workspaces);
       if (hadTab || rec.closedAt === undefined) closed.push(rec.room);
       markNotRunning(rec, env);
     } catch (err) {
-      warnings.push(`could not check room ${rec.room}: ${(err as Error).message}`);
+      warnings.push(`could not check room ${listed.room}: ${(err as Error).message}`);
     }
   }
   return closed;

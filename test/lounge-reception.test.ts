@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { LiveRooms, liveRoutes } from '../src/live-api.js';
 import {
   BusyError,
+  RECEPTION_TIMEOUT_MS,
   ReceptionQueue,
   TimeoutError,
   displayEnv,
@@ -15,6 +16,7 @@ import {
   terminalCommand,
   type ReceptionDeps,
   type TerminalCommand,
+  type WakeFn,
 } from '../src/lounge-reception.js';
 import { startLoungeServer, type LoungeServer } from '../src/lounge-server.js';
 import { writeIndex, type Project } from '../src/projects.js';
@@ -23,6 +25,9 @@ import { openRoom } from '../src/room-open.js';
 import { readRoom } from '../src/rooms.js';
 import { claimLounge } from '../src/lounge-file.js';
 import { QUEUE_HINT } from '../src/router.js';
+import { WORST_DELIVERY_MS } from '../src/room-open.js';
+import { ROUTER_TIMEOUT_MS } from '../src/router.js';
+import { WORST_WAKE_MS } from '../src/wake.js';
 import { herdrSandbox, type HerdrSandbox } from './herdr-sandbox.js';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
@@ -92,7 +97,7 @@ interface Spawned {
 }
 
 async function start(
-  opts: { env?: NodeJS.ProcessEnv; queue?: ReceptionQueue; deps?: ReceptionDeps; spawned?: Spawned[]; reception?: boolean } = {},
+  opts: { env?: NodeJS.ProcessEnv; queue?: ReceptionQueue; deps?: ReceptionDeps; spawned?: Spawned[]; reception?: boolean; wake?: WakeFn } = {},
 ): Promise<number> {
   const env = opts.env ?? process.env;
   const spawned = opts.spawned ?? [];
@@ -104,6 +109,7 @@ async function start(
           env,
           spawnTerminal: (c, e) => void spawned.push({ c, env: e }),
           ...(opts.deps ? { deps: opts.deps } : {}),
+          ...(opts.wake ? { wake: opts.wake } : {}),
         });
   const root = join(sb.dir, 'www');
   mkdirSync(root, { recursive: true });
@@ -162,6 +168,12 @@ function gate(): { wait: Promise<void>; open: () => void } {
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
 // --- ReceptionQueue
+
+test("the lounge reception's ceiling covers a follow-up's worst case (route, wake, delivery) with a margin", () => {
+  const worst = ROUTER_TIMEOUT_MS + WORST_WAKE_MS + WORST_DELIVERY_MS;
+  assert.ok(RECEPTION_TIMEOUT_MS >= worst + 30_000, `${RECEPTION_TIMEOUT_MS} < ${worst} + 30 s`);
+  assert.ok(RECEPTION_TIMEOUT_MS < 300_000);
+});
 
 test('ReceptionQueue runs one job at a time, lets 3 wait and refuses the next with BusyError', async () => {
   const q = new ReceptionQueue({ timeoutMs: 10_000 });
@@ -676,4 +688,77 @@ test('displayEnv keeps an env that has a display and asks the user manager only 
   assert.equal((await displayEnv({ PATH: sb.bin, FAKE_SYSTEMCTL_OUT: 'WAYLAND_DISPLAY=wayland-0\n' }))?.WAYLAND_DISPLAY, 'wayland-0');
   assert.equal(await displayEnv({ PATH: sb.bin, FAKE_SYSTEMCTL_OUT: 'DISPLAY=\n' }), undefined);
   assert.equal(await displayEnv({ PATH: join(sb.dir, 'nothing-here') }), undefined);
+});
+
+// --- wake
+
+function wakeSpy(reply: { resumed: boolean; lines: string[]; needsYou: boolean } | Error = { resumed: true, lines: ['woke p: resumed its session'], needsYou: false }) {
+  const calls: string[] = [];
+  const wake: WakeFn = async (room) => {
+    calls.push(room);
+    if (reply instanceof Error) throw reply;
+    return reply;
+  };
+  return { calls, wake };
+}
+
+test('wake: POST only; GET, HEAD, PUT and DELETE get 405 with allow: POST and wake nothing', async () => {
+  const w = wakeSpy();
+  const port = await start({ wake: w.wake });
+  for (const method of ['GET', 'HEAD', 'PUT', 'DELETE']) {
+    const res = await call(port, '/api/rooms/p/wake', { method });
+    assert.equal(res.status, 405, method);
+    assert.equal(res.headers.allow, 'POST', method);
+  }
+  assert.deepEqual(w.calls, []);
+});
+
+test('wake: a cookie POST without the same Origin and x-maitre-request is refused before anything wakes', async () => {
+  const w = wakeSpy();
+  const port = await start({ wake: w.wake });
+  await openRoom({ name: 'p', model: 'sonnet', taskType: 'simple', brief: 'x' }, process.env, FAST);
+  const self = `http://127.0.0.1:${port}`;
+  const cases: Record<string, string>[] = [{ 'x-maitre-request': '1' }, { origin: 'http://evil.example', 'x-maitre-request': '1' }, { origin: self }];
+  for (const headers of cases) {
+    assert.equal((await call(port, '/api/rooms/p/wake', { auth: 'cookie', headers })).status, 403, JSON.stringify(headers));
+  }
+  assert.deepEqual(w.calls, []);
+  const ok = await call(port, '/api/rooms/p/wake', { auth: 'cookie', headers: { origin: self, 'x-maitre-request': '1' } });
+  assert.equal(ok.status, 200, ok.body);
+  assert.deepEqual(w.calls, ['p']);
+});
+
+test('wake: an invalid or unknown room name is refused and nothing wakes', async () => {
+  const w = wakeSpy();
+  const port = await start({ wake: w.wake });
+  for (const bad of ['a%2Fb', 'Bad', 'a%00b', '%zz', 'a_b', 'NF%20Bug']) {
+    const res = await call(port, `/api/rooms/${bad}/wake`);
+    assert.equal(res.status, 400, bad);
+    assert.equal(res.json?.kind, 'error', bad);
+  }
+  const ghost = await call(port, '/api/rooms/ghost/wake');
+  assert.equal(ghost.status, 404);
+  assert.deepEqual(ghost.json, { kind: 'error', message: 'no room named ghost' });
+  assert.deepEqual(w.calls, []);
+});
+
+test('wake: a registered room is woken; the reply carries the wake lines; a refusal is a 409 with its message', async () => {
+  await openRoom({ name: 'p', model: 'sonnet', taskType: 'simple', brief: 'x' }, process.env, FAST);
+  const w = wakeSpy({ resumed: false, lines: ['woke p with a fresh Claude: its session could not be resumed'], needsYou: true });
+  let port = await start({ wake: w.wake });
+  const res = await call(port, '/api/rooms/p/wake');
+  assert.equal(res.status, 200, res.body);
+  assert.deepEqual(res.json, { kind: 'woken', room: 'p', lines: ['woke p with a fresh Claude: its session could not be resumed'], needsYou: true });
+  assert.deepEqual(w.calls, ['p']);
+  await server?.close();
+  const refused = wakeSpy(new Error('p is closing'));
+  port = await start({ wake: refused.wake });
+  const no = await call(port, '/api/rooms/p/wake');
+  assert.equal(no.status, 409);
+  assert.deepEqual(no.json, { kind: 'error', message: 'p is closing' });
+});
+
+test('wake: the demo lounge (no reception routes) never answers it', async () => {
+  const port = await start({ reception: false });
+  assert.equal((await call(port, '/api/rooms/p/wake')).status, 403);
 });

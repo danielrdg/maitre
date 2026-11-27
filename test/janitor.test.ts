@@ -8,6 +8,7 @@ import { closingFile, isClosing, processStart, releaseClosing, takeClosing } fro
 import { closeRoom, closeWithMinutes, janitorLog, janitorTick } from '../src/janitor.js';
 import { writeMinutes } from '../src/minutes.js';
 import { roomDir } from '../src/paths.js';
+import { writePr, type PrState } from '../src/pr-state.js';
 import { writeIndex, type Project } from '../src/projects.js';
 import { openRoom, sendToRoom } from '../src/room-open.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
@@ -223,6 +224,32 @@ test('a dead room with something pending is skipped and left untouched', async (
   rmSync(join(rec.dir, 'wip.txt'));
   assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'skip', reasons: ['not idle yet'] }]);
   assert.equal(readRoom('a')!.pending, undefined, 'dropped once nothing is pending');
+});
+
+test("a dead woken room left blocked by maître's starting note closes after the idle time, its worktree removed", async () => {
+  const p = project();
+  const rec = await open('a', 'proj');
+  event('a', 'SessionStart');
+  event('a', 'Stop');
+  event('a', 'MaitreStatus', { session: '', status: 'blocked', text: 'Room is still starting — check its tab', options: [], starting: true, resumes: 's1' });
+  killTabs();
+  age('a', 5 * HOURS);
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'close', reasons: ['not running, nothing pending'] }]);
+  assert.equal(readRoom('a')!.closedBy, 'janitor');
+  assert.equal(existsSync(rec.dir), false, 'the check right before the removal does not count the note either');
+  assert.ok(branchExists(p.path, 'maitre/a'));
+});
+
+test('a dead room whose Claude died asking for a permission keeps waiting on you', async () => {
+  project();
+  const rec = await open('a', 'proj');
+  event('a', 'SessionStart');
+  event('a', 'PermissionRequest', { tool: 'Bash', input: { command: 'rm -rf build' } });
+  killTabs();
+  age('a', 5 * HOURS);
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'skip', reasons: ['waiting on you'] }]);
+  assert.equal(readRoom('a')!.closedBy, undefined);
+  assert.ok(existsSync(rec.dir));
 });
 
 test('git worktree remove failing: the room still closes, the branch and folder stay, the minutes say so', async () => {
@@ -880,4 +907,246 @@ test('the closer never stamps closedBy on a record reopened while it closed', as
   const after = readRoom('s')!;
   assert.equal(after.closedBy, undefined);
   assert.equal(after.createdAt, reopened.createdAt);
+});
+
+// M3b: parking and PR-driven closes.
+
+const PR_URL = 'https://github.com/o/r/pull/7';
+
+function pr(rec: RoomRecord, extra: Partial<PrState> = {}): void {
+  writePr(rec.room, { url: PR_URL, number: 7, state: 'OPEN', headRefName: rec.branch ?? '', seenAt: Date.now(), failing: [], ...extra });
+}
+
+function unpushed(rec: RoomRecord): void {
+  writeFileSync(join(rec.dir, 'f.txt'), 'x');
+  git(rec.dir, 'add', 'f.txt');
+  git(rec.dir, 'commit', '-q', '-m', 'f');
+}
+
+// Parked by hand: the seat is recorded and the tab is gone, as parkRoom leaves it.
+function parkedByHand(room: string): void {
+  writeRoom({ ...readRoom(room)!, seat: { releasedAt: Date.now() - 60_000, session: 's1' } });
+  killTabs();
+}
+
+test('a quiet room on the couch is parked by the tick; once parked it stays parked, its seat and couch kept', async () => {
+  const p = project();
+  const rec = await open('a', 'proj');
+  unpushed(rec);
+  age('a', 5 * HOURS);
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'couch', reasons: ['1 commit(s) not pushed'] }]);
+  const couch = readRoom('a')!.couch!;
+
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'park', reasons: ['quiet, on the couch'] }]);
+  const seat = readRoom('a')!.seat!;
+  assert.equal(seat.session, 's1');
+  assert.equal(Object.keys(sb.state().workspaces).length, 0);
+  assert.ok(existsSync(join(rec.dir, 'f.txt')));
+  assert.ok(branchExists(p.path, 'maitre/a'));
+
+  // Real Claude writes its SessionEnd as it exits: that is no sign of life in a parked room.
+  event('a', 'SessionEnd', { reason: 'prompt_input_exit' });
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'skip', reasons: ['1 commit(s) not pushed'] }]);
+  const after = readRoom('a')!;
+  assert.deepEqual(after.seat, seat);
+  assert.deepEqual(after.couch, couch, 'the couch is neither cleared nor written again');
+  assert.equal(after.closedBy, undefined);
+  assert.deepEqual(minutesFiles(), []);
+});
+
+test('a quiet room with an open PR is parked; a working one, or one quiet for less than the release time, is not', async () => {
+  project();
+  const rec = await open('a', 'proj');
+  pr(rec);
+  age('a', 10 * 60_000);
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'skip', reasons: ['not idle'] }]);
+  age('a', HOURS);
+  const st = sb.state();
+  st.panes[rec.herdr!.paneId]!.agent = 'working';
+  sb.setState(st);
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'skip', reasons: ['not idle'] }]);
+  st.panes[rec.herdr!.paneId]!.agent = 'idle';
+  sb.setState(st);
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'park', reasons: ['quiet, its PR is open'] }]);
+  assert.equal(readRoom('a')!.seat?.session, 's1');
+});
+
+test('a seat left on a running room is taken back by the tick, and the room parks again when it may', async () => {
+  await open('a');
+  age('a', HOURS);
+  writeRoom({ ...readRoom('a')!, seat: { releasedAt: 1, session: 'old' } });
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'skip', reasons: ['not idle', 'seat taken back: its Claude is running'] }]);
+  assert.equal(readRoom('a')!.seat, undefined, 'a running room never claims a seat');
+  writeRoom({ ...readRoom('a')!, seat: { releasedAt: 1, session: 'old' }, couch: { since: Date.now() - 1000, reasons: ['x'] } });
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'park', reasons: ['seat taken back: its Claude is running', 'quiet, on the couch'] }]);
+  assert.equal(readRoom('a')!.seat?.session, 's1');
+});
+
+test('a running room with a closedAt left by a passing herdr hiccup has it dropped by the tick, not by a dry run', async () => {
+  await open('a');
+  const rec = readRoom('a')!;
+  writeRoom({ ...rec, closedAt: Date.now() });
+  await janitorTick(process.env, { dryRun: true });
+  assert.equal(typeof readRoom('a')!.closedAt, 'number');
+  await janitorTick();
+  assert.deepEqual(readRoom('a'), rec);
+});
+
+test('a quiet room with neither a couch nor an open PR is not parked: plain idle rooms keep their Claude', async () => {
+  project();
+  await open('a', 'proj');
+  age('a', HOURS);
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'skip', reasons: ['not idle'] }]);
+  assert.equal(readRoom('a')!.seat, undefined);
+  assert.equal(exitSent(), false);
+});
+
+test('a draft in a quiet couched room: skip, no seat, never /exit', async () => {
+  await open('a');
+  age('a', 5 * HOURS);
+  writeRoom({ ...readRoom('a')!, couch: { since: Date.now() - HOURS, reasons: ['x'] } });
+  typeInto('a', 'draft');
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'skip', reasons: ['unsent text in its input'] }]);
+  assert.equal(readRoom('a')!.seat, undefined);
+  assert.equal(exitSent(), false);
+});
+
+test('a parked clean room closes after idleHours, and the closed record drops its seat', async () => {
+  const rec = await open('a');
+  age('a', HOURS);
+  parkedByHand('a');
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'skip', reasons: ['not idle yet'] }]);
+  assert.ok(readRoom('a')!.seat, 'still parked');
+  age('a', 5 * HOURS);
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'close', reasons: ['not running, nothing pending'] }]);
+  const after = readRoom('a')!;
+  assert.equal(after.closedBy, 'janitor');
+  assert.equal(after.seat, undefined);
+  assert.equal(existsSync(rec.dir), false, 'the scratch files went to the vault');
+});
+
+test('a merged PR: the running clean room dances, then closes with the merge in its minutes, branch kept', async () => {
+  const p = project();
+  const rec = await open('a', 'proj');
+  pr(rec, { state: 'MERGED', dance: { until: Date.now() + HOURS } });
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'skip', reasons: ['dancing'] }]);
+  assert.equal(readRoom('a')!.closedBy, undefined);
+  assert.equal(Object.keys(sb.state().workspaces).length, 1);
+
+  pr(rec, { state: 'MERGED', dance: { until: Date.now() - 1 } });
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'close', reasons: [`PR merged: ${PR_URL}`] }]);
+  assert.equal(readRoom('a')!.closedBy, 'janitor');
+  assert.equal(exitSent(), true);
+  assert.equal(existsSync(rec.dir), false);
+  assert.ok(branchExists(p.path, 'maitre/a'));
+  const text = readFileSync(join(minutesDir(), minutesFiles()[0]!), 'utf8');
+  assert.ok(text.includes(`## Why it closed\n\n- PR merged: ${PR_URL}`));
+});
+
+test('a merged PR with a commit not pushed: the room goes to the couch, nothing removed', async () => {
+  const p = project();
+  const rec = await open('a', 'proj');
+  unpushed(rec);
+  pr(rec, { state: 'MERGED', dance: { until: Date.now() - 1 } });
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'couch', reasons: ['1 commit(s) not pushed'] }]);
+  assert.equal(readRoom('a')!.closedBy, undefined);
+  assert.ok(existsSync(join(rec.dir, 'f.txt')));
+  assert.ok(branchExists(p.path, 'maitre/a'));
+  assert.deepEqual(minutesFiles(), []);
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'couch', reasons: ['1 commit(s) not pushed'] }], 'not quiet yet: stays on the couch');
+
+  age('a', HOURS);
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'park', reasons: ['quiet, on the couch'] }], 'couched and quiet: gives up its seat');
+});
+
+test('a merged PR never cuts a turn: a working room is skipped', async () => {
+  project();
+  const rec = await open('a', 'proj');
+  pr(rec, { state: 'MERGED', dance: { until: Date.now() - 1 } });
+  const st = sb.state();
+  st.panes[rec.herdr!.paneId]!.agent = 'working';
+  sb.setState(st);
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'skip', reasons: ['not idle'] }]);
+  assert.equal(readRoom('a')!.closedBy, undefined);
+});
+
+test("a parked room whose PR merges closes after the dance, without the dead room's wait; a crashed one waits", async () => {
+  project();
+  const a = await open('a', 'proj');
+  const b = await open('b', 'proj');
+  for (const rec of [a, b]) {
+    age(rec.room, HOURS);
+    pr(rec, { state: 'MERGED', dance: { until: Date.now() - 1 } });
+  }
+  writeRoom({ ...readRoom('a')!, seat: { releasedAt: Date.now() - 60_000, session: 's1' } });
+  killTabs();
+  assert.deepEqual(await janitorTick(), [
+    { room: 'a', decision: 'close', reasons: [`PR merged: ${PR_URL}`] },
+    { room: 'b', decision: 'skip', reasons: ['not idle yet'] },
+  ]);
+  assert.equal(readRoom('a')!.closedBy, 'janitor');
+  assert.equal(readRoom('a')!.seat, undefined);
+  assert.equal(readRoom('b')!.closedBy, undefined);
+});
+
+test('a PR closed without merge closes the room with a note in its minutes; the branch is kept', async () => {
+  const p = project();
+  const rec = await open('a', 'proj');
+  pr(rec, { state: 'CLOSED' });
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'close', reasons: [`PR closed without merge: ${PR_URL}`] }]);
+  assert.equal(readRoom('a')!.closedBy, 'janitor');
+  assert.ok(branchExists(p.path, 'maitre/a'));
+  const text = readFileSync(join(minutesDir(), minutesFiles()[0]!), 'utf8');
+  assert.ok(text.includes(`- PR closed without merge: ${PR_URL}`));
+});
+
+test('a PR closed without merge with uncommitted work: couched, nothing removed', async () => {
+  project();
+  const rec = await open('a', 'proj');
+  writeFileSync(join(rec.dir, 'wip.txt'), 'x');
+  pr(rec, { state: 'CLOSED' });
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'couch', reasons: ['uncommitted changes: wip.txt'] }]);
+  assert.equal(readFileSync(join(rec.dir, 'wip.txt'), 'utf8'), 'x');
+});
+
+test("a pr.json left by an earlier opening of the room is not this room's PR", async () => {
+  project();
+  const rec = await open('a', 'proj');
+  pr(rec, { state: 'MERGED', seenAt: rec.createdAt - 1 });
+  assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'skip', reasons: ['not idle'] }]);
+  assert.equal(readRoom('a')!.closedBy, undefined);
+});
+
+test('maitre janitor --dry-run shows park and the PR decisions, and changes no file', async () => {
+  project();
+  const quiet = await open('quiet', 'proj');
+  const merged = await open('merged', 'proj');
+  const dancing = await open('dancing', 'proj');
+  age('quiet', HOURS);
+  pr(quiet);
+  pr(merged, { state: 'MERGED', dance: { until: Date.now() - 1 } });
+  pr(dancing, { state: 'MERGED', dance: { until: Date.now() + HOURS } });
+  const before = tree(sb.home);
+
+  const r = spawnSync(process.execPath, [MAITRE, 'janitor', '--dry-run'], { env: sb.env, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(
+    r.stdout,
+    ['dancing  skip   dancing', `merged   close  PR merged: ${PR_URL}`, 'quiet    park   quiet, its PR is open', ''].join('\n'),
+  );
+  assert.deepEqual(tree(sb.home), before);
+  assert.equal(exitSent(), false);
+});
+
+test('the stale-seat take-back removes only the seat it read: a fresh seat written meanwhile (a park) survives', async () => {
+  await open('a');
+  writeRoom({ ...readRoom('a')!, seat: { releasedAt: 1, session: 'old' } });
+  const fresh = { releasedAt: 2, session: 's1' };
+  const staged = join(sb.dir, 'room.json.staged');
+  writeFileSync(staged, JSON.stringify({ ...readRoom('a')!, seat: fresh }));
+  // Lands right after decide's herdr probe: between its read of the record and its patch.
+  process.env.FAKE_HERDR_THEN_agent_get = JSON.stringify([staged, join(roomDir('a'), 'room.json')]);
+  const [d] = await janitorTick();
+  assert.deepEqual(readRoom('a')!.seat, fresh);
+  assert.ok(!d.reasons.includes('seat taken back: its Claude is running'), d.reasons.join('; '));
 });

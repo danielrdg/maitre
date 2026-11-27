@@ -16,6 +16,8 @@ export interface MaitreConfig {
   capacity?: number;
   janitor?: { idleHours?: number; intervalMinutes?: number };
   vault?: string;
+  seat?: { releaseMinutes?: number };
+  pr?: { autoWake?: boolean; danceMinutes?: number; pollMinutes?: number };
 }
 
 export interface Settings {
@@ -23,6 +25,10 @@ export interface Settings {
   idleMs: number;
   intervalMs: number;
   vault: string;
+  releaseMs: number;
+  autoWake: boolean;
+  danceMs: number;
+  pollMs: number;
   warnings: string[];
 }
 
@@ -56,6 +62,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MaitreConfig {
   if (raw?.capacity !== undefined) cfg.capacity = raw.capacity;
   if (raw?.janitor !== undefined) cfg.janitor = raw.janitor;
   if (raw?.vault !== undefined) cfg.vault = raw.vault;
+  if (raw?.seat !== undefined) cfg.seat = raw.seat;
+  if (raw?.pr !== undefined) cfg.pr = raw.pr;
   return cfg;
 }
 
@@ -74,11 +82,33 @@ export function settings(env: NodeJS.ProcessEnv = process.env): Settings {
   const positive = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x) && x > 0;
   const janitor = cfg.janitor !== null && typeof cfg.janitor === 'object' && !Array.isArray(cfg.janitor) ? cfg.janitor : {};
   if (cfg.janitor !== undefined && janitor !== cfg.janitor) warnings.push('config: janitor must be an object; using the defaults');
+  const section = (name: 'seat' | 'pr', v: unknown): Record<string, unknown> => {
+    if (v === undefined) return {};
+    if (v !== null && typeof v === 'object' && !Array.isArray(v)) return v as Record<string, unknown>;
+    warnings.push(`config: ${name} must be an object; using the defaults`);
+    return {};
+  };
+  const seat = section('seat', cfg.seat);
+  const pr = section('pr', cfg.pr);
   const capacity = pick('capacity', cfg.capacity, (x): x is number => Number.isInteger(x) && (x as number) >= 1, 6, 'an integer of at least 1');
   const idleHours = pick('janitor.idleHours', janitor.idleHours, positive, 4, 'a number above 0');
   const intervalMinutes = pick('janitor.intervalMinutes', janitor.intervalMinutes, positive, 5, 'a number above 0');
   const vault = pick('vault', cfg.vault, (x): x is string => typeof x === 'string' && isAbsolute(x), join(maitreHome(env), 'memory'), 'an absolute path');
-  return { capacity, idleMs: idleHours * HOUR_MS, intervalMs: intervalMinutes * MINUTE_MS, vault, warnings };
+  const releaseMinutes = pick('seat.releaseMinutes', seat.releaseMinutes, positive, 30, 'a number above 0');
+  const autoWake = pick('pr.autoWake', pr.autoWake, (x): x is boolean => typeof x === 'boolean', false, 'true or false');
+  const danceMinutes = pick('pr.danceMinutes', pr.danceMinutes, positive, 3, 'a number above 0');
+  const pollMinutes = pick('pr.pollMinutes', pr.pollMinutes, positive, 2, 'a number above 0');
+  return {
+    capacity,
+    idleMs: idleHours * HOUR_MS,
+    intervalMs: intervalMinutes * MINUTE_MS,
+    vault,
+    releaseMs: releaseMinutes * MINUTE_MS,
+    autoWake,
+    danceMs: danceMinutes * MINUTE_MS,
+    pollMs: pollMinutes * MINUTE_MS,
+    warnings,
+  };
 }
 
 export function saveConfig(cfg: MaitreConfig, env: NodeJS.ProcessEnv = process.env): void {

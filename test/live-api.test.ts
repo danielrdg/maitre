@@ -5,14 +5,18 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFile
 import { request, type ClientRequest, type IncomingMessage } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { HookLine } from '../src/events.js';
 import { EventTail } from '../src/event-tail.js';
 import { LiveRooms, liveRoutes } from '../src/live-api.js';
 import { startLoungeServer, type LoungeServer } from '../src/lounge-server.js';
 import { roomDir } from '../src/paths.js';
 import { writeQueue, type QueueEntry } from '../src/queue.js';
-import { writeRoom as writeRoomRecord } from '../src/rooms.js';
+import { releaseClosing, takeClosing } from '../src/closing.js';
+import { readPr, writePr, type PrState } from '../src/pr-state.js';
+import { prTick } from '../src/pr-watch.js';
+import { BRIEF_HEADER, writeBrief } from '../src/room-open.js';
+import { couchHolds, writeRoom as writeRoomRecord } from '../src/rooms.js';
 import { reduce, type RoomState } from '../src/room-state.js';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
@@ -393,7 +397,7 @@ test('a fresh start that replays files drops rooms that ended (SessionEnd or Mai
   }
 });
 
-const REC = { room: 'r1', project: 'backend', kind: 'code', dir: '/w', branch: 'maitre/nf-bug', model: 'sonnet', taskType: 'bug', createdAt: 1 } as const;
+const REC = { room: 'r1', project: 'backend', kind: 'code', dir: '/w', branch: 'maitre/nf-bug', model: 'sonnet', taskType: 'bug', createdAt: 1, resumable: true } as const;
 const START = (room: string): HookLine => ({ v: 1, ts: 1, room, session: 's', event: 'SessionStart' });
 
 test('LiveRooms: a registered room carries project and branch, and the registry model fills unknown', () => {
@@ -648,4 +652,306 @@ test('LiveRooms: a room closed with minutes leaves the lounge even without an ex
   assert.deepEqual(seen, ['r1:exit'], 'told once');
   rooms.apply(at('r1', 'SessionStart', 70, { session: 's2' }));
   assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.state]), [['r1', 'coffee']], 'events after the close: a new opening');
+});
+
+// --- parked, dancing and noticed rooms
+
+const PR = 'https://github.com/example/repo/pull/7';
+const openPr = (extra: Partial<PrState> = {}): PrState => ({ url: PR, number: 7, state: 'OPEN', headRefName: REC.branch, seenAt: 5, failing: [], ...extra });
+
+test('LiveRooms: a parked room (seat on its record) sits on the couch though its reducer state is exit; a close walks it out', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-parked-') };
+  writeRoomRecord({ ...REC, seat: { releasedAt: 60, session: 's' } }, env);
+  const rooms = new LiveRooms(env);
+  const seen: string[] = [];
+  rooms.on((r) => seen.push(`${r.room}:${r.state}`));
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'Stop', 50));
+  rooms.apply(at('r1', 'SessionEnd', 70));
+  assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.state]), [['r1', 'parked']]);
+  assert.equal(seen.at(-1), 'r1:parked');
+  writeRoomRecord({ ...REC, closedAt: 80, closedBy: 'janitor' }, env);
+  rooms.refresh();
+  assert.equal(seen.at(-1), 'r1:exit');
+  assert.deepEqual(rooms.snapshot(), []);
+});
+
+test('LiveRooms: a dead room with a session is parked; one being closed, or with no record, leaves', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-dead-') };
+  writeRoomRecord({ ...REC }, env);
+  writeRoomRecord({ ...REC, room: 'closing' }, env);
+  const rooms = new LiveRooms(env);
+  const held = takeClosing('closing', env);
+  assert.notEqual(held, 'busy');
+  for (const room of ['r1', 'closing', 'bare']) {
+    rooms.apply(at(room, 'SessionStart', 10));
+    rooms.apply(at(room, 'Stop', 50));
+    rooms.apply(at(room, 'MaitreExit', 70, { session: '' }));
+  }
+  assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.state]), [['r1', 'parked']]);
+  const seen: string[] = [];
+  rooms.on((r) => seen.push(`${r.room}:${r.state}`));
+  releaseClosing('closing', (held as { token: string }).token, env);
+  rooms.refresh();
+  assert.deepEqual(seen, ['closing:parked'], 'a close that stopped before closing the room leaves it parked');
+});
+
+test('LiveRooms: a room closed by hand before M3a (no stamp, no seat) is not parked: it keeps its last state; with a seat it is', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-legacy-') };
+  const { resumable: _r, ...old } = REC;
+  writeRoomRecord({ ...old, closedAt: 75 }, env);
+  writeRoomRecord({ ...old, room: 'seated', closedAt: 75, seat: { releasedAt: 60, session: 's' } }, env);
+  const rooms = new LiveRooms(env);
+  for (const room of ['r1', 'seated']) {
+    rooms.apply(at(room, 'SessionStart', 10));
+    rooms.apply(at(room, 'Stop', 50));
+  }
+  assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.state]), [['r1', 'ready'], ['seated', 'parked']]);
+});
+
+test('LiveRooms: a parked room that wakes is back at its live state', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-wake-') };
+  writeRoomRecord({ ...REC, seat: { releasedAt: 60, session: 's' } }, env);
+  const rooms = new LiveRooms(env);
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'SessionEnd', 70));
+  rooms.apply(at('r1', 'SessionStart', 90));
+  assert.equal(rooms.snapshot()[0]?.state, 'coffee', 'resumed before the seat is cleared');
+});
+
+const LIVE_JS = pathToFileURL(join(ROOT, 'lounge', 'js', 'live.js')).href;
+type Bell = { snapshot(r: RoomState[], t: number): void; room(r: RoomState, t: number): void };
+
+// The wake's own lines, as wakeRoom writes them: the starting note, then the record without seat or closedAt.
+for (const [why, text] of [
+  ['the folder-trust dialog', "Trust this folder? Answer in the room's tab"],
+  ['a question Claude Code asks on resume', 'Room is still starting — check its tab'],
+] as const) {
+  test(`LiveRooms: a woken room stopped by ${why} before its SessionStart is blocked and rings, not parked`, async () => {
+    const env = { MAITRE_HOME: tmp('maitre-live-wake-q-') };
+    writeRoomRecord({ ...REC, seat: { releasedAt: 60, session: 's' } }, env);
+    writeRoomRecord({ ...REC, room: 'dead', closedAt: 75 }, env);
+    const rooms = new LiveRooms(env);
+    for (const room of ['r1', 'dead']) {
+      rooms.apply(at(room, 'SessionStart', 10));
+      rooms.apply(at(room, 'Stop', 50));
+      rooms.apply(at(room, 'SessionEnd', 70));
+    }
+    assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.state]), [['dead', 'parked'], ['r1', 'parked']]);
+    const { createBell } = (await import(LIVE_JS)) as { createBell: (o: { ring: () => void }) => Bell };
+    let rang = 0;
+    const bell = createBell({ ring: () => rang++ });
+    bell.snapshot(rooms.snapshot(), 0);
+    rooms.on((r) => bell.room(r, 1));
+    for (const room of ['r1', 'dead']) {
+      rooms.apply(at(room, 'MaitreStatus', 100, { session: '', status: 'blocked', text, options: [], starting: true, resumes: 's' }));
+    }
+    writeRoomRecord({ ...REC }, env);
+    writeRoomRecord({ ...REC, room: 'dead' }, env);
+    rooms.refresh();
+    const shown = rooms.snapshot();
+    assert.deepEqual(shown.map((r) => [r.room, r.state, r.block?.detail]), [['dead', 'blocked', text], ['r1', 'blocked', text]]);
+    assert.ok(shown.every((r) => r.session === 's'));
+    assert.ok(rang >= 1, 'the bell rings for it');
+    rooms.apply(at('r1', 'SessionStart', 120));
+    assert.equal(rooms.snapshot().find((r) => r.room === 'r1')?.state, 'coffee', 'answered: the resume goes on');
+    rooms.apply(at('dead', 'MaitreExit', 130, { session: '' }));
+    assert.equal(rooms.snapshot().find((r) => r.room === 'dead')?.state, 'parked', 'died at the question: parked again, with its session');
+  });
+}
+
+test("LiveRooms: a starting note newer than closedAt (a wake that failed after writing it) leaves the room parked, as room list shows it", () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-wake-fail-') };
+  writeRoomRecord({ ...REC, closedAt: 75 }, env);
+  const rooms = new LiveRooms(env);
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'Stop', 50));
+  rooms.apply(at('r1', 'SessionEnd', 70));
+  rooms.apply(at('r1', 'MaitreStatus', 100, { session: '', status: 'blocked', text: 'Room is still starting — check its tab', options: [], starting: true, resumes: 's' }));
+  assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.state]), [['r1', 'parked']]);
+  rooms.apply(at('r1', 'SessionStart', 120));
+  assert.equal(rooms.snapshot()[0]?.state, 'coffee', 'a real event after closedAt is the room alive again');
+});
+
+test("LiveRooms: a room whose session does not know its PR (a fresh Claude) shows the PR of its own pr.json", () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-prlink-') };
+  writeRoomRecord({ ...REC }, env);
+  writeRoomRecord({ ...REC, room: 'old' }, env);
+  writePr('r1', openPr(), env);
+  writePr('old', openPr({ seenAt: 0 }), env);
+  writeRoomRecord({ ...REC, room: 'odd' }, env);
+  writePr('odd', openPr({ url: 'javascript:alert(1)' }), env);
+  const rooms = new LiveRooms(env);
+  for (const room of ['r1', 'old', 'odd']) rooms.apply(at(room, 'SessionStart', 10, { session: 's2' }));
+  assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.prUrl]), [['odd', undefined], ['old', undefined], ['r1', PR]]);
+});
+
+test('LiveRooms: a merged room dances until dance.until, parked or not, then sits where it was; closing walks it out', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-dance-') };
+  let now = 500;
+  writeRoomRecord({ ...REC }, env);
+  writeRoomRecord({ ...REC, room: 'p', seat: { releasedAt: 60, session: 's' } }, env);
+  writePr('r1', openPr({ state: 'MERGED', dance: { until: 1000 }, notice: { kind: 'merged', text: 'PR #7 merged', url: PR, since: 400 } }), env);
+  writePr('p', openPr({ state: 'MERGED', dance: { until: 1000 } }), env);
+  const rooms = new LiveRooms(env, { now: () => now });
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'Stop', 50));
+  rooms.apply(at('p', 'SessionStart', 10));
+  rooms.apply(at('p', 'SessionEnd', 70));
+  assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.state]), [['p', 'dance'], ['r1', 'dance']]);
+  const seen: string[] = [];
+  rooms.on((r) => seen.push(`${r.room}:${r.state}`));
+  now = 1000;
+  rooms.refresh();
+  assert.deepEqual(seen.sort(), ['p:parked', 'r1:ready']);
+  writeRoomRecord({ ...REC, closedAt: 1100, closedBy: 'janitor' }, env);
+  rooms.refresh();
+  assert.equal(seen.at(-1), 'r1:exit');
+});
+
+test('LiveRooms: the dance covers only a resting room: a blocked or working one keeps its state, a parked dancer stays parked', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-dance-') };
+  const rooms = new LiveRooms(env, { now: () => 500 });
+  const lines: Record<string, HookLine[]> = {
+    ready: [at('ready', 'Stop', 50)],
+    coffee: [],
+    whisky: [at('whisky', 'PostToolUse', 40, { tool: 'Bash', tool_use_id: 'u', response: { stdout: PR } }), at('whisky', 'Stop', 50)],
+    couch: [at('couch', 'Stop', 50)],
+    parked: [at('parked', 'SessionEnd', 70)],
+    work: [at('work', 'UserPromptSubmit', 50, { prompt: 'go' })],
+    smoke: [at('smoke', 'MaitreStatus', 50, { session: '', status: 'waiting', text: 'CI' })],
+    blocked: [at('blocked', 'PreToolUse', 40, { tool: 'Bash', tool_use_id: 'u', input: { command: 'ls' } }), at('blocked', 'PermissionRequest', 50, { tool: 'Bash', input: { command: 'ls' } })],
+  };
+  for (const [room, extra] of Object.entries(lines)) {
+    writeRoomRecord({
+      ...REC,
+      room,
+      ...(room === 'couch' ? { couch: COUCH } : {}),
+      ...(room === 'parked' ? { seat: { releasedAt: 60, session: 's' } } : {}),
+    }, env);
+    writePr(room, openPr({ state: 'MERGED', dance: { until: 1000 } }), env);
+    rooms.apply(at(room, 'SessionStart', 10));
+    for (const l of extra) rooms.apply(l);
+  }
+  const by = Object.fromEntries(rooms.snapshot().map((r) => [r.room, r]));
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(by).map(([k, r]) => [k, r.state])),
+    { blocked: 'blocked', couch: 'dance', coffee: 'dance', parked: 'dance', ready: 'dance', smoke: 'smoke', whisky: 'dance', work: 'work' },
+  );
+  assert.equal(by.blocked?.block?.kind, 'permission', 'its alert stays');
+  assert.equal(by.parked?.parked, true, 'a parked dancer is still woken, not opened in a terminal');
+  assert.deepEqual(Object.values(by).filter((r) => r.parked !== undefined).map((r) => r.room), ['parked']);
+});
+
+test("LiveRooms: a stale pr.json (another branch, or seen before this opening) neither dances nor notices", () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-stale-') };
+  writeRoomRecord({ ...REC, createdAt: 10 }, env);
+  writePr('r1', openPr({ state: 'MERGED', seenAt: 5, dance: { until: 1000 }, notice: { kind: 'merged', text: 'x', url: PR, since: 4 } }), env);
+  const rooms = new LiveRooms(env, { now: () => 500 });
+  rooms.apply(at('r1', 'SessionStart', 20));
+  assert.deepEqual([rooms.snapshot()[0]?.state, 'notice' in rooms.snapshot()[0]!], ['coffee', false]);
+});
+
+test('LiveRooms: a PR notice rides on the room, its text filtered and its link only a GitHub PR; a real prompt after it clears it', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-notice-') };
+  writeRoomRecord({ ...REC }, env);
+  writeRoomRecord({ ...REC, room: 'odd' }, env);
+  writePr('r1', openPr({ notice: { kind: 'review', text: 'New comment from ‮rev\u0007', url: PR, since: 100 } }), env);
+  writePr('odd', openPr({ notice: { kind: 'ci', text: 'CI failed: x', url: 'javascript:alert(1)', since: 100 } }), env);
+  const rooms = new LiveRooms(env);
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'UserPromptSubmit', 20, { prompt: 'before the notice' }));
+  rooms.apply(at('r1', 'Stop', 50));
+  rooms.apply(at('odd', 'SessionStart', 10));
+  const by = Object.fromEntries(rooms.snapshot().map((r) => [r.room, r]));
+  assert.deepEqual(by.r1?.notice, { kind: 'review', text: 'New comment from ?rev?', url: PR });
+  assert.deepEqual(by.odd?.notice, { kind: 'ci', text: 'CI failed: x' });
+  rooms.apply(at('r1', 'UserPromptSubmit', 150, { prompt: 'retry', synthetic: true }));
+  rooms.apply(at('r1', 'UserPromptSubmit', 151, { prompt: 'sub', agent_id: 'a1' }));
+  assert.ok(rooms.snapshot().find((r) => r.room === 'r1')?.notice, 'a synthetic or subagent prompt is not the room being told');
+  const seen: RoomState[] = [];
+  rooms.on((r) => seen.push(r));
+  rooms.apply(at('r1', 'UserPromptSubmit', 160, { prompt: 'look at the review' }));
+  assert.equal(seen.at(-1)?.notice, undefined);
+  assert.equal(readPr('r1', env)?.notice, undefined, 'cleared in pr.json too');
+  assert.equal(readPr('r1', env)?.url, PR);
+});
+
+test('LiveRooms: pr.json written after the room appeared shows on the next refresh', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-notice-') };
+  writeRoomRecord({ ...REC }, env);
+  const rooms = new LiveRooms(env);
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'Stop', 50));
+  const seen: RoomState[] = [];
+  rooms.on((r) => seen.push(r));
+  writePr('r1', openPr({ notice: { kind: 'ci', text: 'CI failed: build', url: PR, since: 100 } }), env);
+  rooms.refresh();
+  rooms.refresh();
+  assert.deepEqual(seen.map((r) => r.notice?.text), ['CI failed: build']);
+});
+
+test('couchHolds: a couched room delivering a PR (whisky) is on the couch too', () => {
+  assert.equal(couchHolds({ since: 100, reasons: ['PR merged'] }, 'whisky', 90), true);
+  assert.equal(couchHolds({ since: 100, reasons: ['PR merged'] }, 'work', 90), false);
+});
+
+test('LiveRooms: a couched room whose state is whisky shows as couch', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-whisky-') };
+  writeRoomRecord({ ...REC, couch: COUCH }, env);
+  const rooms = new LiveRooms(env);
+  const cmd = { command: 'gh pr create --fill' };
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'PreToolUse', 20, { tool: 'Bash', tool_use_id: 'p1', input: cmd }));
+  rooms.apply(at('r1', 'PostToolUse', 30, { tool: 'Bash', tool_use_id: 'p1', input: cmd, response: { stdout: `${PR}\n` } }));
+  rooms.apply(at('r1', 'Stop', 50));
+  assert.deepEqual([rooms.snapshot()[0]?.state, rooms.snapshot()[0]?.couchReasons], ['couch', COUCH.reasons]);
+});
+
+test('LiveRooms: a room found not running (closedAt) with no exit line is parked; an event after it brings it back', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-reboot-') };
+  writeRoomRecord({ ...REC, closedAt: 60 }, env);
+  const rooms = new LiveRooms(env);
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'UserPromptSubmit', 20, { prompt: 'go' }));
+  assert.equal(rooms.snapshot()[0]?.state, 'parked', 'its Claude died mid-turn (a reboot): no exit line');
+  writeRoomRecord({ ...REC }, env);
+  writeRoomRecord({ ...REC, closedAt: 5 }, env);
+  assert.equal(rooms.snapshot()[0]?.state, 'work', 'events after closedAt: running');
+});
+
+test("LiveRooms: autoWake's own notice line, or a fresh Claude's brief built with it, does not clear the notice", () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-notice-') };
+  writeRoomRecord({ ...REC }, env);
+  writePr('r1', openPr({ notice: { kind: 'ci', text: 'CI failed: build', url: PR, since: 100 } }), env);
+  const rooms = new LiveRooms(env);
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'UserPromptSubmit', 150, { prompt: `maître PR notice (ci): ${PR}` }));
+  assert.equal(rooms.snapshot()[0]?.notice?.text, 'CI failed: build');
+  // A fresh Claude's brief, as wakeRoom writes it: the header first, then the lines.
+  const brief = readFileSync(writeBrief('r1', `maître PR notice (ci): ${PR}\n\n# Earlier in this room (its session could not be resumed: x)\n\nnotes`, env), 'utf8');
+  assert.ok(brief.startsWith(BRIEF_HEADER));
+  rooms.apply(at('r1', 'SessionStart', 160, { session: 's2' }));
+  rooms.apply(at('r1', 'UserPromptSubmit', 161, { session: 's2', prompt: brief }));
+  assert.equal(rooms.snapshot()[0]?.notice?.text, 'CI failed: build');
+  assert.equal(readPr('r1', env)?.notice?.text, 'CI failed: build');
+});
+
+test('LiveRooms: a prompt typed while gh runs does not hide the notice that poll writes', async () => {
+  const env: NodeJS.ProcessEnv = { MAITRE_HOME: tmp('maitre-live-race-'), PATH: process.env.PATH };
+  const dir = tmp('maitre-live-race-wt-');
+  writeRoomRecord({ ...REC, dir, createdAt: 1 }, env);
+  writePr('r1', openPr({ seenAt: 2 }), env);
+  const rooms = new LiveRooms(env);
+  rooms.apply(at('r1', 'SessionStart', 10));
+  // The pass starts at 1000; the user prompts at 1500 while gh answers; the notice is written at 2000.
+  const clock = [1000];
+  const gh = async () => {
+    rooms.apply(at('r1', 'UserPromptSubmit', 1500, { prompt: 'unrelated' }));
+    clock[0] = 2000;
+    return JSON.stringify({ state: 'OPEN', headRefName: REC.branch, author: { login: 'owner' }, statusCheckRollup: [{ name: 'build', conclusion: 'FAILURE' }], latestReviews: [], comments: [] });
+  };
+  await prTick(env, { gh, now: () => clock[0]! });
+  assert.equal(readPr('r1', env)?.notice?.since, 2000);
+  assert.equal(rooms.snapshot()[0]?.notice?.text, 'CI failed: build');
 });

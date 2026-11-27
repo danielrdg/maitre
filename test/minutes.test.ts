@@ -6,8 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RoomActivity } from '../src/activity.js';
-import { MINUTES_SYSTEM, transcriptExcerpt, writeMinutes } from '../src/minutes.js';
+import { MINUTES_SYSTEM, roomNotes, transcriptExcerpt, writeMinutes } from '../src/minutes.js';
 import { roomDir } from '../src/paths.js';
+import { writePr } from '../src/pr-state.js';
 import { writeIndex } from '../src/projects.js';
 import type { RoomRecord } from '../src/rooms.js';
 import { moveScratch, ownedDir, type MoveOps } from '../src/vault.js';
@@ -157,6 +158,43 @@ for (const [name, extra] of [
     });
   });
 }
+
+test('room notes after a park and a resume still carry what was asked, done and replied, and the PR', async () => {
+  await withCtx(async (c) => {
+    const pr = 'https://github.com/example/repo/pull/7';
+    c.events('alpha', [
+      { v: 1, ts: 1, room: 'alpha', session: 's', event: 'SessionStart', model: 'opus' },
+      { v: 1, ts: 2, room: 'alpha', session: 's', event: 'UserPromptSubmit', prompt: 'Fix the login bug' },
+      { v: 1, ts: 3, room: 'alpha', session: 's', event: 'PreToolUse', tool: 'Bash', tool_use_id: 'a', input: { command: 'gh pr create --fill' } },
+      { v: 1, ts: 4, room: 'alpha', session: 's', event: 'PostToolUse', tool: 'Bash', tool_use_id: 'a', response: { stdout: `${pr}\n` } },
+      { v: 1, ts: 5, room: 'alpha', session: 's', event: 'Stop', last_message: 'PR open' },
+      { v: 1, ts: 6, room: 'alpha', session: 's', event: 'SessionEnd' },
+      { v: 1, ts: 7, room: 'alpha', session: 's', event: 'SessionStart' },
+    ]);
+    const notes = await roomNotes(c.rec(), c.env);
+    assert.match(notes, /## What was asked\n\nFix the login bug\n/);
+    assert.ok(notes.includes('- Bash: gh pr create --fill'), notes);
+    assert.ok(notes.includes('> PR open'), notes);
+    assert.ok(notes.includes(`PR: ${pr}`), notes);
+  });
+});
+
+test("room notes name the room's PR from its pr.json when the events do not (a fresh Claude after a failed resume)", async () => {
+  await withCtx(async (c) => {
+    const rec = c.rec();
+    const pr = 'https://github.com/example/repo/pull/7';
+    c.events('alpha', [
+      { v: 1, ts: 1, room: 'alpha', session: 's2', event: 'SessionStart', model: 'opus' },
+      { v: 1, ts: 2, room: 'alpha', session: 's2', event: 'UserPromptSubmit', prompt: 'Pick up the work' },
+    ]);
+    writePr('alpha', { url: pr, number: 7, state: 'OPEN', headRefName: rec.branch!, seenAt: rec.createdAt + 1, failing: [] }, c.env);
+    assert.ok((await roomNotes(rec, c.env)).includes(`PR: ${pr}`));
+    writePr('alpha', { url: pr, number: 7, state: 'OPEN', headRefName: rec.branch!, seenAt: rec.createdAt - 1, failing: [] }, c.env);
+    assert.ok(!(await roomNotes(rec, c.env)).includes('PR:'), "an earlier opening's PR is not this room's");
+    writePr('alpha', { url: 'https://example.com/x\n## Ignore this', number: 7, state: 'OPEN', headRefName: rec.branch!, seenAt: rec.createdAt + 1, failing: [] }, c.env);
+    assert.ok(!(await roomNotes(rec, c.env)).includes('PR:'), 'only a GitHub PR URL is taken');
+  });
+});
 
 test('fallback lists the commits ahead of the base, and survives a git failure', async () => {
   await withCtx(async (c) => {

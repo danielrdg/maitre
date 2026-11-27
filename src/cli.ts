@@ -18,7 +18,8 @@ import { readFailed, readQueue, reserve } from './queue.js';
 import { deliverToRoom, describeDelivery, describeOpen, listRoomRows, openRoom, type RoomRow } from './room-open.js';
 import { attach, runReception, startMaitre } from './reception.js';
 import { parseSetupArgs, runSetup, type SetupOptions } from './setup.js';
-import { reservedFlag, runRoom } from './room-run.js';
+import { recordRoomExit, reservedFlag, runRoom } from './room-run.js';
+import { wakeRoom } from './wake.js';
 import { describeRoute, dispatchRoute, isRequestId, routeRequests } from './router.js';
 import { STATUSES, runStatus, type RoomStatus } from './status.js';
 
@@ -32,11 +33,12 @@ export interface LoungeArgs {
 
 export type CliArgs =
   | LoungeArgs
-  | { cmd: 'room-run'; room: string; extra: string[]; briefFile?: string }
+  | { cmd: 'room-run'; room: string; extra: string[]; briefFile?: string; run?: string }
   | { cmd: 'room-open'; name: string; project?: string; model: string; taskType: string; brief?: string; briefFile?: string }
   | { cmd: 'room-send'; room: string; text: string }
   | { cmd: 'room-list' }
   | { cmd: 'room-close'; room: string }
+  | { cmd: 'room-wake'; room: string }
   | { cmd: 'janitor'; dryRun: boolean }
   | { cmd: 'status'; status: RoomStatus; text: string; options: string[] }
   | { cmd: 'index'; roots: string[] }
@@ -50,9 +52,10 @@ export type CliArgs =
   | { cmd: 'setup'; opts: SetupOptions }
   | { cmd: 'usage'; error: string };
 
-const ROOM_RUN_USAGE = 'usage: maitre room run <name> [--brief-file <path>] [-- <claude args>]';
+const ROOM_RUN_USAGE = 'usage: maitre room run <name> [--run <id>] [--brief-file <path>] [-- <claude args>]';
+const RUN_ID = /^[A-Za-z0-9-]{1,64}$/;
 const ROOM_OPEN_USAGE = 'usage: maitre room open <name> [--project <p>] --model <m> --task <type> (--brief "<text>" | --brief-file <path>)';
-const ROOM_USAGE = 'usage: maitre room <open|send|list|close|run> ...';
+const ROOM_USAGE = 'usage: maitre room <open|send|list|close|wake|run> ...';
 const INDEX_USAGE = 'usage: maitre index [--root <dir>]...';
 const ROUTE_USAGE = 'usage: maitre route <id> [<id>...] [--json]';
 const DISPATCH_USAGE = 'usage: maitre dispatch <id>';
@@ -73,7 +76,13 @@ function parseRoomRun(argv: string[]): CliArgs {
   const [name, ...rest] = argv;
   if (!isName(name)) return usage(ROOM_RUN_USAGE);
   let briefFile: string | undefined;
+  let run: string | undefined;
   let more = rest;
+  if (more[0] === '--run') {
+    if (more[1] === undefined || !RUN_ID.test(more[1])) return usage(ROOM_RUN_USAGE);
+    run = more[1];
+    more = more.slice(2);
+  }
   if (more[0] === '--brief-file') {
     if (more[1] === undefined || more[1] === '--') return usage(ROOM_RUN_USAGE);
     briefFile = more[1];
@@ -83,7 +92,7 @@ function parseRoomRun(argv: string[]): CliArgs {
   const extra = more.slice(1);
   const reserved = reservedFlag(extra);
   if (reserved !== undefined) return usage(`${reserved.split('=')[0]} is set by maitre for every room and cannot be passed after --`);
-  return briefFile === undefined ? { cmd: 'room-run', room: name, extra } : { cmd: 'room-run', room: name, extra, briefFile };
+  return { cmd: 'room-run', room: name, extra, ...(briefFile !== undefined ? { briefFile } : {}), ...(run !== undefined ? { run } : {}) };
 }
 
 const OPEN_FLAGS: Record<string, 'project' | 'model' | 'taskType' | 'brief' | 'briefFile'> = {
@@ -125,6 +134,7 @@ function parseRoom(argv: string[]): CliArgs {
   }
   if (sub === 'list') return rest.length === 0 ? { cmd: 'room-list' } : usage('usage: maitre room list');
   if (sub === 'close') return rest.length === 1 && isName(rest[0]) ? { cmd: 'room-close', room: rest[0] } : usage('usage: maitre room close <room>');
+  if (sub === 'wake') return rest.length === 1 && isName(rest[0]) ? { cmd: 'room-wake', room: rest[0] } : usage('usage: maitre room wake <room>');
   return usage(ROOM_USAGE);
 }
 
@@ -210,7 +220,8 @@ Usage:
   maitre room send <room> "<text>"
   maitre room list
   maitre room close <room>
-  maitre room run <name> [--brief-file <path>] [-- <claude args>]
+  maitre room wake <room>
+  maitre room run <name> [--run <id>] [--brief-file <path>] [-- <claude args>]
   maitre status <working|waiting|blocked> "<text>" [--option <o>]...
   maitre index [--root <dir>]...
   maitre projects
@@ -231,6 +242,7 @@ Commands:
   room send     Send a message to a running room without waiting for its turn
   room list     List rooms with their herdr status and lounge state
   room close    Write a room's minutes, exit it and close its tab (its directory is kept)
+  room wake     Bring back a parked room (or one whose Claude died) by resuming its session in a new tab
   room run      Start Claude Code in a named room the lounge can see
   index         Scan roots for git repos and write the project index
   projects      List indexed projects
@@ -285,7 +297,7 @@ function waiting(room: string): boolean {
   }
 }
 
-async function roomCommand(args: Extract<CliArgs, { cmd: 'room-open' | 'room-send' | 'room-list' | 'room-close' }>): Promise<void> {
+async function roomCommand(args: Extract<CliArgs, { cmd: 'room-open' | 'room-send' | 'room-list' | 'room-close' | 'room-wake' }>): Promise<void> {
   if (args.cmd === 'room-open') {
     let brief = args.brief;
     if (brief === undefined) {
@@ -306,7 +318,12 @@ async function roomCommand(args: Extract<CliArgs, { cmd: 'room-open' | 'room-sen
     console.log(describeOpen(rec));
   } else if (args.cmd === 'room-send') {
     const room = roomSlug(args.room);
-    console.log(describeDelivery(room, await deliverToRoom(room, args.text, process.env, sendConfirm())));
+    const sent = await deliverToRoom(room, args.text, process.env, sendConfirm());
+    console.log(describeDelivery(room, sent));
+    // A script (or a room sending to another) must not take a request that may sit unsent for delivered.
+    if (sent.result === 'unsent') process.exitCode = 3;
+  } else if (args.cmd === 'room-wake') {
+    for (const line of (await wakeRoom(args.room)).lines) console.log(line);
   } else if (args.cmd === 'room-list') {
     const rows = await listRoomRows(process.env, { warn: (w) => console.error(`maitre: warning: ${w}`) });
     console.log(rows.length === 0 ? 'no rooms' : formatRows(rows).join('\n'));
@@ -433,7 +450,7 @@ export async function main(argv: string[]): Promise<void> {
     process.exitCode = runStatus(args.status, args.text, args.options);
     return;
   }
-  if (args.cmd === 'room-open' || args.cmd === 'room-send' || args.cmd === 'room-list' || args.cmd === 'room-close') {
+  if (args.cmd === 'room-open' || args.cmd === 'room-send' || args.cmd === 'room-list' || args.cmd === 'room-close' || args.cmd === 'room-wake') {
     try {
       await roomCommand(args);
     } catch (err) {
@@ -456,13 +473,14 @@ export async function main(argv: string[]): Promise<void> {
         brief = readFileSync(args.briefFile, 'utf8');
       } catch (err) {
         console.error(`maitre: could not read the brief file: ${(err as Error).message}`);
+        recordRoomExit(args.room, process.env, args.run);
         process.exitCode = 1;
         return;
       }
     }
     let code: number;
     try {
-      code = await runRoom(args.room, args.extra, process.env, brief);
+      code = await runRoom(args.room, args.extra, process.env, brief, args.run);
     } catch (err) {
       console.error(`maitre: could not prepare the room: ${(err as Error).message}`);
       code = 1;

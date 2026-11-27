@@ -19,8 +19,13 @@ export interface RoomRecord {
   // A room found not running with something pending: why the janitor leaves it alone (a dead room is
   // never on the couch, which is for running rooms).
   pending?: { since: number; reasons: string[] };
+  // Claude stopped to free the seat; the tab is gone, the worktree, branch and session stay.
+  seat?: { releasedAt: number; session: string };
   // The queuedAt of the queue entry the doorman opened this room from.
   fromQueue?: number;
+  // Set on every open since rooms could be woken, and on a room found running: a room closed by hand
+  // before M3a has only closedAt, like one whose Claude died, and is never offered for waking.
+  resumable?: true;
 }
 
 function roomFile(room: string, env: NodeJS.ProcessEnv): string {
@@ -82,7 +87,8 @@ export function parked(v: unknown): Parked | undefined {
   return { since: c.since, reasons: c.reasons.filter((r): r is string => typeof r === 'string') };
 }
 
-// A couch holds only while the room stays idle (ready or coffee) with no event after it was set.
+// A couch holds only while the room stays at rest (ready, coffee, or whisky: delivered a PR) with no
+// event after it was set. The janitor's resting states.
 export function couchHolds(c: Parked, state: string, lastEventAt: number | undefined): boolean {
-  return (state === 'ready' || state === 'coffee') && (lastEventAt ?? -Infinity) <= c.since;
+  return (state === 'ready' || state === 'coffee' || state === 'whisky') && (lastEventAt ?? -Infinity) <= c.since;
 }

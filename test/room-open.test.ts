@@ -7,9 +7,10 @@ import { fileURLToPath } from 'node:url';
 import type { HookLine } from '../src/events.js';
 import { HerdrError, shellQuote } from '../src/herdr.js';
 import { roomDir } from '../src/paths.js';
+import { readPr, writePr } from '../src/pr-state.js';
 import { writeIndex, type Project } from '../src/projects.js';
 import { closeRoom } from '../src/janitor.js';
-import { BRIEF_HEADER, inputText, listRoomRows, markNotRunning, openRoom, promptMatches, roomLabel, sendToRoom, unwrapPasted } from '../src/room-open.js';
+import { BRIEF_HEADER, deliverToRoom, describeDelivery, holdsTyped, inputText, listRoomRows, markNotRunning, openRoom, promptMatches, roomLabel, sendToRoom, unwrapPasted } from '../src/room-open.js';
 import { reduce, type RoomState } from '../src/room-state.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
 import { herdrSandbox, type HerdrSandbox } from './herdr-sandbox.js';
@@ -277,15 +278,38 @@ test('room send reports unconfirmed when the prompt never shows up, ignoring an 
   await openScratch();
   assert.equal(await sendToRoom('x', 'hello', process.env, { confirmMs: 3000 }), 'delivered');
   process.env.FAKE_HERDR_PROMPT_HOOK = '0';
-  assert.equal(await sendToRoom('x', 'hello', process.env, { confirmMs: 300 }), 'unconfirmed');
+  assert.equal(await sendToRoom('x', 'hello', process.env, { confirmMs: 300 }), 'unsent', 'not confirmed is never "all done"');
 });
 
 test('room send to a gone pane says the room is not running and marks it closed', async () => {
   await openScratch();
   sb.setState({ next: 2, workspaces: {}, panes: {} });
-  await assert.rejects(sendToRoom('x', 'hi'), /^Error: room x is not running — open it again with: maitre room open …$/);
+  await assert.rejects(sendToRoom('x', 'hi'), /^Error: room x is not running — wake it with: maitre room wake x$/);
   assert.equal(typeof readRoom('x')?.closedAt, 'number');
   assert.deepEqual(herdrCalls('agent', 'prompt'), []);
+  // A record from before the wake stamp (its Claude died before the upgrade): not offered, but its session is known.
+  const { resumable: _r, ...old } = readRoom('x')!;
+  writeRoom(old);
+  await assert.rejects(sendToRoom('x', 'hi'), /^Error: room x is not running — open it again with: maitre room open … \(or, if its Claude crashed, wake it with: maitre room wake x\)$/);
+  writeFileSync(join(roomDir('x'), 'events.jsonl'), '');
+  await assert.rejects(sendToRoom('x', 'hi'), /^Error: room x is not running — open it again with: maitre room open …$/, 'no session to resume');
+});
+
+test('room open refuses a parked room (a seat on its record): wake it, or close it first; nothing is touched', async () => {
+  await openScratch();
+  writePr('x', { url: 'https://github.com/o/r/pull/7', number: 7, state: 'OPEN', headRefName: 'maitre/x', seenAt: Date.now(), failing: [] });
+  const parked = { ...readRoom('x')!, seat: { releasedAt: Date.now(), session: 's1' } };
+  writeRoom(parked);
+  sb.setState({ ...sb.state(), workspaces: {}, panes: {} });
+  const before = herdrCalls('workspace', 'create').length;
+  await assert.rejects(openScratch(), /^Error: room x is parked — wake it with: maitre room wake x \(or close it first with: maitre room close x\)$/);
+  assert.equal(herdrCalls('workspace', 'create').length, before);
+  assert.deepEqual(readRoom('x'), parked);
+  assert.equal(readPr('x')?.number, 7);
+  await closeRoom('x', process.env, { exitTimeoutMs: 200 });
+  assert.equal(readRoom('x')!.closedBy, 'user');
+  await openScratch();
+  assert.equal(readRoom('x')!.seat, undefined, 'the close the message points at lets it open fresh');
 });
 
 test('room send to a restored bare shell, or to a pane id now in another tab, says not running', async () => {
@@ -313,6 +337,128 @@ test('room send refuses a message over the brief limit with one line, typing not
   assert.deepEqual(herdrCalls('agent', 'prompt'), []);
   await sendToRoom('x', 'a'.repeat(100_000));
   assert.equal(herdrCalls('agent', 'prompt').length, 1);
+});
+
+const enters = () => sb.calls().filter((c) => c[0] === 'agent' && c[1] === 'send-keys' && c.slice(3).join(' ') === 'enter');
+
+test('a request left typed in the input box gets one more Enter, and is confirmed then', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 }), { result: 'delivered', busy: false });
+  assert.equal(enters().length, 1);
+});
+
+test('a request still unsent after that Enter is reported typed, to be sent by hand', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-stuck';
+  const r = await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 });
+  assert.deepEqual(r, { result: 'unsent', busy: false });
+  assert.equal(enters().length, 1, 'one Enter, not more');
+  assert.equal(describeDelivery('x', r), "not confirmed: the request may be typed in x's input — check its tab and press Enter there");
+});
+
+test('a request that shows up in the input box only after the first look still gets its Enter, and is confirmed', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-late';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 600 }), { result: 'delivered', busy: false });
+  assert.equal(enters().length, 1);
+});
+
+test('a request wrapped over lines in the input box, as Claude Code shows a long one, is still maître\'s own text', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed';
+  process.env.FAKE_HERDR_TYPED_WRAP = '12';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout flow and the session cookie too', process.env, { confirmMs: 600 }), { result: 'delivered', busy: false });
+  assert.equal(enters().length, 1);
+});
+
+test('a box that changes to other text before the Enter gets none', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-swap';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 600 }), { result: 'unsent', busy: false });
+  assert.deepEqual(enters(), []);
+});
+
+test('a room whose Claude exits before the Enter gets none, and the delivery ends as needing you, not as an error', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-exit';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 600 }), { result: 'unsent', busy: false });
+  assert.deepEqual(enters(), []);
+});
+
+test('never confirmed with an empty input box still needs you: the request may be typed later', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = '0';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 }), { result: 'unsent', busy: false });
+  assert.deepEqual(enters(), []);
+});
+
+test('maitre room send exits 3 when the request may sit typed and unsent', () => {
+  return openScratch().then(() => {
+    const r = cli(['room', 'send', 'x', 'check the logout too'], { FAKE_HERDR_PROMPT_HOOK: 'typed-stuck', MAITRE_SEND_CONFIRM_MS: '300' });
+    assert.equal(r.status, 3, r.stderr);
+    assert.equal(r.stdout, "not confirmed: the request may be typed in x's input — check its tab and press Enter there\n");
+  });
+});
+
+test('an input box captured as herdr gives it (ANSI, wrapped, status lines below) holds maître\'s text', () => {
+  const E = '\x1b';
+  const rule = `${E}[2m${E}[38;5;244m${'─'.repeat(60)}${E}[0m\r`;
+  const screen = [
+    `${E}[1m● done 12:05${E}[0m\r`,
+    rule,
+    `${E}[0m❯\u00a0Follow-up for room wake4: repeat item 5 of the numbered list you gave in your first\r`,
+    `  reply.\r`,
+    `\r`,
+    rule,
+    `  ${E}[2m⏵⏵ auto mode on (shift+tab to cycle)${E}[0m\r`,
+  ].join('\n');
+  assert.equal(holdsTyped(screen, 'Follow-up for room wake4: repeat item 5 of the numbered list you gave in your first reply.'), true);
+  assert.equal(holdsTyped(screen, 'Follow-up for room wake4: repeat item 4'), false);
+});
+
+test("text in the input box that maître did not type never gets an Enter: the request is reported unsent", async () => {
+  await openScratch();
+  const st = sb.state();
+  st.panes['w1:p1']!.screen = `${'─'.repeat(40)}\n❯\u00a0my own draft\n${'─'.repeat(40)}\n`;
+  sb.setState(st);
+  process.env.FAKE_HERDR_PROMPT_HOOK = '0';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 }), { result: 'unsent', busy: false });
+  assert.deepEqual(enters(), []);
+});
+
+test('a box whose room turns to a question before the Enter gets none', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-block';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 }), { result: 'unsent', busy: false });
+  assert.deepEqual(enters(), []);
+});
+
+test('a hook line that lands late after maître\'s own Enter, the box emptied, still counts as delivered', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-slow';
+  const text = 'check the logout too';
+  const late = setInterval(() => {
+    if (enters().length === 0) return;
+    clearInterval(late);
+    setTimeout(() => appendFileSync(join(roomDir('x'), 'events.jsonl'), JSON.stringify({ v: 1, ts: Date.now(), room: 'x', session: 's1', event: 'UserPromptSubmit', prompt: text }) + '\n'), 600);
+  }, 20);
+  try {
+    assert.deepEqual(await deliverToRoom('x', text, process.env, { confirmMs: 300 }), { result: 'delivered', busy: false });
+  } finally {
+    clearInterval(late);
+  }
+});
+
+test("a busy room's request still sitting in its box is not taken for delivered: it needs you", async () => {
+  await openScratch();
+  const s = sb.state();
+  s.panes['w1:p1'].agent = 'working';
+  sb.setState(s);
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-busy';
+  const r = await deliverToRoom('x', 'later', process.env, { confirmMs: 300 });
+  assert.deepEqual(r, { result: 'unsent', busy: true });
+  assert.deepEqual(enters(), [], 'no Enter into a working room');
 });
 
 test('room send to a working room types it anyway; unconfirmed when the room has only queued it', async () => {
@@ -372,7 +518,7 @@ test('room list shows each room with its herdr status and lounge state; restored
   const rows = await listRoomRows();
   assert.deepEqual(rows, [
     { room: 'a', model: 'sonnet', herdr: 'idle', lounge },
-    { room: 'b', model: 'sonnet', herdr: 'not running', lounge: 'coffee' },
+    { room: 'b', model: 'sonnet', herdr: 'not running', lounge: 'parked — wake: maitre room wake b' },
   ]);
   assert.equal(typeof readRoom('b')?.closedAt, 'number');
   assert.equal(readRoom('a')?.closedAt, undefined);
@@ -414,8 +560,8 @@ test('room close closes a restored bare-shell tab and never touches a reused pan
   assert.equal(typeof readRoom('x')?.closedAt, 'number');
 });
 
-function cli(args: string[]): { status: number | null; stdout: string; stderr: string } {
-  const r = spawnSync(process.execPath, [MAITRE, ...args], { env: sb.env, encoding: 'utf8' });
+function cli(args: string[], extra: NodeJS.ProcessEnv = {}): { status: number | null; stdout: string; stderr: string } {
+  const r = spawnSync(process.execPath, [MAITRE, ...args], { env: { ...sb.env, ...extra }, encoding: 'utf8' });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
@@ -593,9 +739,43 @@ test('room list shows a couch that holds with its reasons, a dead room\'s pendin
     [
       ['a', 'idle', 'couch: uncommitted changes: f.txt; an open PR'],
       ['b', 'idle', 'ready'],
-      ['c', 'not running', 'coffee, pending: 2 commits not pushed'],
+      ['c', 'not running', 'parked, pending: 2 commits not pushed — wake: maitre room wake c'],
       ['d', 'not running', 'closed'],
       ['e', 'idle', 'coffee'],
     ],
   );
+});
+
+test('a fresh open of a room name drops the pr.json and pr-seek.json an earlier opening left; a failed open keeps them', async () => {
+  project();
+  const first = await openRoom({ name: 'a', project: 'proj', model: 'sonnet', taskType: 'change', brief: 'do it' }, process.env, FAST);
+  writePr('a', { url: 'https://github.com/o/r/pull/7', number: 7, state: 'MERGED', headRefName: first.branch!, seenAt: Date.now(), failing: [] });
+  writeFileSync(join(roomDir('a'), 'pr-seek.json'), JSON.stringify({ discoveredAt: Date.now() }));
+  sb.setState({ ...sb.state(), workspaces: {}, panes: {} });
+
+  process.env.FAKE_HERDR_ON_RUN = 'shell';
+  await assert.rejects(openRoom({ name: 'a', project: 'proj', model: 'sonnet', taskType: 'change', brief: 'again' }, process.env, { trustTimeoutMs: 200, pollMs: 10 }), /did not start/);
+  assert.equal(readPr('a')?.state, 'MERGED', 'a failed open changes nothing');
+  assert.ok(existsSync(join(roomDir('a'), 'pr-seek.json')));
+
+  delete process.env.FAKE_HERDR_ON_RUN;
+  await openRoom({ name: 'a', project: 'proj', model: 'sonnet', taskType: 'change', brief: 'again' }, process.env, FAST);
+  assert.equal(readPr('a'), undefined);
+  assert.equal(existsSync(join(roomDir('a'), 'pr.json')), false);
+  assert.equal(existsSync(join(roomDir('a'), 'pr-seek.json')), false);
+});
+
+test('room list shows a PR notice, filtered and clipped, until the room\'s next real prompt', async () => {
+  for (const name of ['a', 'b']) await openScratch(name);
+  for (const name of ['a', 'b']) writeRoom({ ...readRoom(name)!, branch: `maitre/${name}` });
+  const since = Date.now() + 1000;
+  const notice = (text: string) => ({ kind: 'review' as const, text, url: 'https://github.com/o/r/pull/7', since });
+  const pr = (name: string, text: string) => writePr(name, { url: 'https://github.com/o/r/pull/7', number: 7, state: 'OPEN', headRefName: `maitre/${name}`, seenAt: since, failing: [], notice: notice(text) });
+  pr('a', `New comment from \u202erev ${'x'.repeat(200)}`);
+  pr('b', 'New review from rev');
+  appendFileSync(join(roomDir('b'), 'events.jsonl'), JSON.stringify({ v: 1, room: 'b', session: 's1', ts: since + 5, event: 'UserPromptSubmit', prompt: 'look' }) + '\n');
+  const rows = Object.fromEntries((await listRoomRows(process.env, { queue: false })).map((r) => [r.room, r.lounge]));
+  assert.match(rows.a!, /^coffee; PR review: New comment from \?rev x+…$/);
+  assert.ok(rows.a!.length < 140, rows.a);
+  assert.equal(rows.b, 'work', 'read: a real prompt after it');
 });

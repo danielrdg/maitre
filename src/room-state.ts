@@ -139,7 +139,8 @@ function pushStep(steps: string[], step: string): string[] {
   return [...steps, step].slice(-MAX_STEPS);
 }
 
-function fresh(ev: HookLine, prev: RoomState | undefined): Tracked {
+function fresh(ev: HookLine, prev: RoomState | undefined, keep = false): Tracked {
+  const kept = keep && prev !== undefined ? prev : undefined;
   return {
     room: ev.room,
     session: ev.session,
@@ -147,8 +148,10 @@ function fresh(ev: HookLine, prev: RoomState | undefined): Tracked {
     state: 'coffee',
     since: ev.ts,
     updatedAt: ev.ts,
-    task: '',
-    steps: [],
+    task: kept?.task ?? '',
+    steps: kept?.steps ?? [],
+    ...(kept?.reply !== undefined ? { reply: kept.reply } : {}),
+    ...(kept?.prUrl !== undefined ? { prUrl: kept.prUrl } : {}),
     subagents: [],
     [TRACK]: { pending: [], finished: [] },
   };
@@ -194,7 +197,10 @@ export function reduce(prev: RoomState | undefined, ev: HookLine): RoomState {
   if (prev?.state === 'exit' && !reopens) return prev;
   const reset = prev === undefined || session === 'new' || reopens;
   const resumed = restarting && prev !== undefined ? prev.session : '';
-  const base: Tracked = reset ? fresh({ ...ev, room: str(ev.room) ?? '', session: str(ev.session) || resumed }, prev) : (prev as Tracked);
+  // The same session coming back (--resume, or maître's note while it starts) is the same conversation:
+  // what the room was asked, did, replied and opened stays; only its live state starts over.
+  const same = reopens && (restarting || (str(ev.session) ?? '') === prev!.session);
+  const base: Tracked = reset ? fresh({ ...ev, room: str(ev.room) ?? '', session: str(ev.session) || resumed }, prev, same) : (prev as Tracked);
   const s: Tracked = { ...base, room: str(ev.room) || base.room, session: base.session || (str(ev.session) ?? ''), updatedAt: ev.ts };
   const track: Track = { pending: [], finished: [], ...base[TRACK] };
   const agentId = str(ev.agent_id);

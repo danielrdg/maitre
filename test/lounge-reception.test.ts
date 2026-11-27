@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { LiveRooms, liveRoutes } from '../src/live-api.js';
 import {
   BusyError,
+  RECEPTION_TIMEOUT_MS,
   ReceptionQueue,
   TimeoutError,
   displayEnv,
@@ -24,6 +25,9 @@ import { openRoom } from '../src/room-open.js';
 import { readRoom } from '../src/rooms.js';
 import { claimLounge } from '../src/lounge-file.js';
 import { QUEUE_HINT } from '../src/router.js';
+import { WORST_DELIVERY_MS } from '../src/room-open.js';
+import { ROUTER_TIMEOUT_MS } from '../src/router.js';
+import { WORST_WAKE_MS } from '../src/wake.js';
 import { herdrSandbox, type HerdrSandbox } from './herdr-sandbox.js';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
@@ -164,6 +168,12 @@ function gate(): { wait: Promise<void>; open: () => void } {
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
 // --- ReceptionQueue
+
+test("the lounge reception's ceiling covers a follow-up's worst case (route, wake, delivery) with a margin, under Node's 300 s request timeout", () => {
+  const worst = ROUTER_TIMEOUT_MS + WORST_WAKE_MS + WORST_DELIVERY_MS;
+  assert.ok(RECEPTION_TIMEOUT_MS >= worst + 30_000, `${RECEPTION_TIMEOUT_MS} < ${worst} + 30 s`);
+  assert.ok(RECEPTION_TIMEOUT_MS < 300_000);
+});
 
 test('ReceptionQueue runs one job at a time, lets 3 wait and refuses the next with BusyError', async () => {
   const q = new ReceptionQueue({ timeoutMs: 10_000 });

@@ -48,7 +48,7 @@ export class RouterError extends Error {
 const TASK_TYPES: readonly string[] = ['simple', 'explore', 'change', 'build', 'decide'];
 const MODELS: readonly string[] = ['haiku', 'sonnet', 'opus'];
 const DEFAULT_MODEL: RouteModel = 'sonnet';
-const TIMEOUT_MS = 60_000;
+export const ROUTER_TIMEOUT_MS = 60_000;
 const MAX_REQUEST_CHARS = 6_000;
 const MAX_TASK_CHARS = 100;
 const MAX_QUESTION_CHARS = 200;
@@ -314,7 +314,7 @@ export async function routeDetailed(request: string, env: NodeJS.ProcessEnv = pr
   const projects = readIndex(env);
   const { rooms, warning } = await openRoomsFor(env);
   const ms = Number(env.MAITRE_ROUTER_TIMEOUT_MS);
-  const raw = await callClaude(buildRouterPrompt(request, projects, rooms, recentMinutes(env)), env, Number.isFinite(ms) && ms > 0 ? ms : TIMEOUT_MS);
+  const raw = await callClaude(buildRouterPrompt(request, projects, rooms, recentMinutes(env)), env, Number.isFinite(ms) && ms > 0 ? ms : ROUTER_TIMEOUT_MS);
   const taken = listRooms(env).flatMap((r) => (typeof r.room === 'string' ? [{ name: r.room, ...(r.project !== undefined ? { project: r.project } : {}) }] : []));
   taken.push(...rooms.filter((r) => r.state === 'queued').map((r) => ({ name: r.name, ...(r.project !== undefined ? { project: r.project } : {}) })));
   return { route: parseRoute(raw, projects, rooms.map((r) => r.name), taken, (c, p) => hasMinutes(c, p, env)), ...(warning !== undefined ? { warning } : {}) };

@@ -30,7 +30,9 @@ type SpawnTerminal = (c: TerminalCommand, env: NodeJS.ProcessEnv) => void | Prom
 
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_WAITING = 3;
-const TIMEOUT_MS = 150_000;
+// A follow-up to a parked room runs the router, a wake and a delivery in one job: their worst cases add up
+// to about 190 s under load. Below Node's 300 s request timeout, so the reply (and its needsYou) still arrives.
+export const RECEPTION_TIMEOUT_MS = 240_000;
 const SHOW_ENV_TIMEOUT_MS = 5_000;
 const BUSY = 'the maître is busy, try again';
 const TOO_SLOW = 'the maître took too long to answer; check the lounge before sending it again';
@@ -63,7 +65,7 @@ export class ReceptionQueue {
 
   constructor(opts: { maxWaiting?: number; timeoutMs?: number } = {}) {
     this.maxWaiting = opts.maxWaiting ?? MAX_WAITING;
-    this.timeoutMs = opts.timeoutMs ?? TIMEOUT_MS;
+    this.timeoutMs = opts.timeoutMs ?? RECEPTION_TIMEOUT_MS;
   }
 
   get waitingCount(): number {

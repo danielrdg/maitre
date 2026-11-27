@@ -59,6 +59,9 @@ type Timing = Required<Omit<WakeDeps, 'request' | 'afterTab'>>;
 
 // Measured in the resume spike (docs/spikes/2026-11-27-m3b-resume.md).
 const DEFAULTS: Timing = { pollMs: 200, herdrMs: 1_000, resumeTimeoutMs: 15_000, slowStartMs: 60_000, trustTimeoutMs: 30_000, readyMs: 10_000 };
+// The longest a wake takes, herdr's latency aside: a resume confirmed at the last moment and then waited
+// for, or one failed at the last moment and replaced by a fresh Claude that waits on its trust dialog.
+export const WORST_WAKE_MS = DEFAULTS.slowStartMs + Math.max(DEFAULTS.readyMs, DEFAULTS.trustTimeoutMs);
 // A session id as Claude Code writes it; anything else (a string starting with `-`, spaces) is never passed on.
 const SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 export const isSessionId = (s: unknown): s is string => typeof s === 'string' && SESSION.test(s);

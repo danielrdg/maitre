@@ -13,6 +13,8 @@ import { receptionSettings, writeReceptionSettings } from '../src/hook-settings.
 import { buildReceptionCommand, startMaitre } from '../src/reception.js';
 import { roomDir } from '../src/paths.js';
 import { reserve } from '../src/queue.js';
+import { WORST_DELIVERY_MS } from '../src/room-open.js';
+import { WORST_WAKE_MS } from '../src/wake.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
 import { trustScope } from '../src/trust.js';
 import { fakeBin } from './fake-bin.js';
@@ -43,12 +45,18 @@ test('receptionSettings: Bash(maitre:*), the request hook (also the started mark
   const request = { type: 'command', command: '"/opt/node" "/opt/m/hooks/reception-request.mjs"' };
   assert.deepEqual(s, {
     permissions: { allow: ['Bash(maitre:*)'] },
+    env: { BASH_DEFAULT_TIMEOUT_MS: '300000' },
     hooks: {
       UserPromptSubmit: [{ hooks: [request] }],
       PreToolUse: [{ hooks: [{ type: 'command', command: '"/opt/node" "/opt/m/hooks/reception-guard.mjs" || exit 2' }] }],
       SessionStart: [{ hooks: [request] }],
     },
   });
+});
+
+test("the terminal reception's Bash timeout covers a dispatch's worst case (wake and delivery) with a margin", () => {
+  const s = receptionSettings({ requestHook: '/r.mjs', guardHook: '/g.mjs', nodePath: '/n' }) as { env: Record<string, string> };
+  assert.ok(Number(s.env.BASH_DEFAULT_TIMEOUT_MS) >= WORST_WAKE_MS + WORST_DELIVERY_MS + 60_000);
 });
 
 test('receptionSettings re-adds herdr\'s own state hook the way herdr registers it', () => {

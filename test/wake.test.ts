@@ -25,7 +25,7 @@ const FAKE_GH = join(ROOT, 'test', 'fixtures', 'fake-gh.mjs');
 const GIT_ENV = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 const FAST = { trustTimeoutMs: 120_000, pollMs: 10 };
 // Large deadlines: these tests expect the verdict to come early, never at a timeout.
-const QUICK: WakeDeps = { pollMs: 10, herdrMs: 10, resumeTimeoutMs: 60_000, notFoundMs: 60_000, trustTimeoutMs: 60_000, readyMs: 60_000 };
+const QUICK: WakeDeps = { pollMs: 10, herdrMs: 10, resumeTimeoutMs: 60_000, trustTimeoutMs: 60_000, readyMs: 60_000 };
 
 let sb: HerdrSandbox;
 
@@ -326,14 +326,35 @@ test('the resume picker is caught at once, without waiting for the deadline, and
   assert.equal(tabs().length, 1);
 });
 
-test('a resume with no Claude in its tab at the deadline fails there and falls back to a fresh claude', async () => {
+test('a tab that shows neither a Claude nor any failure is kept as still starting: no fresh start', async () => {
   await open('a');
   parkByHand('a');
   process.env.FAKE_HERDR_RESUME = 'shell';
-  const w = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 300 });
-  assert.equal(w.resumed, false);
-  assert.match(w.lines[0], /could not be resumed \(it did not start within 0\.3 s\)/);
+  const w = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 200, slowStartMs: 600 });
+  assert.deepEqual(w, { resumed: true, lines: ['woke a: its session is still starting — check its tab'], needsYou: true });
+  assert.equal(tabs().length, 1, 'the tab is kept');
+  assert.equal(runs().filter((r) => r.includes("'--brief-file'")).length, 1, 'no fresh start');
+});
+
+test('a resume whose claude shows up in its tab only after 6 s is waited for: resumed, one tab, no fresh start', async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'delayed';
+  process.env.FAKE_HERDR_APPEAR_MS = '6000';
+  const w = await wakeRoom('a', process.env, { pollMs: 10, herdrMs: 50 });
+  assert.deepEqual(w, { resumed: true, lines: ['woke a: resumed its session'], needsYou: false });
   assert.equal(tabs().length, 1);
+  assert.equal(runs().filter((r) => r.includes("'--brief-file'")).length, 1, 'no fresh start');
+});
+
+test('"No conversation found" on screen, even before Claude was ever seen, fails at once and falls back', async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'missing-unseen';
+  const w = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 3_000 });
+  assert.equal(w.resumed, false);
+  assert.match(w.lines[0], /could not be resumed \(its session was not found\)/);
+  assert.match(runs().at(-1)!, /'--brief-file'/);
 });
 
 test('a slow resume (its SessionStart after the deadline, a Claude in its tab all along) is waited for: resumed, one tab, no fresh start', async () => {
@@ -543,18 +564,16 @@ test('a SessionStart with another session id is not a resume: it fails at the de
   assert.match(runs().at(-1)!, /'--brief-file'/);
 });
 
-test('a tab where Claude never appears waits out the not-found grace, then fails', async () => {
+test("a resume whose command ended before Claude started (maitre room run's exit line) fails at once and falls back", async () => {
   await open('a');
   parkByHand('a');
-  process.env.FAKE_HERDR_RESUME = 'shell';
+  process.env.FAKE_HERDR_RESUME = 'ended';
   const t0 = Date.now();
-  const w = await wakeRoom('a', process.env, { ...QUICK, notFoundMs: 1_500 });
-  const took = Date.now() - t0;
+  const w = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 3_000 });
   assert.equal(w.resumed, false);
-  assert.match(w.lines[0], /could not be resumed \(Claude exited\)/);
-  assert.ok(took >= 1_500, `failed after ${took} ms, before the grace`);
-  assert.ok(agentGets() >= 3, `a bare shell was looked at ${agentGets()} times before it counted as a failure`);
-  assert.ok(took < 30_000, 'long before the resume deadline');
+  assert.match(w.lines[0], /could not be resumed \(its command ended before Claude started\)/);
+  assert.ok(Date.now() - t0 < 3_000, 'before the deadline');
+  assert.match(runs().at(-1)!, /'--brief-file'/);
 });
 
 // The SessionStart lands right after the first `agent get`, in the same look as the state it beats.
@@ -576,7 +595,7 @@ for (const [mode, seen] of [
     parkByHand('a');
     process.env.FAKE_HERDR_RESUME = mode;
     sessionStartAfterFirstLook('a');
-    const w = await wakeRoom('a', process.env, { ...QUICK, notFoundMs: 0 });
+    const w = await wakeRoom('a', process.env, QUICK);
     assert.deepEqual(w, { resumed: true, lines: ['woke a: resumed its session'], needsYou: false });
     assert.equal(runs().length, 2, 'no fresh start');
   });

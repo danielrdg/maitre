@@ -102,7 +102,10 @@ function resumeId(cmd) {
 // 'slow' (unknown for two `agent get`s, then idle), 'start-unregistered' (herdr answers agent_not_found
 // for two `agent get`s, then idle), 'start-exit' (seen once, then exits),
 // 'start-unknown' (herdr never sees it), 'start-blocked' (a question). 'flap': idle with no SessionStart (a test
-// writes it), and herdr misses the agent for one look, the second.
+// writes it), and herdr misses the agent for one look, the second. 'delayed': no agent until
+// $FAKE_HERDR_APPEAR_MS have passed (a slow start), then idle with its SessionStart. 'ended': the room's
+// command ends before Claude starts (a bare shell, and `maitre room run`'s MaitreExit line).
+// 'missing-unseen': "No conversation found" on screen before herdr ever saw Claude.
 function resume(p, id, wenv) {
   const mode = process.env.FAKE_HERDR_RESUME ?? 'ok';
   p.resume = id;
@@ -116,6 +119,18 @@ function resume(p, id, wenv) {
     p.screen = ' Resume session\n\n ⌕ Search…\n\n ❯ an earlier session\n';
   } else if (mode === 'hang') {
     p.agent = 'idle';
+  } else if (mode === 'delayed') {
+    p.agent = 'shell';
+    p.appearAt = Date.now() + Number(process.env.FAKE_HERDR_APPEAR_MS ?? 8000);
+  } else if (mode === 'ended') {
+    p.agent = 'shell';
+    if (wenv.MAITRE_ROOM && wenv.MAITRE_HOME) {
+      const line = { v: 1, ts: Date.now(), room: wenv.MAITRE_ROOM, session: '', event: 'MaitreExit' };
+      appendFileSync(join(wenv.MAITRE_HOME, 'state', 'rooms', wenv.MAITRE_ROOM, 'events.jsonl'), JSON.stringify(line) + '\n');
+    }
+  } else if (mode === 'missing-unseen') {
+    p.agent = 'shell';
+    p.screen = `No conversation found with session ID: ${id}\n$ \n`;
   } else if (mode === 'flap') {
     p.agent = 'idle';
     p.missAfter = 1;
@@ -295,6 +310,13 @@ function stateful(file) {
           p.agent = 'shell';
           delete p.exitAfter;
         } else p.exitAfter--;
+        save();
+      }
+      // A slow start: no agent until appearAt, then a Claude that fires its SessionStart.
+      if (p && p.appearAt !== undefined && Date.now() >= p.appearAt) {
+        delete p.appearAt;
+        p.agent = 'idle';
+        sessionStart(p, st.workspaces[p.ws].env ?? {});
         save();
       }
       // A Claude herdr misses for one look after `missAfter` looks.

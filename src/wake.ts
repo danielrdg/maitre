@@ -36,10 +36,8 @@ export interface WakeDeps {
   pollMs?: number;
   herdrMs?: number;
   resumeTimeoutMs?: number;
-  // A Claude seen in the tab whose SessionStart is late is waited for this long in all, then kept.
+  // A resume with no SessionStart and no sign of failure is waited for this long in all, then kept.
   slowStartMs?: number;
-  // A bare shell before Claude was ever seen counts as a failed resume only after this long.
-  notFoundMs?: number;
   trustTimeoutMs?: number;
   readyMs?: number;
   // Runs once the resume command was typed into the new tab.
@@ -56,11 +54,13 @@ export interface Woken {
 type Timing = Required<Omit<WakeDeps, 'request' | 'afterTab'>>;
 
 // Measured in the resume spike (docs/spikes/2026-11-27-m3b-resume.md).
-const DEFAULTS: Timing = { pollMs: 200, herdrMs: 1_000, resumeTimeoutMs: 15_000, slowStartMs: 60_000, notFoundMs: 5_000, trustTimeoutMs: 30_000, readyMs: 10_000 };
+const DEFAULTS: Timing = { pollMs: 200, herdrMs: 1_000, resumeTimeoutMs: 15_000, slowStartMs: 60_000, trustTimeoutMs: 30_000, readyMs: 10_000 };
 // A session id as Claude Code writes it; anything else (a string starting with `-`, spaces) is never passed on.
 const SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 export const isSessionId = (s: unknown): s is string => typeof s === 'string' && SESSION.test(s);
 const NOT_FOUND = /No conversation found with session ID/;
+// What `maitre room run` prints when it cannot start claude at all.
+const NO_CLAUDE = /`claude` was not found on PATH/;
 const PICKER = /^[\s│|]*Resume session[\s│|]*$/m;
 const PICKER_BOX = /Search…|No sessions match/;
 const NOTES_BYTES = 20_000;
@@ -114,15 +114,17 @@ async function screen(paneId: string): Promise<string> {
   }
 }
 
-// The resume spike's recipe: this session's SessionStart wins over anything else seen; a bare shell is a
-// failure once Claude was seen (two looks in a row, or one showing "No conversation found"), or after
-// notFoundMs; the picker fails at once; the trust dialog is
-// answered only in maître's own folders. A Claude in the tab whose SessionStart is late is never killed for
-// it (real resumes took up to ~30 s): it is waited for until slowStartMs, then kept, still starting.
+// The resume spike's recipe: this session's SessionStart wins over anything else seen; the trust dialog is
+// answered only in maître's own folders. A resume fails only on evidence: "No conversation found" on
+// screen, the picker, the room's command ending (`maitre room run`'s exit line, or claude not on PATH),
+// a Claude herdr saw and then missed two looks in a row, another session starting, or the tab gone. No
+// agent in the tab is no evidence (a loaded machine took over 8 s to start claude), nor is a late
+// SessionStart (resumes took up to ~30 s): those are waited for until slowStartMs, then kept, still starting.
 async function verdict(paneId: string, dir: string, from: { file: string; offset: number }, session: string, t: Timing, env: NodeJS.ProcessEnv): Promise<Verdict> {
   const started = Date.now();
   const starts = () => linesSince(from.file, from.offset).filter((l) => l.event === 'SessionStart' && l.agent_id === undefined);
   const resumed = () => starts().some((l) => l.session === session);
+  const ended = () => linesSince(from.file, from.offset).some((l) => l.event === 'MaitreExit');
   const failed = (reason: string): Verdict => ({ kind: 'failed', reason });
   const scope = trustScope(dir, env);
   let deadline = started + t.resumeTimeoutMs;
@@ -144,10 +146,11 @@ async function verdict(paneId: string, dir: string, from: { file: string; offset
       lastTrust = false;
       if (last === 'not running') {
         missed = seen ? missed + 1 : 0;
-        const notFound = NOT_FOUND.test(await screen(paneId));
-        if (missed >= 2 || (seen && notFound) || (!seen && Date.now() - started >= t.notFoundMs)) {
-          return failed(notFound ? 'its session was not found' : 'Claude exited');
-        }
+        const s = await screen(paneId);
+        if (NOT_FOUND.test(s)) return failed('its session was not found');
+        if (NO_CLAUDE.test(s)) return failed('`claude` was not found on PATH');
+        if (ended()) return failed(seen ? 'Claude exited' : 'its command ended before Claude started');
+        if (missed >= 2) return failed('Claude exited');
       } else {
         seen = true;
         missed = 0;
@@ -170,13 +173,12 @@ async function verdict(paneId: string, dir: string, from: { file: string; offset
       // Something on screen waits for an answer (a question Claude Code asks on resume): the user's.
       if (last === 'blocked') return { kind: 'needs-you', trust: lastTrust };
       // Another session started instead: the room's conversation is not in that tab.
-      const agent = last !== undefined && (last !== 'not running' || missed === 1) && !starts().some((l) => typeof l.session === 'string' && l.session !== '' && l.session !== session);
-      if (agent && deadline < started + t.slowStartMs) {
+      if (starts().some((l) => typeof l.session === 'string' && l.session !== '' && l.session !== session)) return failed(`it did not start within ${t.resumeTimeoutMs / 1000} s`);
+      if (deadline < started + t.slowStartMs) {
         deadline = started + t.slowStartMs;
         continue;
       }
-      if (agent) return { kind: 'starting' };
-      return failed(`it did not start within ${t.resumeTimeoutMs / 1000} s`);
+      return { kind: 'starting' };
     }
     await sleep(Math.max(1, Math.min(t.pollMs, deadline - Date.now())));
   }

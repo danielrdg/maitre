@@ -18,7 +18,7 @@ import { readFailed, readQueue, reserve } from './queue.js';
 import { deliverToRoom, describeDelivery, describeOpen, listRoomRows, openRoom, type RoomRow } from './room-open.js';
 import { attach, runReception, startMaitre } from './reception.js';
 import { parseSetupArgs, runSetup, type SetupOptions } from './setup.js';
-import { reservedFlag, runRoom } from './room-run.js';
+import { recordRoomExit, reservedFlag, runRoom } from './room-run.js';
 import { wakeRoom } from './wake.js';
 import { describeRoute, dispatchRoute, isRequestId, routeRequests } from './router.js';
 import { STATUSES, runStatus, type RoomStatus } from './status.js';
@@ -33,7 +33,7 @@ export interface LoungeArgs {
 
 export type CliArgs =
   | LoungeArgs
-  | { cmd: 'room-run'; room: string; extra: string[]; briefFile?: string }
+  | { cmd: 'room-run'; room: string; extra: string[]; briefFile?: string; run?: string }
   | { cmd: 'room-open'; name: string; project?: string; model: string; taskType: string; brief?: string; briefFile?: string }
   | { cmd: 'room-send'; room: string; text: string }
   | { cmd: 'room-list' }
@@ -52,7 +52,8 @@ export type CliArgs =
   | { cmd: 'setup'; opts: SetupOptions }
   | { cmd: 'usage'; error: string };
 
-const ROOM_RUN_USAGE = 'usage: maitre room run <name> [--brief-file <path>] [-- <claude args>]';
+const ROOM_RUN_USAGE = 'usage: maitre room run <name> [--run <id>] [--brief-file <path>] [-- <claude args>]';
+const RUN_ID = /^[A-Za-z0-9-]{1,64}$/;
 const ROOM_OPEN_USAGE = 'usage: maitre room open <name> [--project <p>] --model <m> --task <type> (--brief "<text>" | --brief-file <path>)';
 const ROOM_USAGE = 'usage: maitre room <open|send|list|close|wake|run> ...';
 const INDEX_USAGE = 'usage: maitre index [--root <dir>]...';
@@ -75,7 +76,13 @@ function parseRoomRun(argv: string[]): CliArgs {
   const [name, ...rest] = argv;
   if (!isName(name)) return usage(ROOM_RUN_USAGE);
   let briefFile: string | undefined;
+  let run: string | undefined;
   let more = rest;
+  if (more[0] === '--run') {
+    if (more[1] === undefined || !RUN_ID.test(more[1])) return usage(ROOM_RUN_USAGE);
+    run = more[1];
+    more = more.slice(2);
+  }
   if (more[0] === '--brief-file') {
     if (more[1] === undefined || more[1] === '--') return usage(ROOM_RUN_USAGE);
     briefFile = more[1];
@@ -85,7 +92,7 @@ function parseRoomRun(argv: string[]): CliArgs {
   const extra = more.slice(1);
   const reserved = reservedFlag(extra);
   if (reserved !== undefined) return usage(`${reserved.split('=')[0]} is set by maitre for every room and cannot be passed after --`);
-  return briefFile === undefined ? { cmd: 'room-run', room: name, extra } : { cmd: 'room-run', room: name, extra, briefFile };
+  return { cmd: 'room-run', room: name, extra, ...(briefFile !== undefined ? { briefFile } : {}), ...(run !== undefined ? { run } : {}) };
 }
 
 const OPEN_FLAGS: Record<string, 'project' | 'model' | 'taskType' | 'brief' | 'briefFile'> = {
@@ -214,7 +221,7 @@ Usage:
   maitre room list
   maitre room close <room>
   maitre room wake <room>
-  maitre room run <name> [--brief-file <path>] [-- <claude args>]
+  maitre room run <name> [--run <id>] [--brief-file <path>] [-- <claude args>]
   maitre status <working|waiting|blocked> "<text>" [--option <o>]...
   maitre index [--root <dir>]...
   maitre projects
@@ -463,13 +470,14 @@ export async function main(argv: string[]): Promise<void> {
         brief = readFileSync(args.briefFile, 'utf8');
       } catch (err) {
         console.error(`maitre: could not read the brief file: ${(err as Error).message}`);
+        recordRoomExit(args.room, process.env, args.run);
         process.exitCode = 1;
         return;
       }
     }
     let code: number;
     try {
-      code = await runRoom(args.room, args.extra, process.env, brief);
+      code = await runRoom(args.room, args.extra, process.env, brief, args.run);
     } catch (err) {
       console.error(`maitre: could not prepare the room: ${(err as Error).message}`);
       code = 1;

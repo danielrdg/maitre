@@ -53,6 +53,8 @@ export interface HookLine {
   starting?: boolean;
   // On a starting note: the session the start resumes (a wake); none for a fresh open.
   resumes?: string;
+  // On MaitreExit: the id of the `maitre room run` that ended (`--run`), when it was given one.
+  run?: string;
   text?: string;
   options?: string[];
 }

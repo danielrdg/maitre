@@ -64,11 +64,10 @@ function exitCode(code: number | null, signal: NodeJS.Signals | null): number {
 }
 
 // Runs a child in the foreground of this terminal and resolves with its exit code (128+n for a signal).
-// onExit runs once when a started child exits, never when it could not start.
 export function runForeground(
   cmd: string,
   args: string[],
-  opts: { env: NodeJS.ProcessEnv; cwd?: string; notFound?: string; onExit?: () => void },
+  opts: { env: NodeJS.ProcessEnv; cwd?: string; notFound?: string },
 ): Promise<number> {
   return new Promise((done) => {
     const child = spawn(cmd, args, { stdio: 'inherit', env: opts.env, ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}) });
@@ -95,24 +94,29 @@ export function runForeground(
     });
     child.on('exit', (code, signal) => {
       if (settled) return;
-      opts.onExit?.();
       finish(exitCode(code, signal));
     });
   });
 }
 
-export function runRoom(name: string, extra: string[], env: NodeJS.ProcessEnv = process.env, brief?: string): Promise<number> {
-  const { cmd, args, env: childEnv } = buildRoomCommand(name, extra, env, brief);
-  const room = childEnv.MAITRE_ROOM!;
-  return runForeground(cmd, args, {
-    env: childEnv,
-    notFound: '`claude` was not found on PATH; install Claude Code first',
-    onExit: () => {
-      try {
-        appendRoomLine(room, 'MaitreExit', {}, childEnv);
-      } catch (err) {
-        console.error(`maitre: could not record the room exit: ${(err as Error).message}`);
-      }
-    },
-  });
+// The room's exit line, however its run ended (a wake waiting on it reads `run` to know it is its own).
+export function recordRoomExit(name: string, env: NodeJS.ProcessEnv, run?: string): void {
+  try {
+    appendRoomLine(roomSlug(name), 'MaitreExit', run !== undefined ? { run } : {}, { ...env, MAITRE_HOME: maitreHome(env) });
+  } catch (err) {
+    console.error(`maitre: could not record the room exit: ${(err as Error).message}`);
+  }
+}
+
+export async function runRoom(name: string, extra: string[], env: NodeJS.ProcessEnv = process.env, brief?: string, run?: string): Promise<number> {
+  let command: RoomCommand;
+  try {
+    command = buildRoomCommand(name, extra, env, brief);
+  } catch (err) {
+    recordRoomExit(name, env, run);
+    throw err;
+  }
+  const code = await runForeground(command.cmd, command.args, { env: command.env, notFound: '`claude` was not found on PATH; install Claude Code first' });
+  recordRoomExit(name, env, run);
+  return code;
 }

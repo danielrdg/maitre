@@ -134,10 +134,12 @@ export function writeBrief(room: string, brief: string, env: NodeJS.ProcessEnv):
 }
 
 // What a room's tab runs, for an open and for a wake alike: a wake adds only `--resume <session>`.
-export function roomPaneCommand(room: string, model: string, opts: { briefPath?: string; resume?: string } = {}): string {
+// `run`: an id `maitre room run` writes on its exit line, so a wake tells its own run's end from another's.
+export function roomPaneCommand(room: string, model: string, opts: { briefPath?: string; resume?: string; run?: string } = {}): string {
+  const run = opts.run !== undefined ? ['--run', opts.run] : [];
   const brief = opts.briefPath !== undefined ? ['--brief-file', opts.briefPath] : [];
   const resume = opts.resume !== undefined ? ['--resume', opts.resume] : [];
-  const cmd = [MAITRE_BIN, 'room', 'run', room, ...brief, '--', '--model', model, ...resume].map(shellQuote).join(' ');
+  const cmd = [MAITRE_BIN, 'room', 'run', room, ...run, ...brief, '--', '--model', model, ...resume].map(shellQuote).join(' ');
   // herdr types the command into a shell: a control character would split or alter it.
   if (/[\x00-\x1f\x7f]/.test(cmd)) throw new Error('the room command contains a control character');
   return cmd;

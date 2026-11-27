@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isClosing, releaseClosing, takeClosing } from '../src/closing.js';
@@ -132,7 +132,9 @@ test("the woken tab's claude argv is openRoom's for that room plus --resume <ses
   parkByHand('a');
   await wakeRoom('a', process.env, QUICK);
   const [openCmd, wakeCmd] = runs();
-  assert.equal(wakeCmd, [MAITRE, 'room', 'run', 'a', '--', '--model', 'sonnet', '--resume', 's1'].map(shellQuote).join(' '));
+  const run = /'--run' '([0-9a-f]{16})'/.exec(wakeCmd)?.[1];
+  assert.ok(run !== undefined, wakeCmd);
+  assert.equal(wakeCmd, [MAITRE, 'room', 'run', 'a', '--run', run, '--', '--model', 'sonnet', '--resume', 's1'].map(shellQuote).join(' '));
   const opened = claudeArgv(openCmd);
   const woken = claudeArgv(wakeCmd);
   assert.equal(opened.at(-1), `${BRIEF_HEADER}\n\ndo it`);
@@ -345,6 +347,18 @@ test('a resume whose claude shows up in its tab only after 6 s is waited for: re
   assert.deepEqual(w, { resumed: true, lines: ['woke a: resumed its session'], needsYou: false });
   assert.equal(tabs().length, 1);
   assert.equal(runs().filter((r) => r.includes("'--brief-file'")).length, 1, 'no fresh start');
+});
+
+test("an exit line from another run (a tab the wake just closed) does not fail a slow resume", async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'delayed';
+  process.env.FAKE_HERDR_APPEAR_MS = '1500';
+  const foreign = () => appendFileSync(eventsFile('a'), JSON.stringify({ v: 1, ts: Date.now(), room: 'a', session: '', event: 'MaitreExit' }) + '\n');
+  const w = await wakeRoom('a', process.env, { ...QUICK, afterTab: foreign });
+  assert.deepEqual(w, { resumed: true, lines: ['woke a: resumed its session'], needsYou: false });
+  assert.equal(runs().filter((r) => r.includes("'--brief-file'")).length, 1, 'no fresh start');
+  assert.match(runs()[1]!, /'--run' '[0-9a-f]{16}' '--' /, 'the resume runs under its own id');
 });
 
 test('"No conversation found" on screen, even before Claude was ever seen, fails at once and falls back', async () => {

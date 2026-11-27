@@ -68,6 +68,9 @@ test('parseArgs parses room run with extra claude args after --', () => {
     extra: ['--model', 'haiku', '--port', '1', '--help'],
   });
   assert.deepEqual(parseArgs(['room', 'run', 'x']), { cmd: 'room-run', room: 'x', extra: [] });
+  assert.deepEqual(parseArgs(['room', 'run', 'x', '--run', 'r-1', '--brief-file', '/b.md', '--', '--model', 'm']), { cmd: 'room-run', room: 'x', extra: ['--model', 'm'], briefFile: '/b.md', run: 'r-1' });
+  assert.equal(parseArgs(['room', 'run', 'x', '--run', 'bad id']).cmd, 'usage');
+  assert.equal(parseArgs(['room', 'run', 'x', '--run']).cmd, 'usage');
   assert.deepEqual(parseArgs(['room', 'run', 'x', '--']), { cmd: 'room-run', room: 'x', extra: [] });
   assert.deepEqual(parseArgs(['room', 'run', 'x', '--brief-file', '/b.md', '--', '--model', 'm']), {
     cmd: 'room-run',

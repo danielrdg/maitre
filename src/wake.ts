@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { roomActivity } from './activity.js';
@@ -120,11 +121,12 @@ async function screen(paneId: string): Promise<string> {
 // a Claude herdr saw and then missed two looks in a row, another session starting, or the tab gone. No
 // agent in the tab is no evidence (a loaded machine took over 8 s to start claude), nor is a late
 // SessionStart (resumes took up to ~30 s): those are waited for until slowStartMs, then kept, still starting.
-async function verdict(paneId: string, dir: string, from: { file: string; offset: number }, session: string, t: Timing, env: NodeJS.ProcessEnv): Promise<Verdict> {
+async function verdict(paneId: string, dir: string, from: { file: string; offset: number; run: string }, session: string, t: Timing, env: NodeJS.ProcessEnv): Promise<Verdict> {
   const started = Date.now();
   const starts = () => linesSince(from.file, from.offset).filter((l) => l.event === 'SessionStart' && l.agent_id === undefined);
   const resumed = () => starts().some((l) => l.session === session);
-  const ended = () => linesSince(from.file, from.offset).some((l) => l.event === 'MaitreExit');
+  // Only this run's exit line: a tab closed just before (its `maitre room run` outlives the hang-up) writes its own late.
+  const ended = () => linesSince(from.file, from.offset).some((l) => l.event === 'MaitreExit' && l.run === from.run);
   const failed = (reason: string): Verdict => ({ kind: 'failed', reason });
   const scope = trustScope(dir, env);
   let deadline = started + t.resumeTimeoutMs;
@@ -300,9 +302,10 @@ export async function wakeRoom(name: string, env: NodeJS.ProcessEnv = process.en
     try {
       const file = roomEventsFile(room, env);
       const offset = fileSize(file);
-      await runInPane(ws.paneId, roomPaneCommand(room, rec.model, { resume: session }));
+      const run = randomBytes(8).toString('hex');
+      await runInPane(ws.paneId, roomPaneCommand(room, rec.model, { resume: session, run }));
       await afterTab?.();
-      const first = await verdict(ws.paneId, rec.dir, { file, offset }, session, t, env);
+      const first = await verdict(ws.paneId, rec.dir, { file, offset, run }, session, t, env);
       const v: Settled = first.kind === 'resumed' ? await ready(ws.paneId, t) : first;
       if (v.kind === 'needs-you') noteStarting(room, v.trust ? TRUST_BLOCKED_TEXT : STARTING_TEXT, env, session);
       if (v.kind === 'starting') noteStarting(room, STARTING_TEXT, env, session);

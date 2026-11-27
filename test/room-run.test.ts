@@ -285,6 +285,23 @@ test('room run refuses extra args that would replace the room hooks or prompt', 
   }
 });
 
+test('room run --run <id> stamps its exit line with that id, on every way it ends', () => {
+  for (const [script, mode] of [['exit 0', 0o755], ['exit 0', 0o644]] as const) {
+    const sb = sandbox(script);
+    try {
+      chmodSync(join(sb.fake, 'claude'), mode);
+      const r = spawnSync(process.execPath, [MAITRE, 'room', 'run', 't1', '--run', 'r-0001', '--', '--model', 'haiku'], { env: sb.env, encoding: 'utf8' });
+      assert.notEqual(r.status, null, r.stderr);
+      const got = lines(sb.home, 't1');
+      assert.equal(got.length, 1, `${mode.toString(8)}: ${r.stderr}`);
+      assertExitLine(got[0]!, 't1');
+      assert.equal(got[0]!.run, 'r-0001');
+    } finally {
+      sb.cleanup();
+    }
+  }
+});
+
 test('room run without claude on PATH prints one line and exits 127', () => {
   const sb = sandbox('exit 0');
   try {
@@ -295,7 +312,9 @@ test('room run without claude on PATH prints one line and exits 127', () => {
     assert.equal(r.status, 127);
     assert.equal(r.stdout, '');
     assert.match(r.stderr, /^maitre: .*claude.*\n$/);
-    assert.deepEqual(lines(sb.home, 't1'), []);
+    const got = lines(sb.home, 't1');
+    assert.equal(got.length, 1, 'a run that ended is recorded however it ended');
+    assertExitLine(got[0]!, 't1');
   } finally {
     sb.cleanup();
   }
@@ -334,6 +353,7 @@ test('room run with an unreadable brief file prints one line, exits 1 and never 
     assert.equal(r.status, 1);
     assert.match(r.stderr, /^maitre: [^\n]*brief[^\n]*\n$/);
     assert.equal(existsSync(join(sb.out, 'ran')), false);
+    assert.deepEqual(lines(sb.home, 't1').map((l) => l.event), ['MaitreExit']);
   } finally {
     sb.cleanup();
   }

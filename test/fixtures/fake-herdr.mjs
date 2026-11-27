@@ -87,8 +87,12 @@ process.exit(code);
 
 // The session id after `--resume` in a pane command (single-quoted tokens), if any.
 function resumeId(cmd) {
+  return tokenAfter(cmd, '--resume');
+}
+
+function tokenAfter(cmd, flag) {
   const tokens = cmd.match(/'(?:[^']|'\\'')*'/g) ?? [];
-  const i = tokens.indexOf("'--resume'");
+  const i = tokens.indexOf(`'${flag}'`);
   return i >= 0 && tokens[i + 1] !== undefined ? tokens[i + 1].slice(1, -1) : undefined;
 }
 
@@ -125,7 +129,8 @@ function resume(p, id, wenv) {
   } else if (mode === 'ended') {
     p.agent = 'shell';
     if (wenv.MAITRE_ROOM && wenv.MAITRE_HOME) {
-      const line = { v: 1, ts: Date.now(), room: wenv.MAITRE_ROOM, session: '', event: 'MaitreExit' };
+      const run = tokenAfter(p.ran.at(-1) ?? '', '--run');
+      const line = { v: 1, ts: Date.now(), room: wenv.MAITRE_ROOM, session: '', event: 'MaitreExit', ...(run !== undefined ? { run } : {}) };
       appendFileSync(join(wenv.MAITRE_HOME, 'state', 'rooms', wenv.MAITRE_ROOM, 'events.jsonl'), JSON.stringify(line) + '\n');
     }
   } else if (mode === 'missing-unseen') {

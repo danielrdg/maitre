@@ -22,6 +22,10 @@ body { margin: 0; overflow: hidden; display: grid; place-items: center; backgrou
 .tag { position: absolute; transform: translate(-50%, -100%); font: max(6px, calc(8 * var(--px)))/1 var(--font-tag); color: #f7e7c6;
        text-shadow: 1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000; white-space: nowrap; pointer-events: none; }
 .tag.alert { color: #ff8b7b; } .tag.gold { color: #ffd45c; } .tag.dim { color: #b9b4c8; } .tag.hide { display: none; }
+/* Scene labels in the building: anchored left (l), right (r) or centred (c), with an optional second line. */
+.tag.l { transform: translate(0, -50%); } .tag.r { transform: translate(-100%, -50%); text-align: right; } .tag.c { transform: translate(-50%, -50%); }
+.tag.big { font-size: max(7px, calc(10 * var(--px))); }
+.tag small { display: block; font-size: max(6px, calc(8 * var(--px))); color: #c9b89c; margin-top: .35em; }
 .tip { position: absolute; transform: translate(-50%, -100%); font: 600 max(10px, calc(12 * var(--px)))/1.2 var(--font-pixel); color: var(--ink);
        background: #f7e7c6; padding: calc(3 * var(--px)) calc(6 * var(--px)); border: 2px solid var(--ink); pointer-events: none; display: none; white-space: nowrap; }
 .neon { position: absolute; transform: translate(-50%, -50%); font: 700 calc(22 * var(--px))/1 var(--font-pixel); color: var(--neon-text);
@@ -37,6 +41,7 @@ body { margin: 0; overflow: hidden; display: grid; place-items: center; backgrou
                   linear-gradient(currentColor 0 0) 0 calc(2 * var(--u)) / calc(2 * var(--u)) var(--u),
                   linear-gradient(currentColor 0 0) calc(5 * var(--u)) calc(2 * var(--u)) / calc(2 * var(--u)) var(--u);
                 background-repeat: no-repeat; filter: var(--circ-glow); }
+.neon.sm { font-size: calc(14 * var(--px)); }
 .neon .circ { --u: calc(1.2 * var(--px)); --circ-glow: drop-shadow(0 0 calc(3 * var(--px)) var(--neon)) drop-shadow(0 0 calc(8 * var(--px)) #ff2d8a); }
 .pop { position: absolute; transform: translate(-50%, -50%); font: 700 calc(26 * var(--px))/1 var(--font-pixel); color: #ffd45c; pointer-events: none;
        text-shadow: calc(3 * var(--px)) calc(3 * var(--px)) 0 #7a1c16, 0 0 calc(12 * var(--px)) #ffb000; animation: pop 1.8s ease-out forwards; }
@@ -48,11 +53,11 @@ body { margin: 0; overflow: hidden; display: grid; place-items: center; backgrou
 .empty { position: absolute; left: 50%; top: 46%; transform: translate(-50%, -50%); font: 600 max(10px, calc(14 * var(--px)))/1.2 var(--font-pixel);
          color: #f7e7c6; background: rgba(20,11,8,.85); border: 2px solid var(--gold); padding: calc(6 * var(--px)) calc(10 * var(--px)); pointer-events: none; white-space: nowrap; }
 .empty b { color: #ffd45c; }
-.notice { position: absolute; left: 50%; top: 4%; transform: translateX(-50%); font: 600 max(10px, calc(14 * var(--px)))/1.2 var(--font-pixel);
+.notice { position: absolute; left: 50%; top: 12%; transform: translateX(-50%); font: 600 max(10px, calc(14 * var(--px)))/1.2 var(--font-pixel);
           color: #ffd7cf; background: rgba(74,15,12,.92); border: 2px solid #ff5a4a; padding: calc(6 * var(--px)) calc(10 * var(--px)); pointer-events: none; white-space: nowrap; }
 
 /* Pixel panels: agent details, music menu, help overlay. */
-.panel { position: absolute; z-index: 2; right: 1.5%; top: 3%; width: calc(430 * var(--px)); max-height: 92%; overflow: auto; display: none;
+.panel { position: absolute; z-index: 4; right: 1.5%; top: 19%; width: calc(430 * var(--px)); max-height: 79%; overflow: auto; display: none;
          background: #24100b; color: #f7e7c6; font: 400 max(11px, calc(14 * var(--px)))/1.35 var(--font-pixel);
          padding: calc(12 * var(--px)) calc(14 * var(--px)) calc(14 * var(--px));
          border: 3px solid var(--gold); outline: 3px solid var(--ink); box-shadow: calc(8 * var(--px)) calc(8 * var(--px)) 0 rgba(0,0,0,.55); }
@@ -93,7 +98,7 @@ body { margin: 0; overflow: hidden; display: grid; place-items: center; backgrou
 .panel .seg .opt.on { background: var(--gold); color: var(--ink); }
 .panel .vol { width: 100%; margin: 2px 0 0; accent-color: var(--gold); cursor: pointer; }
 
-.panel.help { z-index: 4; right: auto; left: 50%; top: 50%; transform: translate(-50%, -50%); width: calc(520 * var(--px)); }
+.panel.help { z-index: 5; right: auto; left: 50%; top: 50%; transform: translate(-50%, -50%); width: calc(520 * var(--px)); }
 .panel.help .legend { display: flex; flex-wrap: wrap; gap: calc(8 * var(--px)) calc(16 * var(--px)); margin: calc(10 * var(--px)) 0; }
 .panel.help .item { display: inline-flex; align-items: center; gap: calc(6 * var(--px)); white-space: nowrap; }
 .panel.help .sw { display: inline-block; width: calc(12 * var(--px)); height: calc(12 * var(--px)); min-width: 8px; min-height: 8px; border: 2px solid var(--ink); outline: 1px solid #6b5a4a; }
@@ -137,8 +142,33 @@ body { margin: 0; overflow: hidden; display: grid; place-items: center; backgrou
 .hud .menu button:hover { background: var(--gold); color: var(--ink); }
 .hud button:active, .panel .other button:active, .panel .opt:active { transform: translate(2px, 2px); box-shadow: 0 0 0 var(--ink); }
 
+/* The building's controls, top right: the view switcher, the lift and a floor's theme button. */
+.views { position: absolute; z-index: 3; right: 1.2%; top: 2.2%; display: flex; flex-direction: column; align-items: flex-end; gap: calc(6 * var(--px)); }
+.views .row { display: flex; gap: calc(4 * var(--px)); align-items: center; }
+.views button { font: 600 max(10px, calc(12 * var(--px)))/1 var(--font-pixel); cursor: pointer; white-space: nowrap; padding: calc(6 * var(--px)) calc(8 * var(--px)); }
+.views .row button { background: #24100b; color: var(--gold); border: 2px solid var(--gold); outline: 2px solid var(--ink); }
+.views .row button.on { background: var(--gold); color: var(--ink); }
+.views .row button:disabled { opacity: .45; cursor: default; }
+.views .lift { font: max(6px, calc(8 * var(--px)))/1 var(--font-tag); color: var(--gold); padding: calc(4 * var(--px)) calc(6 * var(--px)); background: rgba(20,11,8,.85);
+               border: 2px solid #6b3a22; display: flex; flex-wrap: wrap; justify-content: flex-end; max-width: calc(330 * var(--px)); gap: calc(4 * var(--px)); align-items: center; }
+.views .lift button { min-width: 1.9em; padding: calc(4 * var(--px)); border-radius: 50%; background: #3a2a1a; color: #f7e7c6; border: 2px solid #8a6a3a;
+                      font: max(7px, calc(9 * var(--px)))/1 var(--font-tag); }
+.views .lift button.on { background: #ffd45c; color: var(--ink); box-shadow: 0 0 calc(6 * var(--px)) #ffb000; }
+.views .themebtn { background: #24100b; color: #f7e7c6; border: 2px solid var(--gold); outline: 2px solid var(--ink); }
+.views .themebtn:disabled { cursor: default; opacity: .7; }
+.views .themebtn.locked:disabled { opacity: 1; border-color: #8a6a3a; }
+.views .themebtn small { display: block; margin-top: calc(3 * var(--px)); font: max(6px, calc(8 * var(--px)))/1 var(--font-tag); color: var(--gold); text-align: right; }
+.views .themeerr { max-width: calc(300 * var(--px)); font: 600 max(9px, calc(10 * var(--px)))/1.2 var(--font-pixel); color: #ffd7cf; background: rgba(74,15,12,.94);
+                   border: 2px solid #ff5a4a; padding: calc(3 * var(--px)) calc(6 * var(--px)); text-align: right; }
+/* The red chip: a room needs you, whatever the view. */
+#chip { position: absolute; z-index: 3; left: 50%; top: 2.2%; transform: translateX(-50%); display: none; cursor: pointer;
+         font: 600 max(10px, calc(12 * var(--px)))/1.2 var(--font-pixel); color: #ffd7cf; background: rgba(74,15,12,.94); border: 2px solid #ff5a4a;
+         padding: calc(4 * var(--px)) calc(10 * var(--px)); white-space: nowrap; max-width: 46%; overflow: hidden; text-overflow: ellipsis; }
+#chip b { display: inline-block; width: 1.3em; text-align: center; color: #d61f1f; background: #fff; border: 2px solid var(--ink); margin-right: .4em; }
+#chip.blink b { visibility: hidden; }
+
 /* ?capture=1: the bare scene, for README art. */
-.stage.capture .hint, .stage.capture .hud, .stage.capture .panel, .stage.capture .tip { display: none !important; }
+.stage.capture .hint, .stage.capture .hud, .stage.capture .panel, .stage.capture .tip, .stage.capture .views, .stage.capture #chip, .stage.capture #neon2 { display: none !important; }
 .stage.capture .tag { font-size: max(6px, calc(10 * var(--px))); }
 
 /* prompt.html: the quick-prompt window, about 560x180. No stage here, so sizes are plain px. */

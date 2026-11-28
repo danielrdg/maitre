@@ -41,3 +41,33 @@ test('the reception, prompt and terminal strings exist in both languages', () =>
   assert.match(t('panel.terminalFailed', 'en', { message: 'boom' }), /boom/);
   assert.match(t('panel.terminalFailed', 'pt-BR', { message: 'boom' }), /boom/);
 });
+
+test('the building strings (view switcher, lift, chip, floor list) exist in both languages', () => {
+  const keys = [
+    'view.facade', 'view.floor', 'view.lobby', 'lift.label', 'lift.lobby', 'lift.roof', 'lift.floor',
+    'chip.needsYou', 'chip.needsYouAlone', 'chip.more', 'floors.title', 'floors.row', 'facade.roof', 'facade.roofSub', 'facade.lobby', 'facade.lobbySub',
+    'facade.rooms.one', 'facade.rooms.many', 'facade.needsYou', 'floor.title', 'floor.wentDown', 'tip.level', 'neon.terrace',
+    'theme.hall', 'theme.casino', 'theme.deco', 'theme.tiki', 'theme.karaoke', 'theme.garden',
+    'theme.button', 'theme.buttonLocked', 'theme.config', 'theme.scratch', 'theme.failed',
+  ];
+  for (const lang of ['en', 'pt-BR']) {
+    for (const k of keys) {
+      assert.equal(typeof STRINGS[lang][k], 'string', `${lang} ${k}`);
+      assert.ok(STRINGS[lang][k].trim().length > 0, `${lang} ${k}`);
+    }
+  }
+  for (const k of ['view.facade', 'view.lobby', 'chip.needsYou', 'floors.title', 'floor.wentDown', 'theme.button', 'theme.config', 'theme.scratch', 'theme.failed']) assert.notEqual(t(k, 'pt-BR'), t(k, 'en'), `${k} is translated`);
+  assert.equal(t('lift.floor', 'en', { n: 3, project: 'api' }), 'floor 3 · api');
+  assert.match(t('chip.needsYou', 'pt-BR', { name: 'r1', project: 'api' }), /r1.*api/);
+});
+
+test('the lift buttons and the facade name the roof and the lobby with the same letter', () => {
+  for (const lang of ['en', 'pt-BR']) {
+    assert.ok(t('facade.roof', lang).startsWith(`${t('lift.roofKey', lang)} · `), `${lang}: ${t('facade.roof', lang)}`);
+    assert.ok(t('facade.lobby', lang).startsWith(`${t('lift.lobbyKey', lang)} · `), `${lang}: ${t('facade.lobby', lang)}`);
+  }
+});
+
+test('the en and pt-BR tables have the same keys', () => {
+  assert.deepEqual(Object.keys(STRINGS['pt-BR']).sort(), Object.keys(STRINGS.en).sort());
+});

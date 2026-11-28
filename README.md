@@ -16,11 +16,12 @@
 </p>
 
 <p align="center">
-  <img alt="The maître lounge in demo mode: agents play cards, pull slot levers, smoke on the terrace, drink at the bar and dance after a merge" src="docs/assets/lounge.gif" width="100%" />
+  <img alt="The maître lounge drawn as a single room, before it became a building: agents play cards, pull slot levers, smoke on the terrace, drink at the bar and dance after a merge" src="docs/assets/lounge.gif" width="100%" /><br />
+  <sub>This is the single-room lounge, with the reception, the bell and the terrace in one scene. Today the lounge is a building: each project gets a floor like this one, the reception and the bell are in the lobby, the terrace is on the roof, and with two or more projects open it opens on the facade.</sub>
 </p>
 
 > [!NOTE]
-> **maître is early.** What runs today is **M3a and M3b: run `./setup` once, then press Super+M or click the maître in the lounge, type a request, and watch the room walk in.** Each request goes to a room, a Claude Code session in its own git worktree and herdr tab, on the model the task calls for. A doorman keeps at most 6 rooms active and lines up the rest on the sidewalk, and a janitor closes rooms left idle with nothing pending, writing minutes to a markdown vault. A room on the couch or waiting on its PR gives up its Claude after 30 quiet minutes and wakes with `claude --resume` when you need it again; the lounge follows each room's PR (CI and review notices, a dance on merge), and a new room on an old topic starts with the old room's minutes. `maitre` in a terminal still opens herdr with the reception and the lounge, and the demo mode and rooms opened by hand with `maitre room run` still work. The building (M4) and answering from the lounge (M5) are the design being built next. Sections below mark what is planned, and the [Roadmap](#roadmap) tracks it.
+> **maître is early.** What runs today is **M3a, M3b and M4: run `./setup` once, then press Super+M or click the maître in the lounge, type a request, and watch the room walk in.** Each request goes to a room, a Claude Code session in its own git worktree and herdr tab, on the model the task calls for. A doorman keeps at most 6 rooms active and lines up the rest on the sidewalk, and a janitor closes rooms left idle with nothing pending, writing minutes to a markdown vault. A room on the couch or waiting on its PR gives up its Claude after 30 quiet minutes and wakes with `claude --resume` when you need it again; the lounge follows each room's PR (CI and review notices, a dance on merge), and a new room on an old topic starts with the old room's minutes. The lounge is a building: one themed floor per project, a lobby with the reception and the bell, a smoking terrace on the roof and an elevator between them (M4). `maitre` in a terminal still opens herdr with the reception and the lounge, and the demo mode and rooms opened by hand with `maitre room run` still work: those rooms go to the scratch floor. Answering from the lounge (M5) is the design being built next. Sections below mark what is planned, and the [Roadmap](#roadmap) tracks it.
 
 ## What is it
 
@@ -53,7 +54,7 @@ What you can run today is marked **today**: it works with real rooms as well as 
 | <img src="docs/assets/sprites/routing.png" width="48" alt="Fable, the house advisor, with a cigar" /> | **Model routing** by task type, applied by code, with outcomes that feed back into the router. | **today** by task type; learning in M5 |
 | <img src="docs/assets/sprites/doorman.png" width="48" alt="The doorman in sunglasses" /> | **Doorman.** At most 6 active rooms at once (configurable); the rest queue on the sidewalk and walk in, oldest first, when a seat frees. | **today**; a couched room or one waiting on its PR gives up its seat and wakes with `--resume` (M3b) |
 | <img src="docs/assets/sprites/janitor.png" width="48" alt="The waiter with a tray" /> | **Janitor.** Closes idle rooms with nothing pending and writes minutes to an Obsidian-compatible vault; rooms with loose ends go to the couch. | **today**; it watches PRs too (CI and review notices, the merge dance, a PR closed without merge) (M3b) |
-| <img src="docs/assets/sprites/building.png" width="48" alt="The bartender" /> | **The building.** One themed floor per project, a lobby, a shared smoking terrace and an elevator. | M4 |
+| <img src="docs/assets/sprites/building.png" width="48" alt="The bartender" /> | **The building.** One themed floor per project, a lobby with the reception and the bell, a shared smoking terrace on the roof and an elevator. Pick a floor's theme with its button, or pin it in the config. | **today** |
 | <img src="docs/assets/sprites/answer.png" width="48" alt="An agent with a coffee" /> | **Answer from anywhere.** Reply to a stuck room from the lounge, chat with a room from its panel, or pick an option straight from a desktop notification. | M5 |
 
 ## Quick start
@@ -109,7 +110,7 @@ Want `maitre` on your `PATH`? Run `npm link` once from the clone.
 
 `npm install` reports dev-only advisories in `extract-zip`, which `puppeteer-core` uses only to download a browser; the asset script uses your system Chrome instead, so that path never runs. Do not run `npm audit fix --force`: it downgrades `puppeteer-core` and breaks `npm run assets`.
 
-In the demo, the **demo** menu in the corner lets you block an agent, merge a PR and send a new room to the queue. Click any agent for its panel, pull a slot lever, and click the musician for music. Sound starts after your first click, as browsers require.
+The demo is a building of four made-up projects (`webshop`, `api`, `mobile` and `docs`) and a scratch room, so it opens on the facade. The **demo** menu in the corner lets you block an agent (it takes the lift down to the bell in the lobby), merge a PR (the room dances on its floor) and send a new room to the queue on the sidewalk, from any view. Click any agent for its panel, pull a slot lever, click the musician for music, and change a floor's theme with its button (in the demo the change stays on the page). Sound starts after your first click, as browsers require.
 
 ### Your first reception (works today)
 
@@ -203,7 +204,7 @@ maitre room run fix-login -- --permission-mode auto   # terminal 2: Claude Code,
 
 Both commands use `maitre` from your `PATH` (`npm link`, above), because the room runs in your project's folder, not in the clone.
 
-`maitre room run <name>` starts your own `claude` with maître's hooks for that session only (passed with `--settings`; your global Claude Code settings are not touched) and a short note in the system prompt. Anything after `--` goes to `claude`, except `--settings` and the `--append-system-prompt` flags, which maître sets itself. The room walks in with a coffee, plays cards while it works, sends its subagents to the slot machines, rings the bell when a permission or a question waits for you, and waits at the bar when its turn ends. It switches to whisky when it opens a PR and walks out when you leave Claude Code. You answer in the room's terminal; answering from the lounge comes in M5. Open as many rooms as you like, each with its own name: two rooms open at the same time must not share one, and names that differ only in case or punctuation (`Fix Login`, `fix-login`) count as the same.
+`maitre room run <name>` starts your own `claude` with maître's hooks for that session only (passed with `--settings`; your global Claude Code settings are not touched) and a short note in the system prompt. Anything after `--` goes to `claude`, except `--settings` and the `--append-system-prompt` flags, which maître sets itself. The room walks in with a coffee and waits in the lobby for about 10 seconds (the time a room maître opens itself takes to get its floor). A room started by hand has no project, so it then takes the lift to the **scratch** floor, where it plays cards while it works, sends its subagents to the slot machines, rings the bell when a permission or a question waits for you, and waits at the bar when its turn ends. It switches to whisky when it opens a PR and walks out when you leave Claude Code. You answer in the room's terminal; answering from the lounge comes in M5. Open as many rooms as you like, each with its own name: two rooms open at the same time must not share one, and names that differ only in case or punctuation (`Fix Login`, `fix-login`) count as the same.
 
 Inside a room, the agent can say what it is doing with `maitre status`, which maître puts on the room's `PATH`. The system prompt asks it to run `maitre status waiting "<what>"` when it waits on something outside its control (CI, a build, a review bot), which sends it to the terrace, and `maitre status working "<what>"` when it resumes. `maitre status blocked "<question>" --option <a> --option <b>` rings the bell with that question and its options. The command only works inside a room: it reads the room name from `MAITRE_ROOM`, which `maitre room run` sets.
 
@@ -213,6 +214,8 @@ Rooms write their events to `~/.maitre/state/rooms/<room>/events.jsonl`, and the
 MAITRE_HOME=/tmp/maitre-try node bin/maitre lounge     # terminal 1
 MAITRE_HOME=/tmp/maitre-try node scripts/replay-events.mjs test/fixtures/hook-events.jsonl --room replay --delay 800   # terminal 2
 ```
+
+The replayed room is a room run by hand too: it waits in the lobby for about 10 seconds, then goes up to the scratch floor.
 
 A room's `events.jsonl` holds what its hooks saw: the start of each prompt, tool inputs (shell commands, file paths, snippets of edited files), questions and their answers, and the last assistant message. It stays on your machine, readable only by you (mode 0600); the lounge serves only the room state it derives from it, on 127.0.0.1 and behind its token. To clean up, delete a room's folder (`$MAITRE_HOME/state/rooms/<room>`, where `MAITRE_HOME` is `~/.maitre` unless you set it) or the whole `$MAITRE_HOME/state`.
 
@@ -272,7 +275,7 @@ If the lounge cannot start or no window can open, the icon and the shortcut show
 
 ## How it works
 
-This is the target design (M1 to M5; the dashed answer path is M5). Today (M3b) the reception, the router, the doorman, rooms in herdr with their own worktrees, the hooks, the lounge and the janitor exist (highlighted below); the daemon is `maitre serve`, the login service (or `maitre lounge` in a terminal), which reads the rooms' events, streams them over SSE, takes requests from the lounge and the quick prompt, runs the doorman and the janitor, and watches the rooms' PRs.
+This is the target design (M1 to M5; the dashed answer path is M5). Today (M4) the reception, the router, the doorman, rooms in herdr with their own worktrees, the hooks, the lounge and the janitor exist (highlighted below); the daemon is `maitre serve`, the login service (or `maitre lounge` in a terminal), which reads the rooms' events, streams them over SSE, takes requests from the lounge and the quick prompt, runs the doorman and the janitor, and watches the rooms' PRs.
 
 ```mermaid
 flowchart LR
@@ -308,18 +311,24 @@ The full design, including the open spikes, is in [docs/design.md](docs/design.m
 
 The lounge is the point. It is pixel art drawn entirely by code: no sprite sheets, no third-party assets. It uses the [Pixelify Sans](https://fonts.google.com/specimen/Pixelify+Sans) and [Silkscreen](https://fonts.google.com/specimen/Silkscreen) fonts, both under the SIL Open Font License.
 
-**Today** there is one floor in the house style, a lacquered Chinese hall under red lanterns:
+**Today** the lounge is a building at night, with three views:
 
-- a **sidewalk queue** behind a velvet rope, watched by the doorman;
-- the **card table**, the **slot machines**, and the **bar**, with coffee for newcomers and whisky for deliveries;
-- the **moon gate**, where Fable, the house advisor, holds court with a cigar;
-- the **reception desk**, where the maître rings the bell for agents that need you;
-- the **couch**, the **dance floor** under a mirror ball, and the **terrace** for smokers;
-- the **musician**, who plays jazz or house on request.
+- **The building**, the facade: one lit floor per project with an open room, stacked in floor order, each with its theme in the windows and the silhouettes of its rooms. A floor with a room that needs you blinks red with a "!". The sidewalk holds the queue and the doorman, and the roof holds the smokers. The list on the right names the open floors: click a row, a floor or its call button to ride the elevator there. Four project floors fit; from the fifth on, the facade scrolls (the mouse wheel, or a ride).
+- **A floor**, one project's rooms: the **card table**, the **slot machines**, the **bar** with coffee for newcomers and whisky for deliveries, the **moon gate** where Fable, the house advisor, holds court with a cigar, the **couch**, the **dance floor** under a mirror ball, and the **musician**, who plays jazz or house on request. Every floor has the same plan in its own party theme.
+- **The lobby + terrace**, the places every floor shares: the **sidewalk queue** behind a velvet rope, watched by the doorman; the **reception desk**, where the maître takes requests and rings the bell for the rooms that need you, from every floor; and, on the roof, the **terrace** for rooms waiting on something outside.
 
-The interface stays out of the way. The stage fills the window; a corner holds **Sound** and **Names** buttons and a **?** that opens the model color legend. The **demo** menu shows up only with `--demo`. The lounge also speaks Portuguese: `--lang pt-BR`.
+**The elevator.** On the facade, the car rides the shaft to the floor you click, then its doors open on that view. The **lift** panel in the corner lists every floor, from the terrace (R) to the lobby (L), and rides there from any view. Only you move the car. A room whose state takes it to another place walks to its lift door, disappears, and steps out at the other end: a room that needs you goes down to the bell, and goes back up to its table once you answer.
 
-**Coming in M4: the building.** At night, the facade is the overview: one lit floor per project, the floor with a stuck agent blinking red, and an elevator to move between them. Each project gets a party theme, so you recognize it at a glance: Chinese hall, neon casino, art deco speakeasy, tiki bar, Tokyo karaoke, rooftop garden. The ground floor is the lobby with the reception and the queue; the roof is the shared smoking terrace.
+**Which view opens.** With two or more open floors the lounge opens on the facade; with one, straight on that floor; with none, in the lobby. A lounge that opened empty moves to that view when its first floor appears, unless you already did something there: a click in the scene, or a request typed to the maître, keeps you where you are. The red **needs you** chip at the top shows in every view: click it to ride to the lobby with that room's panel open.
+
+**Themes.** Each floor wears a party theme, so you recognize a project at a glance: Chinese hall (`hall`), neon casino (`casino`), art deco speakeasy (`deco`), tiki bar (`tiki`), Tokyo karaoke (`karaoke`) and rooftop garden (`garden`). The theme changes the wall, the palette, the light, one signature piece and the musician's default music (house in the casino and the karaoke, jazz elsewhere); the plan of the floor never changes.
+
+- A project gets its floor and its theme the first time it has a room: the next floor number, and the first of `casino`, `deco`, `tiki`, `karaoke`, `garden` and `hall` that no open floor wears (a hash of its name when all six are taken). Both stay with the project for good, so a project whose rooms all closed comes back on the same floor with the same theme.
+- The **"floor N theme: … ▸"** button on a floor moves it to the next theme and saves it. A theme pinned with [`projects.<name>.theme`](#configuration) shows "set in config" instead, and the button does nothing.
+- Rooms without a project share the **scratch** floor, which keeps maître's own Chinese hall, like the lobby and the terrace. So do rooms you start by hand with `maitre room run`, after about 10 seconds in the lobby.
+- The musician follows the floor's theme while music is on, unless you picked a style by hand in his menu; a hand pick holds in every view. The facade keeps whatever is playing.
+
+The interface stays out of the way. The stage fills the window; one corner holds **Sound** and **Names** buttons and a **?** that opens the model color legend, the other the view switcher (**building**, **floor**, **lobby + terrace**) and the lift panel. The **demo** menu shows up only with `--demo`. The lounge also speaks Portuguese: `--lang pt-BR`.
 
 **Model colors** tell you who is working:
 
@@ -332,7 +341,7 @@ The interface stays out of the way. The stage fills the window; a corner holds *
 
 ## States
 
-**The place tells the state.** You never read a status line: you look at where the agent is. The demo plays every state with simulated agents. Real rooms drive the queue, the coffee, the cards, the slots, the terrace, the bell, the bar, the whisky, the couch, the dance floor and the exit; Fable (M5) arrives later.
+**The place tells the state.** You never read a status line: you look at where the agent is. The sidewalk, the bell and the terrace are shared by every floor; every other place is on the room's own floor. The demo plays every state with simulated agents. Real rooms drive the queue, the coffee, the cards, the slots, the terrace, the bell, the bar, the whisky, the couch, the dance floor and the exit; Fable (M5) arrives later.
 
 <p align="center">
   <img alt="The lounge states, one character each: queued, coffee, cards, slots, smoking, visiting Fable, the house advisor, the bell, ready, whisky, dancing and napping" src="docs/assets/states.png" width="100%" />
@@ -340,14 +349,14 @@ The interface stays out of the way. The stage fills the window; a corner holds *
 
 | State | Where | What the agent does | Sound |
 |---|---|---|---|
-| Queued, waiting for a seat | Sidewalk | Waits behind the rope for the doorman | |
+| Queued, waiting for a seat | Sidewalk, outside the lobby | Waits behind the rope for the doorman | |
 | New room, planning | Bar | Drinks coffee | |
 | Working | Card table | Plays cards, one per tool used | |
 | Subagent at work | Slot machines | Pulls the lever | |
-| Waiting on something outside | Terrace | Smokes while CI, a build or a bot runs | |
+| Waiting on something outside | Terrace, on the roof | Smokes while CI, a build or a bot runs | |
 | Consulting Fable | Moon gate | Talks to the house advisor | |
 | House advisor | Moon gate | Fable himself, with a cigar | |
-| **Needs you** | Reception desk | Rings the bell, with a red "!" overhead | **bell** |
+| **Needs you** | Reception desk, in the lobby | Rings the bell, with a red "!" overhead | **bell** |
 | Ready for you to look | Bar counter | A colorful drink and a green check (clicking shows the room's task and last steps) | none, on purpose |
 | Delivered, waiting for merge | Bar | Whisky | |
 | Merged! Celebrating | Dance floor | Dances, then leaves (the demo adds fireworks) | fanfare in the demo |
@@ -386,7 +395,7 @@ The bell rings only for a real block: a pending permission, a question with opti
 | `pr.pollMinutes` | `2` | How often the lounge looks at the rooms' PRs, any number above 0. Read when the lounge starts, like `janitor.intervalMinutes`: restart it after a change. | **today** |
 | `pr.danceMinutes` | `3` | How long a room dances after its PR is merged before it closes, any number above 0. | **today** |
 | `pr.autoWake` | `false` | After a PR opens, maître only shows you CI failures and new reviews or comments. Set it to `true` to let maître wake the room and send it one line with the kind of notice and the PR link. | **today** |
-| Floor theme | automatic | Per project, `theme: <id>` picks a party theme. | M4 |
+| Floor theme | automatic | Per project, e.g. `"projects": { "webshop": { "theme": "casino" } }`: one of `hall`, `casino`, `deco`, `tiki`, `karaoke` or `garden`. It wins over the theme maître picked and over the floor's theme button, which then shows "set in config"; any other value is ignored with a warning. The lounge picks a change up without a restart. The scratch floor always keeps the Chinese hall. | **today** |
 
 The routing table as it ships (`config/routing.json`); the task types are described in [Your first reception](#your-first-reception-works-today):
 
@@ -416,7 +425,7 @@ Every firstmate cell below comes from firstmate's (or, for the dashboard, shipma
 | Harnesses | Claude Code, Grok, Pi, Codex, OpenCode, Cursor and more ([README][fm-req]) | Claude Code only |
 | Session backends | tmux by default, herdr, and experimental ones such as Zellij, cmux and Orca ([README][fm-crew], [backends][fm-backends]) | herdr only |
 | Platforms | macOS and Linux ([README][fm-top]) | Linux; macOS later |
-| Maturity | Shipping today, with a large [test suite][fm-tests] | Early: the reception, rooms in worktrees and the lounge (M2a), the setup, login service and quick prompt (M2b), the doorman and the janitor (M3a), parking, PR watching and the router's memory (M3b) |
+| Maturity | Shipping today, with a large [test suite][fm-tests] | Early: the reception, rooms in worktrees and the lounge (M2a), the setup, login service and quick prompt (M2b), the doorman and the janitor (M3a), parking, PR watching and the router's memory (M3b), the building (M4) |
 
 If you need many harnesses, many backends, macOS, or a mature tool today, use firstmate. If you live in Claude Code and herdr and want each topic in its own room with a lounge to watch, maître is being built for you.
 
@@ -434,7 +443,7 @@ If you need many harnesses, many backends, macOS, or a mature tool today, use fi
 ## FAQ
 
 **Does it work today?**
-Yes. After `./setup`, Super+M or a click on the maître in the lounge sends a request to a room in its own worktree, and the lounge shows the rooms live; in a terminal, `maitre` opens the reception in herdr. It also has a demo mode with simulated agents. The doorman and the janitor run too (M3a). Parking, waking with `--resume`, PR watching and the router's memory (M3b) are built and covered by the test suite, with their end-to-end check on a real Claude Code still pending. The building (M4) and answering from the lounge (M5) are the roadmap.
+Yes. After `./setup`, Super+M or a click on the maître in the lounge sends a request to a room in its own worktree, and the lounge shows the rooms live; in a terminal, `maitre` opens the reception in herdr. It also has a demo mode with simulated agents. The doorman and the janitor run too (M3a). Parking, waking with `--resume`, PR watching and the router's memory (M3b) are built and covered by the test suite, with their end-to-end check on a real Claude Code still pending. The lounge is the building, with a floor per project (M4); answering from the lounge (M5) is the roadmap.
 
 **Why herdr and not tmux?**
 herdr gives each room a real tab you can walk into, plus the `agent prompt`, `send-keys` and `read` commands that should let the lounge answer a stuck room (spike 2 in the [design](docs/design.md) checks this). v1 targets one session manager to stay small.
@@ -462,7 +471,7 @@ The maître d' greets you at the door, finds you the right table and keeps the r
 - [x] **M2b · The doors:** `./setup`, a clickable maître in the lounge, the app icon, the lounge as a login service, the Super+M quick prompt, and an **Open in terminal** button on each room.
 - [x] **M3a · Doorman and janitor:** the sidewalk queue and the 6-room cap, the janitor that closes idle rooms with nothing pending and couches the rest, minutes in a markdown vault, and `maitre janitor --dry-run`.
 - [x] **M3b · Seats, PRs and memory:** a room on the couch or with an open PR gives up its seat after 30 quiet minutes and wakes with `claude --resume` (`maitre room wake`, a follow-up or the Wake button); PR watching through `gh` (CI and review notices, the merge dance, a PR closed without merge, optional `pr.autoWake`); and the router reading recent minutes, so a new room on an old topic starts with them. Covered by the test suite and checked end to end on a real Claude Code and herdr. A known snag: a status line script that writes a file in the worktree leaves the room's tree dirty, so a merged room can stay on the couch instead of closing.
-- [ ] **M4 · The building:** the facade, themed floors, lobby, terrace and elevator.
+- [x] **M4 · The building:** the facade with a floor per project, six party themes with a theme button and `projects.<name>.theme`, the lobby + terrace with the reception, the bell, the queue and the smokers, and the elevator; rooms ride the lift between their floor, the bell and the terrace, and the demo is a building of four made-up projects.
 - [ ] **M5 · Answer from the lounge:** reply to a stuck room from its panel, chat with a room, desktop notifications with action buttons, and routing that learns from outcomes.
 
 ## Credits

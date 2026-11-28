@@ -2,9 +2,18 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { maitreHome } from './paths.js';
 
+// In the order new floors pick them.
+export const THEME_IDS = ['casino', 'deco', 'tiki', 'karaoke', 'garden', 'hall'] as const;
+export type ThemeId = (typeof THEME_IDS)[number];
+
+export function isThemeId(x: unknown): x is ThemeId {
+  return typeof x === 'string' && (THEME_IDS as readonly string[]).includes(x);
+}
+
 export interface ProjectOverride {
   base?: string;
   branchPrefix?: string;
+  theme?: string;
 }
 
 export type UiLang = 'en' | 'pt-BR';
@@ -113,4 +122,17 @@ export function settings(env: NodeJS.ProcessEnv = process.env): Settings {
 
 export function saveConfig(cfg: MaitreConfig, env: NodeJS.ProcessEnv = process.env): void {
   writeJsonAtomic(configPath(env), cfg);
+}
+
+// projects.<name>.theme, kept only when it is one of the six; anything else is told and ignored.
+export function themeOverrides(cfg: MaitreConfig): { themes: Map<string, ThemeId>; warnings: string[] } {
+  const themes = new Map<string, ThemeId>();
+  const warnings: string[] = [];
+  for (const [name, o] of Object.entries(cfg.projects)) {
+    const theme: unknown = typeof o === 'object' && o !== null && !Array.isArray(o) ? o.theme : undefined;
+    if (theme === undefined) continue;
+    if (isThemeId(theme)) themes.set(name, theme);
+    else warnings.push(`config: projects.${name}.theme must be one of ${THEME_IDS.join(', ')}; ignoring it`);
+  }
+  return { themes, warnings };
 }

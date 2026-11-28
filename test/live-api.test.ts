@@ -1,7 +1,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { request, type ClientRequest, type IncomingMessage } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -405,7 +405,8 @@ test('LiveRooms: a registered room carries project and branch, and the registry 
   const env = { MAITRE_HOME: home };
   writeRoomRecord({ ...REC }, env);
   writeRoomRecord({ ...REC, room: 'plain' , project: undefined, branch: undefined, kind: 'scratch', model: 'opus' }, env);
-  const rooms = new LiveRooms(env);
+  // Within the start grace of 'none' (no record), which later counts it under scratch.
+  const rooms = new LiveRooms(env, { now: () => 1 });
   const seen: RoomState[] = [];
   rooms.on((r) => seen.push(r));
   for (const room of ['r1', 'plain', 'none']) rooms.apply(START(room));
@@ -526,7 +527,8 @@ test('LiveRooms: refresh emits a couch the janitor wrote, once; nothing when not
 test('LiveRooms: queued rooms are rooms in state queue with their position, without events', () => {
   const env = { MAITRE_HOME: tmp('maitre-live-queue-') };
   writeQueue([queued('q1', 100, 'web'), queued('q2', 200)], env);
-  const rooms = new LiveRooms(env);
+  // r1 has no record and is still in its start grace: no kind yet.
+  const rooms = new LiveRooms(env, { now: () => 1 });
   rooms.apply(START('r1'));
   const snap = rooms.snapshot();
   assert.deepEqual(snap.map((r) => [r.room, r.state, r.queuePosition, r.project, r.kind]), [
@@ -954,4 +956,247 @@ test('LiveRooms: a prompt typed while gh runs does not hide the notice that poll
   await prTick(env, { gh, now: () => clock[0]! });
   assert.equal(readPr('r1', env)?.notice?.since, 2000);
   assert.equal(rooms.snapshot()[0]?.notice?.text, 'CI failed: build');
+});
+
+// --- floors
+
+type FloorRow = { project: string; floor: number; theme: string; locked: boolean };
+// Not resumable: a room that ends leaves instead of parking.
+const onFloor = (room: string, project: string) => ({ room, project, kind: 'code' as const, dir: '/w', model: 'sonnet', taskType: 'bug', createdAt: 1 });
+
+test('LiveRooms: floors are told when a project opens its first room and closes its last, before an arrival and after a departure', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-floors-') };
+  writeRoomRecord(onFloor('w1', 'webshop'), env);
+  writeRoomRecord(onFloor('w2', 'webshop'), env);
+  const rooms = new LiveRooms(env, { warn: () => {} });
+  assert.deepEqual(rooms.floors(), []);
+  const seen: string[] = [];
+  rooms.on((r) => seen.push(`room ${r.room}:${r.state}`));
+  rooms.onFloors((f: FloorRow[]) => seen.push(`floors ${f.map((x) => `${x.project}@${x.floor}/${x.theme}`).join(',')}`));
+  rooms.snapshot();
+  rooms.apply(at('w1', 'SessionStart', 10));
+  rooms.apply(at('w1', 'UserPromptSubmit', 20, { prompt: 'go' }));
+  rooms.apply(at('w2', 'SessionStart', 30));
+  rooms.apply(at('w1', 'SessionEnd', 40));
+  rooms.refresh();
+  rooms.apply(at('w2', 'SessionEnd', 50));
+  assert.deepEqual(seen, [
+    'floors webshop@1/casino',
+    'room w1:coffee',
+    'room w1:work',
+    'room w2:coffee',
+    'room w1:exit',
+    'room w2:exit',
+    'floors ',
+  ]);
+  assert.deepEqual(rooms.floors(), []);
+  rooms.apply(at('w1', 'SessionStart', 60, { session: 's2' }));
+  assert.deepEqual(rooms.floors(), [{ project: 'webshop', floor: 1, theme: 'casino', locked: false }], 'reopened: same number and theme');
+});
+
+test('LiveRooms: a parked room keeps its floor open; closing it for good empties the floor', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-floors-') };
+  writeRoomRecord({ ...REC }, env);
+  const rooms = new LiveRooms(env, { warn: () => {} });
+  rooms.snapshot();
+  rooms.apply(at('r1', 'SessionStart', 10));
+  rooms.apply(at('r1', 'SessionEnd', 20));
+  assert.deepEqual(rooms.snapshot().map((r) => r.state), ['parked']);
+  assert.deepEqual(rooms.floors().map((f) => f.project), ['backend']);
+  writeRoomRecord({ ...REC, closedAt: 30, closedBy: 'user' }, env);
+  rooms.refresh();
+  assert.deepEqual(rooms.floors(), []);
+});
+
+test('LiveRooms: rooms without a project are on scratch; queued rooms count under their routed project', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-floors-') };
+  writeQueue([queued('q1', 100, 'api')], env);
+  writeRoomRecord({ ...REC, room: 'plain', project: undefined, branch: undefined, kind: 'scratch' }, env);
+  const rooms = new LiveRooms(env, { warn: () => {} });
+  rooms.apply(START('plain'));
+  rooms.apply(START('bare'));
+  rooms.snapshot();
+  assert.deepEqual(
+    rooms.floors().map((f) => [f.project, f.theme]).sort(),
+    [['api', 'casino'], ['scratch', 'hall']].sort(),
+  );
+  writeQueue([], env);
+  const told: FloorRow[][] = [];
+  rooms.onFloors((f: FloorRow[]) => told.push(f));
+  rooms.refresh();
+  assert.deepEqual(told.map((f) => f.map((x) => x.project)), [['scratch']]);
+});
+
+test('LiveRooms: a room whose record is not written yet is on no floor; its record puts it on its project', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-floors-') };
+  // Within its start grace: past it, a room with no record counts under scratch.
+  const rooms = new LiveRooms(env, { warn: () => {}, now: () => 15 });
+  rooms.snapshot();
+  const told: FloorRow[][] = [];
+  rooms.onFloors((f: FloorRow[]) => told.push(f));
+  rooms.apply(at('w1', 'SessionStart', 10));
+  assert.deepEqual(rooms.snapshot().map((r) => r.room), ['w1']);
+  assert.deepEqual(rooms.floors(), []);
+  writeRoomRecord(onFloor('w1', 'webshop'), env);
+  rooms.refresh();
+  assert.deepEqual(told, [[{ project: 'webshop', floor: 1, theme: 'casino', locked: false }]]);
+  assert.deepEqual(JSON.parse(readFileSync(join(env.MAITRE_HOME, 'state', 'floors.json'), 'utf8')), { webshop: { floor: 1, theme: 'casino' } }, 'no scratch number');
+});
+
+test('LiveRooms: a room with no record counts under scratch 10 s after its first event, and says so on the wire', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-floors-') };
+  const clock = [1_000];
+  const rooms = new LiveRooms(env, { warn: () => {}, now: () => clock[0]! });
+  rooms.snapshot();
+  const seen: string[] = [];
+  rooms.on((r) => seen.push(`room ${r.room}:${r.state}:${r.kind ?? '-'}`));
+  rooms.onFloors((f: FloorRow[]) => seen.push(`floors ${f.map((x) => x.project).join(',')}`));
+  rooms.apply(at('hand', 'SessionStart', 1_000));
+  clock[0] = 6_000;
+  rooms.apply(at('hand', 'UserPromptSubmit', 6_000, { prompt: 'go' }));
+  rooms.refresh();
+  assert.deepEqual(rooms.floors(), [], 'still in its start grace');
+  assert.equal('kind' in rooms.snapshot()[0]!, false, 'no kind on the wire: the lounge does not guess');
+  clock[0] = 11_000;
+  rooms.refresh();
+  assert.deepEqual(seen, ['room hand:coffee:-', 'room hand:work:-', 'floors scratch', 'room hand:work:scratch']);
+  assert.deepEqual(rooms.floors(), [{ project: 'scratch', floor: 1, theme: 'hall', locked: true }]);
+  assert.equal(rooms.snapshot()[0]!.kind, 'scratch');
+  rooms.apply(at('hand', 'SessionEnd', 12_000));
+  assert.deepEqual(rooms.floors(), [], 'its floor closes when it leaves');
+  clock[0] = 100_000;
+  rooms.apply(at('hand', 'SessionStart', 100_000, { session: 's2' }));
+  assert.equal('kind' in rooms.snapshot()[0]!, false, 'a new opening of the same name starts a new grace');
+});
+
+test('LiveRooms: a hand-run room replayed at boot is on scratch at once', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-floors-') };
+  const rooms = new LiveRooms(env, { warn: () => {}, now: () => 60_000 });
+  rooms.apply(at('hand', 'SessionStart', 1_000));
+  assert.deepEqual(rooms.snapshot().map((r) => r.kind), ['scratch']);
+  assert.deepEqual(rooms.floors().map((f) => f.project), ['scratch']);
+});
+
+test('LiveRooms: a record without a valid kind is still placed: by its project, else on scratch', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-floors-') };
+  const { kind: _k, ...old } = onFloor('old', 'docs');
+  writeRoomRecord(old as never, env);
+  writeRoomRecord({ ...onFloor('odd', 'x'), project: undefined, kind: 'weird' } as never, env);
+  const rooms = new LiveRooms(env, { warn: () => {}, now: () => 1 });
+  rooms.apply(at('old', 'SessionStart', 1));
+  rooms.apply(at('odd', 'SessionStart', 1));
+  assert.deepEqual(rooms.snapshot().map((r) => [r.room, r.kind]), [['odd', 'scratch'], ['old', 'code']]);
+  assert.deepEqual(rooms.floors().map((f) => f.project).sort(), ['docs', 'scratch']);
+});
+
+test('LiveRooms: a registered room whose record lands within the grace never passes through scratch', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-floors-') };
+  const clock = [1_000];
+  const rooms = new LiveRooms(env, { warn: () => {}, now: () => clock[0]! });
+  rooms.snapshot();
+  const wire: (string | undefined)[] = [];
+  const told: string[][] = [];
+  rooms.on((r) => wire.push(r.kind));
+  rooms.onFloors((f: FloorRow[]) => told.push(f.map((x) => x.project)));
+  rooms.apply(at('w1', 'MaitreStatus', 1_000, { status: 'blocked', text: 'starting', options: [], starting: true }));
+  clock[0] = 9_000;
+  rooms.apply(at('w1', 'SessionStart', 9_000));
+  rooms.refresh();
+  writeRoomRecord(onFloor('w1', 'webshop'), env);
+  rooms.refresh();
+  clock[0] = 30_000;
+  rooms.refresh();
+  assert.deepEqual(told, [['webshop']]);
+  assert.ok(wire.every((k) => k === undefined || k === 'code'), `kinds sent: ${wire}`);
+  assert.equal(JSON.parse(readFileSync(join(env.MAITRE_HOME, 'state', 'floors.json'), 'utf8')).scratch, undefined, 'no scratch number');
+});
+
+test('LiveRooms: replaying rooms that already ended mints no floor for them', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-floors-') };
+  writeRoomRecord(onFloor('old', 'docs'), env);
+  writeRoomRecord(onFloor('now', 'api'), env);
+  const rooms = new LiveRooms(env, { warn: () => {} });
+  rooms.apply(at('old', 'SessionStart', 1));
+  rooms.apply(at('old', 'SessionEnd', 2));
+  rooms.apply(at('now', 'SessionStart', 3));
+  rooms.snapshot();
+  assert.deepEqual(rooms.floors(), [{ project: 'api', floor: 1, theme: 'casino', locked: false }]);
+  assert.deepEqual(JSON.parse(readFileSync(join(env.MAITRE_HOME, 'state', 'floors.json'), 'utf8')), { api: { floor: 1, theme: 'casino' } });
+});
+
+test('LiveRooms: a theme changed on disk or by config is told on the next refresh, once', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-floors-') };
+  writeRoomRecord({ ...REC }, env);
+  const rooms = new LiveRooms(env, { warn: () => {} });
+  rooms.apply(START('r1'));
+  rooms.snapshot();
+  const told: FloorRow[][] = [];
+  rooms.onFloors((f: FloorRow[]) => told.push(f));
+  writeFileSync(join(env.MAITRE_HOME, 'config.json'), JSON.stringify({ projects: { backend: { theme: 'tiki' } } }));
+  rooms.refresh();
+  rooms.refresh();
+  rooms.refreshFloors();
+  assert.deepEqual(told, [[{ project: 'backend', floor: 1, theme: 'tiki', locked: true }]]);
+});
+
+test('LiveRooms: a corrupt floors.json never breaks the snapshot; it warns once and is rebuilt', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-floors-') };
+  writeRoomRecord({ ...REC }, env);
+  mkdirSync(join(env.MAITRE_HOME, 'state'), { recursive: true });
+  writeFileSync(join(env.MAITRE_HOME, 'state', 'floors.json'), '{oops');
+  const warnings: string[] = [];
+  const rooms = new LiveRooms(env, { warn: (w) => void warnings.push(w) });
+  rooms.apply(START('r1'));
+  assert.deepEqual(rooms.snapshot().map((r) => r.room), ['r1']);
+  rooms.refresh();
+  assert.deepEqual(rooms.floors(), [{ project: 'backend', floor: 1, theme: 'casino', locked: false }]);
+  assert.equal(warnings.filter((w) => w.includes('floors.json')).length, 1, warnings.join('\n'));
+  assert.deepEqual(JSON.parse(readFileSync(join(env.MAITRE_HOME, 'state', 'floors.json'), 'utf8')), { backend: { floor: 1, theme: 'casino' } });
+  const kept = readdirSync(join(env.MAITRE_HOME, 'state')).filter((n) => n.startsWith('floors.json.bad-'));
+  assert.equal(kept.length, 1);
+  assert.equal(readFileSync(join(env.MAITRE_HOME, 'state', kept[0]!), 'utf8'), '{oops');
+});
+
+test('LiveRooms: the scratch floor is sent locked', () => {
+  const env = { MAITRE_HOME: tmp('maitre-live-floors-') };
+  writeRoomRecord({ ...REC, room: 'plain', project: undefined, branch: undefined, kind: 'scratch' }, env);
+  const rooms = new LiveRooms(env, { warn: () => {} });
+  rooms.apply(START('plain'));
+  rooms.snapshot();
+  assert.deepEqual(rooms.floors(), [{ project: 'scratch', floor: 1, theme: 'hall', locked: true }]);
+});
+
+test('/api/events: the snapshot carries floors, and a floors event follows when they change', async () => {
+  const home = tmp('maitre-live-');
+  writeRoomRecord(onFloor('w1', 'webshop'), { MAITRE_HOME: home });
+  const d = await startDaemon(home);
+  const clients: SseClient[] = [];
+  try {
+    const a = await sse(d.server.port);
+    clients.push(a);
+    await waitFor(() => a.events.length === 1);
+    assert.equal(a.events[0]?.event, 'snapshot');
+    assert.deepEqual(JSON.parse(a.events[0]!.data), { rooms: [], floors: [] });
+    const file = writeRoom(home, 'w1', [JSON.stringify(at('w1', 'SessionStart', 10))]);
+    await waitFor(() => a.events.length === 3);
+    assert.deepEqual(a.events.map((e) => e.event), ['snapshot', 'floors', 'room']);
+    assert.deepEqual(JSON.parse(a.events[1]!.data), [{ project: 'webshop', floor: 1, theme: 'casino', locked: false }]);
+    const b = await sse(d.server.port);
+    clients.push(b);
+    await waitFor(() => b.events.length === 1);
+    assert.deepEqual(JSON.parse(b.events[0]!.data).floors, [{ project: 'webshop', floor: 1, theme: 'casino', locked: false }]);
+    appendFileSync(file, JSON.stringify(at('w1', 'SessionEnd', 20)) + '\n');
+    await waitFor(() => a.events.length === 5);
+    assert.deepEqual(a.events.slice(3).map((e) => [e.event, e.data]), [
+      ['room', a.events[3]!.data],
+      ['floors', '[]'],
+    ]);
+    assert.equal(JSON.parse(a.events[3]!.data).state, 'exit');
+    b.close();
+    a.close();
+    await waitFor(() => d.rooms.listenerCount() === 0);
+  } finally {
+    for (const c of clients) c.close();
+    await d.stop();
+  }
 });

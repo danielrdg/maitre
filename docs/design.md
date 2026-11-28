@@ -280,18 +280,22 @@ The stuck agent's panel sends `POST /rooms/:id/answer` to the daemon. The daemon
 ### 6.8 Lounge
 
 - A single page, plain JS with canvas, derived from the v5 mockup. It receives the initial state and then deltas over SSE.
-- **Three views:**
-  - **building facade**, the default view: one floor per project with an active or pinned room, windows with silhouettes, a floor with someone stuck blinking red, and an elevator to navigate;
-  - **floor**: that project's table, slots, bar, VIP, couch and dance floor;
-  - **lobby + terrace**: reception, queue and doorman; smokers from every floor.
-- The "needs you" alert shows and plays in every view.
+- **Three views (M4, done)** on one canvas, switched without a reload:
+  - **building facade**: one floor per project with an open room (running, parked, queued, couched or dancing), stacked in floor-number order with no gaps; windows in the floor's theme with silhouettes of its rooms; a floor with someone stuck blinking red with a "!"; the queue and the doorman on the sidewalk, the smokers on the roof; an elevator shaft with a call button per floor; and, on the right, the list of open floors (number, project, theme swatch), where a click rides there. Four project floors fit at the mockup's 42 px per floor; from the fifth on, the facade scrolls vertically;
+  - **floor**: that project's table, slots, bar, VIP, couch, dance floor and musician, in its theme, with the "floor N theme: … ▸" button;
+  - **lobby + terrace**: reception, the bell, the queue and the doorman; smokers from every floor on the roof.
+- **Where agents are.** `blocked` → the lobby bell, `smoke` → the terrace, `queue` → the sidewalk, from every floor; every other state on its project's floor, with the M3b behaviour unchanged. A room without `project` belongs to the `scratch` floor, and a room whose floor doesn't exist yet waits in the lobby. A room the server has no record for yet (an open writes `room.json` just after the room's first event) waits in the lobby too, sent without a `kind`; if no record shows up within 10 s of its first event, as with a room started by hand (`maitre room run`, the replay script), the server counts it under `scratch` and sends it with `kind: scratch`. The lounge only reads that `kind`: it never guesses a floor, so a starting room never shows on the scratch floor and its alert names no project.
+- **The elevator.** Clicking a floor, a call button, a row of the list or a button of the corner lift panel rides the car there on the facade with the mockup's easing, then opens that view. Only the user moves the car. An agent changing place walks to its view's lift door, disappears, and steps out at the destination's door.
+- **Default view:** the facade with two or more open floors; with one, straight onto that floor; with none, the lobby. A lounge that opened with no floors switches to the default view when its first floor appears, unless the user already acted (any click on the canvas, opening the reception or typing in it) or the reception box is open, a request is in flight or a reply is held.
+- The "needs you" alert shows and plays in every view: the red chip at the top rides to the lobby and opens that room's panel.
+- **Wire.** The server keeps `state/floors.json` (`{ "<project>": { "floor": n, "theme": "<id>" } }`, written atomically). The SSE snapshot carries `floors: [{ project, floor, theme, locked }]`, only the open floors sorted by floor, and a `floors` event sends the same array when it changes. `POST /api/floors/<project>/theme` saves a theme, under the same checks as the other lounge POSTs: 400 for an unknown project or theme, 409 for a locked one, 403 in the demo. It writes only `floors.json`, never `config.json`.
 - Opens as an app window: Google Chrome `--app=` with maître's own profile (`$MAITRE_HOME/chrome`) and `--class=maitre`. Chromium is not used, because the Ubuntu snap cannot open a profile in a hidden folder ([spike](spikes/2026-11-26-m2b-windows.md)). Without Google Chrome, the default browser opens a tab.
 - Pauses drawing while the window is hidden and resumes when it comes back. Sound keeps working via events, not frames.
 - **M3b states.** A parked room (a `seat`, or a dead room with a known session, a `resumable` record and no close in progress) naps on the couch, dimmed, and its panel has a **Wake** button instead of **Open in terminal**. A merged room dances on the floor until `dance.until` while it is at rest (`ready`, `coffee`, `whisky`, the couch or parked); a room that works, waits or needs you keeps its state and its bell, and a parked dancer keeps its Wake button. A PR notice is an orange balloon with three dots over the room, wherever it is, and ranks above the green check; the panel shows the kind, the text and an "Open the PR" link (only a `https://github.com/<owner>/<repo>/pull/<n>` URL is linked).
 
 **Clean interface.**
-- The lounge fills the whole window, with no title or legend at the top.
-- A corner holds only two pixel buttons: **sound** (on/off) and **names** (always / on hover).
+- The lounge fills the whole window, with no title or legend at the top. Only the red "needs you" chip shows there, while a room needs you.
+- One corner holds only two pixel buttons: **sound** (on/off) and **names** (always / on hover). The other holds the building's controls: the view switcher (building, floor, lobby + terrace), the lift panel with every floor, and, on a floor, its theme button.
 - The model color legend sits behind a small "?" button that opens an overlay.
 - The simulation buttons (block, merge, new room) exist **only in `--demo` mode**, grouped in a "demo" menu, because without real agents the scene would stand still. In real use they do not appear.
 
@@ -315,10 +319,11 @@ The stuck agent's panel sends `POST /rooms/:id/answer` to the daemon. The daemon
   - **Tiki bar:** bamboo, torches, drinks with umbrellas.
   - **Tokyo karaoke:** blue and pink neon, a small stage with a microphone.
   - **Rooftop garden:** plants, string lights, open sky.
-- The theme is assigned automatically the first time the project shows up: the next free one, or a hash of the name when they run out. It can be changed in `config/projects` (`theme: <id>`).
-- The lobby and the shared terrace keep maître's own theme: Chinese hall, pink neon.
-- With only one active project, the lounge opens straight on its floor. The facade shows up from two projects on.
-- In M4, the themes go into the building mockup for approval before code.
+- The theme is assigned automatically the first time the project shows up: the first of `casino, deco, tiki, karaoke, garden, hall` that no open floor wears, or a stable hash of the name when all six are worn. The floor's button moves it to the next theme and saves it in `floors.json`. `projects.<name>.theme` in `$MAITRE_HOME/config.json` wins over both: the floor is sent `locked` and its button shows the theme with "set in config". An id that isn't one of the six is warned about and ignored.
+- The musician's default follows the theme: `house` for `casino` and `karaoke`, `jazz` for the others. No new styles.
+- The lobby, the shared terrace and the `scratch` floor keep maître's own theme: Chinese hall, pink neon.
+- With only one open floor, the lounge opens straight on it. The facade shows up from two floors on.
+- The themes were approved in the building mockup ([docs/mockups/building.html](mockups/building.html)) before code. The demo is a building of four made-up projects (`webshop`/`hall`, `api`/`casino`, `mobile`/`deco`, `docs`/`tiki`) plus a scratch room; the README art keeps the single-room scene, captured in `?capture=1` mode.
 
 ### 6.8.1 Using it without a terminal (the four doors)
 
@@ -373,7 +378,7 @@ A subset of the README's [maître vs firstmate](../README.md#maître-vs-firstmat
 - **M3 · Doorman and janitor**, split in two by the owner on 27-11-2026:
   - **M3a · Doorman and janitor (done):** `capacity` and the FIFO queue on the sidewalk (`state/queue.json`, a failed list after three failed opens), the janitor with the never-lose-work checks, the couch, minutes in the vault and `maitre janitor --dry-run`, all running in the lounge process (§6.6, §7.1).
   - **M3b · Seats, PRs and memory (done):** a couched room or one with an open PR gives up its seat and wakes with `claude --resume` (`maitre room wake`, a follow-up, the lounge's Wake button); PR watching (CI and review notices, merge dance, PR closed without merge, optional `pr.autoWake`); the router reading recent minutes, and a new room born with an old room's minutes (§6.2, §6.6, §7.1).
-- **M4 · Building:** facade, floors, terrace, elevator.
+- **M4 · Building (done):** the facade, a themed floor per project with its theme button and `projects.<name>.theme`, the lobby + terrace, the elevator and the multi-project demo (§6.8, §7.1).
 - **M5 · Answer from the lounge** and routing that learns.
 
 ## 7.1 Designer's decisions (open to review)
@@ -393,7 +398,7 @@ A subset of the README's [maître vs firstmate](../README.md#maître-vs-firstmat
 - **Multi-repo room:** a room can have more than one worktree (1:N). It shows on the main project's floor, with a small sign for the others.
 - **The user's global rules apply in rooms**, because they are the user's own Claude Code. `room-AGENTS.md` only pins what belongs to maître: use the worktree and branch maître created, do not create another, and declare waits and blocks with `maitre status`.
 - **The 5k-token target** applies to the `route` call. The reception runs with setting sources off (spike 0), so personal settings, hooks and plugins stay out; Claude Code still loads the user's and organization's `CLAUDE.md`, and the guard hook keeps it to the `maitre` allowlist. The 1,500-word ceiling applies to its contract.
-- **The building gets its own mockup before M4:** facade, elevator, lobby with sidewalk, and terrace. It is approved before code.
+- **The building got its own mockup before M4:** facade, elevator, lobby with sidewalk, and terrace, approved by the owner before code: [docs/mockups/building.html](mockups/building.html), with screenshots in `docs/mockups/building-shots/`.
 
 **M3b calls for the owner to confirm.** These choices were made by the designer or the builders, not by the owner; each one is easy to change.
 
@@ -421,6 +426,17 @@ A subset of the README's [maître vs firstmate](../README.md#maître-vs-firstmat
 - **A dead room with a known session shows as parked** in the lounge and in `maitre room list`, and is listed to the router as `parked`, so a follow-up wakes it.
 - **`maitre room open` refuses only a parked record** (one with a `seat`): wake it, or close it first. A dead room without a seat (a crash) can still be opened fresh, which drops its session and its `pr.json`; whether to refuse those too is the owner's call.
 - **A failed check and a review in the same poll make one `ci` notice** that names both, since `pr.json` holds one notice.
+
+**M4 calls for the owner to confirm.** The owner approved the building's design and its mockup; these choices were made by the designer or the builders after that, and each one is easy to change.
+
+- **Floor entries are permanent.** A project's entry in `floors.json` is never removed, so its floor number and theme never change, even after its last room closes and others open in between.
+- **The theme pick looks only at open floors.** "Used" means worn by a floor open right now: a new project takes the first theme no open floor wears, so it can repeat the theme of a closed floor, and the hash when all six are worn can repeat one too. The stored theme stays with the project for good.
+- **The facade stacks the open floors in floor-number order, with no gaps.** When a floor closes, the floors above it move down a level on screen; their numbers, labels and themes stay. It fits 4 project floors plus the lobby and the roof at the mockup's 42 px per floor; from the 5th open floor on, it scrolls, and the elevator lists every floor.
+- **Music: no new styles, and the theme leads only by default.** `casino` and `karaoke` default to `house`, the other four to `jazz`. The theme sets the style only while music is on and the user hasn't picked one by hand in the musician's menu; picking the view's own style counts as following the theme, any other style is a hand pick that holds in every view, and Off lets the theme lead again. Only a floor and the lobby set the default: the facade and a ride keep the music that is playing.
+- **Agents change view through the lift door.** A room whose state moves it to another place walks to its view's lift door, disappears, and steps out at the destination's door. The car is moved only by the user; agents never call it.
+- **The scratch floor is locked.** It always wears `hall` and is sent with `locked: true`: its button shows the theme with "the scratch floor keeps maître's look" and does nothing, a POST for it gets 409, and a `projects.scratch.theme` in the config is ignored.
+- **Changing a floor's theme is a button, not a setting.** The floor's "floor N theme: … ▸" button cycles to the next of the six themes and saves it through `POST /api/floors/<project>/theme` into maître's own `floors.json`; it never writes the owner's `config.json`. A theme in `projects.<name>.theme` wins and locks the button ("set in config"). The facade's right column is the list of open floors and only rides there; it no longer applies a theme. The demo changes the theme on the page only.
+- **The reception desk lives in the lobby.** The maître, the desk, the bell and the doorman work the lobby; on a project floor, the theme's signature piece takes the desk's spot.
 
 ## 8. Left to whoever builds it
 

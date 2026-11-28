@@ -3,6 +3,7 @@ import { accessSync, constants, statSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { cleanEnv } from './env.js';
+import { FloorError, setTheme } from './floors.js';
 import { HerdrError, focusWorkspace, herdrSession, listWorkspaces } from './herdr.js';
 import type { LoungeAuth } from './lounge-server.js';
 import { roomSlug } from './paths.js';
@@ -339,7 +340,39 @@ async function wake(res: ServerResponse, room: string, env: NodeJS.ProcessEnv, w
   send(res, 200, { kind: 'woken', room, lines: woken.lines, needsYou: woken.needsYou });
 }
 
+// The floor view's theme button. Only floors.json is written; the name is looked up there, never put in a path.
+async function floorTheme(req: IncomingMessage, res: ServerResponse, project: string, env: NodeJS.ProcessEnv, changed: () => void): Promise<void> {
+  if (!isJson(req)) {
+    req.resume();
+    return fail(res, 400, 'the body must be JSON (content-type: application/json)');
+  }
+  if (Number(req.headers['content-length'] ?? 0) > MAX_BODY_BYTES) return tooLarge(res);
+  const raw = await readBody(req);
+  if (raw === undefined) return tooLarge(res);
+  let body: unknown;
+  try {
+    body = JSON.parse(raw.toString('utf8'));
+  } catch {
+    return fail(res, 400, 'the body is not valid JSON');
+  }
+  const theme: unknown = typeof body === 'object' && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>).theme : undefined;
+  if (typeof theme !== 'string') return fail(res, 400, 'the request must be a JSON object with a theme string');
+  let floor: ReturnType<typeof setTheme>;
+  try {
+    floor = setTheme(project, theme, env);
+  } catch (err) {
+    if (err instanceof FloorError) return fail(res, err.code === 'locked' ? 409 : 400, err.message);
+    throw err;
+  }
+  changed();
+  send(res, 200, { kind: 'ok', floor });
+}
+
+const ODD_NAME = /[\u0000-\u001f\u007f/\\]/;
+const MAX_NAME = 200;
+
 const ROOM_PATH = /^\/api\/rooms\/(.+)\/(terminal|wake)$/;
+const FLOOR_PATH = /^\/api\/floors\/([^/]+)\/theme$/;
 
 export function receptionRoutes(opts: {
   queue: ReceptionQueue;
@@ -347,11 +380,13 @@ export function receptionRoutes(opts: {
   spawnTerminal?: SpawnTerminal;
   deps?: ReceptionDeps;
   wake?: WakeFn;
+  floorsChanged?: () => void;
 }): (req: IncomingMessage, res: ServerResponse, url: URL, auth?: LoungeAuth) => boolean {
   const { queue, env } = opts;
   const spawnTerminal = opts.spawnTerminal ?? spawnDetached;
   const wakeFn: WakeFn = opts.wake ?? ((room, e) => wakeRoom(room, e));
   const deps = opts.deps ?? {};
+  const floorsChanged = opts.floorsChanged ?? (() => {});
   // The server answers a throw with a text 404; these handlers answer every error themselves.
   const guard = (res: ServerResponse, work: Promise<void>) => {
     work.catch((err: unknown) => {
@@ -364,6 +399,25 @@ export function receptionRoutes(opts: {
     if (url.pathname === '/api/reception') {
       if (req.method !== 'POST') return notAllowed(req, res);
       guard(res, reception(req, res, queue, env, deps));
+      return true;
+    }
+    const f = FLOOR_PATH.exec(url.pathname);
+    if (f !== null) {
+      if (req.method !== 'POST') return notAllowed(req, res);
+      let project: string;
+      try {
+        project = decodeURIComponent(f[1]);
+      } catch {
+        req.resume();
+        fail(res, 400, 'invalid project name');
+        return true;
+      }
+      if (project === '' || project.length > MAX_NAME || ODD_NAME.test(project)) {
+        req.resume();
+        fail(res, 400, `invalid project name ${JSON.stringify(project)}`);
+        return true;
+      }
+      guard(res, floorTheme(req, res, project, env, floorsChanged));
       return true;
     }
     const m = ROOM_PATH.exec(url.pathname);

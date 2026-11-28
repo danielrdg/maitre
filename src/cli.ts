@@ -501,7 +501,7 @@ export async function main(argv: string[]): Promise<void> {
   const token = live ? loungeToken() : randomBytes(32).toString('hex');
   const rooms = live ? new LiveRooms() : undefined;
   const tickets = new TicketStore();
-  const reception = live ? receptionRoutes({ queue: new ReceptionQueue(), env: process.env }) : undefined;
+  const reception = rooms && receptionRoutes({ queue: new ReceptionQueue(), env: process.env, floorsChanged: () => rooms.refresh() });
   const server = await startLoungeServer({ root, port: args.port, token, tickets, routes: rooms && liveRoutes(rooms, { tickets, reception }) });
   if (live) claimLounge(server.port);
   const tail = rooms && new EventTail(join(maitreHome(), 'state'), (line) => rooms.apply(line));

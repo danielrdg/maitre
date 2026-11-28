@@ -7,7 +7,7 @@ import { notifyDesktop } from './open-app.js';
 import { NOTICE_PROMPT, readPr } from './pr-state.js';
 import { prTick, type PrEvent } from './pr-watch.js';
 import { liveReservations } from './queue.js';
-import { deliverToRoom, isRecord, probeRoom, unsentInput, type Delivered, type RoomLiveness } from './room-open.js';
+import { UNSENT_TEXT, deliverToRoom, isRecord, probeRoom, unsentInput, type Delivered, type RoomLiveness } from './room-open.js';
 import { listRooms, readRoom, type RoomRecord } from './rooms.js';
 import type { RoomState } from './room-state.js';
 import { offersWake, wakeRoom, type WakeDeps, type Woken } from './wake.js';
@@ -33,7 +33,7 @@ export interface TickDeps {
   pollMs?: number;
   liveness?: (rec: RoomRecord, env: NodeJS.ProcessEnv) => Promise<RoomLiveness>;
   wake?: (room: string, env: NodeJS.ProcessEnv, deps?: WakeDeps) => Promise<Woken>;
-  deliver?: (room: string, text: string, env: NodeJS.ProcessEnv, opts: { closing: string }) => Promise<Pick<Delivered, 'result'>>;
+  deliver?: (room: string, text: string, env: NodeJS.ProcessEnv, opts: { closing: string; woken: boolean }) => Promise<Pick<Delivered, 'result'>>;
   // What the room's input box holds that is not sent (undefined: nothing), as closing checks it.
   unsent?: (rec: RoomRecord) => Promise<string | undefined>;
 }
@@ -65,6 +65,9 @@ const MIN_INTERVAL_MS = 1_000;
 
 const firstLine = (s: string): string => s.split('\n').map((l) => l.trim()).find((l) => l !== '') ?? '';
 const message = (err: unknown): string => firstLine(err instanceof Error ? err.message : String(err)) || 'unknown error';
+
+// Why autoWake did not tell a room, in its own words: a reworded janitor reason must not change it.
+export const AUTOWAKE_DRAFT = 'a draft sits in its input box';
 
 // What pr.autoWake tells a room: the kind, the author's login and the URL, never text from the PR
 // (a comment body or a check name could carry instructions).
@@ -238,12 +241,14 @@ export function startTicks(env: NodeJS.ProcessEnv = process.env, deps: TickDeps 
     if (pr === undefined || pr.state !== 'OPEN' || !PR_URL.test(pr.url)) return;
     const lines = events.map((e) => noticeLine(e.kind as 'ci' | 'review', pr.url, e.login));
     const skip = (why: string) => log(`maitre: pr: did not tell ${room} about its PR: ${why}`);
+    let woke = false;
     if ((await probe(rec, env)) === 'not running') {
       if (!offersWake(rec)) return skip('it is not running, and its record predates waking');
       const woken = await wake(room, env, { request: lines.join('\n') });
       for (const l of woken.lines) log(`maitre: pr: ${l}`);
       // A fresh Claude has the lines in its brief; one asking something in its tab cannot take them now.
       if (!woken.resumed || woken.needsYou) return;
+      woke = true;
     }
     // The closing marker keeps the janitor's park or close (its /exit) off the room while it is told.
     const held = takeClosing(room, env);
@@ -255,8 +260,8 @@ export function startTicks(env: NodeJS.ProcessEnv = process.env, deps: TickDeps 
       for (const l of lines) {
         // A draft in its input box would be sent along with the line.
         const unsent = await unsentOf(now);
-        if (unsent !== undefined) return skip(unsent);
-        if ((await deliver(room, l, env, { closing: held.token })).result === 'unsent') return skip('the line may be typed in its input, not sent');
+        if (unsent !== undefined) return skip(unsent === UNSENT_TEXT ? AUTOWAKE_DRAFT : unsent);
+        if ((await deliver(room, l, env, { closing: held.token, woken: woke })).result === 'unsent') return skip('the line may be typed in its input, not sent');
       }
     } finally {
       releaseClosing(room, held.token, env);

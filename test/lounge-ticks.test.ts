@@ -9,13 +9,13 @@ import { admit, doormanTick, readQueue, type DoormanResult } from '../src/doorma
 import type { JanitorDecision } from '../src/janitor.js';
 import { LiveRooms } from '../src/live-api.js';
 import { loungeFile } from '../src/lounge-file.js';
-import { startTicks, type Ticks } from '../src/lounge-ticks.js';
+import { AUTOWAKE_DRAFT, startTicks, type Ticks } from '../src/lounge-ticks.js';
 import { roomDir } from '../src/paths.js';
 import { openingFile, writeQueue } from '../src/queue.js';
 import { readPr, writePr } from '../src/pr-state.js';
 import { prTick, type Gh, type PrEvent } from '../src/pr-watch.js';
 import type { LiveState, RoomState } from '../src/room-state.js';
-import { openRoom, type RoomLiveness } from '../src/room-open.js';
+import { UNSENT_TEXT, openRoom, type RoomLiveness } from '../src/room-open.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
 import type { WakeDeps, Woken } from '../src/wake.js';
 import type { Route } from '../src/router.js';
@@ -650,8 +650,9 @@ function autoWakeDeps(gh: Gh, live: RoomLiveness, woken: Partial<Woken> = {}): {
         told.wakes.push(`${room}:${d.request ?? ''}`);
         return { resumed: true, lines: [`woke ${room}: resumed its session`], needsYou: false, ...woken };
       },
-      deliver: async (room: string, text: string, _e: NodeJS.ProcessEnv, opts: { closing?: string } = {}) => {
+      deliver: async (room: string, text: string, _e: NodeJS.ProcessEnv, opts: { closing?: string; woken?: boolean } = {}) => {
         assert.ok(opts.closing !== undefined && ownsClosing(room, opts.closing), 'told while holding the closing marker');
+        assert.equal(opts.woken, told.wakes.length > 0, 'a delivery right after a wake says so');
         told.sent.push({ room, text });
         return { result: 'delivered' as const, busy: false };
       },
@@ -784,10 +785,11 @@ test('autoWake on: a draft in the room\'s input box (or one that cannot be read)
   const { gh } = prRoom('alpha', failingCheck);
   const { told, deps } = autoWakeDeps(gh, 'idle');
   const out: string[] = [];
-  ticks = startTicks(process.env, { ...deps, log: (l) => out.push(l), unsent: async () => 'unsent text in its input' });
+  ticks = startTicks(process.env, { ...deps, log: (l) => out.push(l), unsent: async () => UNSENT_TEXT });
   await ticks.idle();
   assert.deepEqual(told.sent, []);
-  assert.ok(out.includes('maitre: pr: did not tell alpha about its PR: unsent text in its input'), out.join('\n'));
+  assert.notEqual(AUTOWAKE_DRAFT, UNSENT_TEXT, "autoWake says it in its own words, not the janitor's");
+  assert.ok(out.includes(`maitre: pr: did not tell alpha about its PR: ${AUTOWAKE_DRAFT}`), out.join('\n'));
   assert.equal(isClosing('alpha'), false, 'the marker is released');
 });
 

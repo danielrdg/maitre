@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { HookLine } from '../src/events.js';
+import { countsAsActivity, type HookLine } from '../src/events.js';
 import { roomDir } from '../src/paths.js';
 import { modelKey, reduce, type LiveState, type RoomState } from '../src/room-state.js';
 
@@ -836,4 +836,13 @@ test('Stop keeps the last reply; the next prompt clears it', () => {
   assert.equal(reduce(started(), ev('Stop', { last_message: '  \nok\n' })).reply, 'ok');
   assert.equal(reduce(started(), ev('Stop', { last_message: '😀'.repeat(600) })).reply, `${'😀'.repeat(499)}…`);
   assert.equal(reduce(started(), ev('Stop', { agent_id: 'a1', last_message: 'from a subagent' })).reply, undefined);
+});
+
+test("a wake's unseen mark changes nothing in the room's state and is no activity", () => {
+  const up = reduce(fold(FIXTURE.slice(0, 3)), ev('SessionStart', { session: 's-0001' }));
+  const mark = ev('MaitreUnseen', { session: '', resumes: 's-0001', run: '0123456789abcdef' });
+  assert.equal(reduce(up, mark), up);
+  const gone = fold(FIXTURE);
+  assert.equal(reduce(gone, mark), gone);
+  assert.equal(countsAsActivity(mark), false);
 });

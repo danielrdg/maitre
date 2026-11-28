@@ -19,8 +19,11 @@ export interface RoomRecord {
   // A room found not running with something pending: why the janitor leaves it alone (a dead room is
   // never on the couch, which is for running rooms).
   pending?: { since: number; reasons: string[] };
-  // Claude stopped to free the seat; the tab is gone, the worktree, branch and session stay.
-  seat?: { releasedAt: number; session: string };
+  // Claude stopped to free the seat; the tab is gone, the worktree, branch and session stay. `run`: the run
+  // of the tab whose Claude the park stopped, whose exit line alone says that Claude is gone.
+  seat?: { releasedAt: number; session: string; run?: string };
+  // The `--run` id of the command in the room's tab (every open and wake names one).
+  run?: string;
   // The queuedAt of the queue entry the doorman opened this room from.
   fromQueue?: number;
   // Set on every open since rooms could be woken, and on a room found running: a room closed by hand

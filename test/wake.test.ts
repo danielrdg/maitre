@@ -15,6 +15,7 @@ import { BRIEF_HEADER, MAX_BRIEF_BYTES, STARTING_TEXT, TRUST_BLOCKED_TEXT, listR
 import { LiveRooms } from '../src/live-api.js';
 import type { HookLine } from '../src/events.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
+import { roomActivity } from '../src/activity.js';
 import { parkedState, wakeRoom, wakeSession, type WakeDeps } from '../src/wake.js';
 import { herdrSandbox, type HerdrSandbox } from './herdr-sandbox.js';
 
@@ -300,7 +301,9 @@ test('a session that is not found: the failed tab closes and a fresh claude star
   const [, resumeCmd, freshCmd] = runs();
   assert.match(resumeCmd, /'--resume' 's1'$/);
   const briefPath = join(roomDir('a'), 'brief.md');
-  assert.equal(freshCmd, [MAITRE, 'room', 'run', 'a', '--brief-file', briefPath, '--', '--model', 'sonnet'].map(shellQuote).join(' '));
+  const freshRun = /'--run' '([0-9a-f]{16})'/.exec(freshCmd)?.[1];
+  assert.ok(freshRun !== undefined && !resumeCmd.includes(freshRun), 'the fresh Claude runs under its own id');
+  assert.equal(freshCmd, [MAITRE, 'room', 'run', 'a', '--run', freshRun, '--brief-file', briefPath, '--', '--model', 'sonnet'].map(shellQuote).join(' '));
   const brief = readFileSync(briefPath, 'utf8');
   assert.ok(brief.startsWith(`${BRIEF_HEADER}\n\nalso check the logout\n`), brief);
   assert.match(brief, /## What was asked\n\nfix the login bug/);
@@ -422,6 +425,8 @@ async function leftStarting(proj?: string): Promise<string[]> {
 }
 
 const lounge = async () => (await listRoomRows()).map((r) => r.lounge);
+// The --run id of the newest command typed into a tab: the wake's own run.
+const wakeRun = (): string => /'--run' '([0-9a-f]{16})'/.exec(runs().at(-1)!)![1]!;
 const append = (l: Record<string, unknown>) => appendFileSync(eventsFile('a'), JSON.stringify({ v: 1, ts: Date.now(), room: 'a', session: 's1', ...l }) + '\n');
 
 test("after the room's SessionStart, until herdr shows its Claude, the room is still starting: not parked, not stamped", async () => {
@@ -440,9 +445,7 @@ test("after the room's SessionStart, until herdr shows its Claude, the room is s
 
 for (const [why, after] of [
   ['its tab was closed', () => killTabs()],
-  ["its own run's exit line came", () => append({ event: 'MaitreExit', session: '', run: 'x' })],
-  ['its session ended', () => append({ event: 'SessionEnd' })],
-  ['another session started there', () => append({ event: 'SessionStart', session: 's9' })],
+  ["its own run's exit line came", () => append({ event: 'MaitreExit', session: '', run: wakeRun() })],
 ] as const) {
   test(`a still-starting room is released once ${why}: parked again`, async () => {
     await leftStarting();
@@ -451,6 +454,28 @@ for (const [why, after] of [
     assert.doesNotMatch((await lounge())[0]!, /starting/);
   });
 }
+
+for (const [why, after] of [
+  ['a SessionEnd of the resumed session (an older tab of that session hung up late)', () => append({ event: 'SessionEnd' })],
+  ['a line from another session', () => append({ event: 'SessionStart', session: 's9' })],
+] as const) {
+  test(`a still-starting room is not released by ${why}: only its own run ends it`, async () => {
+    await leftStarting();
+    after();
+    assert.deepEqual(await lounge(), ['starting — check its tab']);
+    await assert.rejects(wakeRoom('a', process.env, QUICK), /still starting in its tab/);
+  });
+}
+
+test('a starting note that names no run (written before runs were named) still ends on a SessionEnd, as it did', async () => {
+  await leftStarting();
+  const { run: _r, ...rec } = readRoom('a')!;
+  writeRoom(rec);
+  append({ event: 'MaitreStatus', session: '', status: 'blocked', text: STARTING_TEXT, options: [], starting: true, resumes: 's1' });
+  assert.deepEqual(await lounge(), ['starting — check its tab']);
+  append({ event: 'SessionEnd' });
+  assert.doesNotMatch((await lounge())[0]!, /starting/);
+});
 
 test('a starting note for another session than the one to wake (the seat names another) does not hold the room', async () => {
   await leftStarting();
@@ -630,8 +655,20 @@ test('a room of another herdr session with no seat is not woken: its Claude may 
   killTabs();
   await assert.rejects(wakeRoom('a', process.env, QUICK), /a belongs to another herdr session \(elsewhere\)/);
   assert.equal(creates().length, 1);
-  writeRoom({ ...readRoom('a')!, seat: { releasedAt: Date.now(), session: 's1' } });
-  assert.equal((await wakeRoom('a', process.env, QUICK)).resumed, true, 'a seat says its Claude was stopped');
+  writeRoom({ ...readRoom('a')!, seat: { releasedAt: Date.now() - 1_000, session: 's1' } });
+  event('a', 'SessionEnd');
+  assert.equal((await wakeRoom('a', process.env, QUICK)).resumed, true, 'a seat, and its Claude seen stopping after it');
+});
+
+test('a seat on a room of another herdr session whose Claude was never seen stopping (a park that died half-way) is not woken', async () => {
+  await open('a');
+  const rec = readRoom('a')!;
+  event('a', 'SessionEnd');
+  writeRoom({ ...rec, herdr: { ...rec.herdr!, session: 'elsewhere' }, seat: { releasedAt: Date.now() + 1_000, session: 's1' } });
+  killTabs();
+  assert.equal(parkedState(readRoom('a')), undefined, 'not offered for waking');
+  await assert.rejects(wakeRoom('a', process.env, QUICK), /a belongs to another herdr session \(elsewhere\)/);
+  assert.equal(creates().length, 1);
 });
 
 test("a fresh Claude's room notes are fenced as data, with control and bidi characters replaced", async () => {
@@ -661,6 +698,8 @@ test("a fresh Claude that stops at the folder-trust dialog writes its starting n
   assert.equal(w.needsYou, true);
   const note = readFileSync(eventsFile('a'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as HookLine).at(-1)!;
   assert.deepEqual([note.event, note.starting, note.resumes], ['MaitreStatus', true, 's1']);
+  assert.equal(note.run, wakeRun(), "the fresh Claude's own run");
+  assert.match(runs().at(-1)!, /'--brief-file'/);
 });
 
 test('a request that nearly fills the brief leaves the room notes out instead of looping on them', async () => {
@@ -700,7 +739,7 @@ test('a SessionStart with another session id is not a resume: it fails at the de
   process.env.FAKE_HERDR_RESUME = 'other';
   const w = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 300 });
   assert.equal(w.resumed, false);
-  assert.match(w.lines[0], /could not be resumed \(it did not start within 0\.3 s\)/);
+  assert.match(w.lines[0], /could not be resumed \(another session started in its tab instead\)/);
   assert.match(runs().at(-1)!, /'--brief-file'/);
 });
 
@@ -833,4 +872,200 @@ test('a failed fresh start removes the brief it wrote when the room had none bef
   assert.match(runs().at(-1)!, /'--brief-file'/, 'the fresh start was tried');
   assert.equal(existsSync(join(roomDir('a'), 'brief.md')), false, 'the request does not linger on disk');
   assert.deepEqual(readRoom('a'), parked);
+});
+
+// Follow-ups to M3b (#37).
+
+test('a resumed Claude herdr never registers stays still starting: a second wake refuses and opens no tab, and the lounge does not show it blocked', async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'start-unseen';
+  const w = await wakeRoom('a', process.env, { ...QUICK, readyMs: 200 });
+  assert.deepEqual(w, { resumed: true, lines: ['woke a: resumed its session, but herdr does not show its Claude yet — check its tab'], needsYou: true });
+  const tab = tabs();
+  const made = creates().length;
+  assert.equal(wakeSession(readRoom('a')!), 's1', 'with the seat gone, the session to wake is the resumed one');
+  await assert.rejects(wakeRoom('a', process.env, QUICK), /^Error: a is still starting in its tab; if nothing is happening there, close that tab and wake it again$/);
+  assert.equal(creates().length, made, 'no second tab');
+  assert.deepEqual(tabs(), tab, 'its tab is still there');
+  assert.deepEqual((await listRoomRows()).map((r) => [r.lounge, r.starting]), [['starting — check its tab', true]]);
+  await janitorTick();
+  assert.equal(readRoom('a')!.closedAt, undefined, 'nothing stamped it not running');
+  const a = roomActivity('a');
+  assert.notEqual(a.state, 'blocked');
+  assert.equal(a.starting, undefined);
+  const live = new LiveRooms(process.env);
+  for (const l of readFileSync(eventsFile('a'), 'utf8').split('\n').filter((x) => x !== '')) live.apply(JSON.parse(l) as HookLine);
+  assert.notEqual(live.snapshot().find((r) => r.room === 'a')?.state, 'blocked');
+});
+
+test("a stray exit line from another run does not release a still-starting room; its own run's does", async () => {
+  await leftStarting();
+  append({ event: 'MaitreExit', session: '', run: '0123456789abcdef' });
+  append({ event: 'MaitreExit', session: '' });
+  assert.deepEqual(await lounge(), ['starting — check its tab']);
+  await assert.rejects(wakeRoom('a', process.env, QUICK), /still starting in its tab/);
+  append({ event: 'MaitreExit', session: '', run: wakeRun() });
+  assert.doesNotMatch((await lounge())[0]!, /starting/);
+});
+
+test("the starting note of a wake names the wake's run", async () => {
+  await leftStarting();
+  const notes = readFileSync(eventsFile('a'), 'utf8').split('\n').filter((x) => x !== '').map((l) => JSON.parse(l) as HookLine).filter((l) => l.event === 'MaitreStatus');
+  assert.equal(notes.at(-1)!.run, wakeRun());
+});
+
+test('a wake whose record cannot be written takes its starting note back, and its tab is closed', async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'shell';
+  const moved = () => writeRoom({ ...readRoom('a')!, createdAt: 1 });
+  await assert.rejects(wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 200, slowStartMs: 400, afterTab: moved }), /^Error: a changed while it was being woken$/);
+  const lines = readFileSync(eventsFile('a'), 'utf8').split('\n').filter((x) => x !== '').map((l) => JSON.parse(l) as HookLine);
+  const note = lines.findIndex((l) => l.event === 'MaitreStatus' && l.run === wakeRun());
+  assert.ok(note >= 0, 'the note was written');
+  assert.ok(lines.slice(note + 1).some((l) => l.event === 'MaitreExit' && l.run === wakeRun()), 'and taken back');
+  assert.notEqual(roomActivity('a').state, 'blocked');
+  assert.deepEqual(tabs(), []);
+});
+
+test('a tab that cannot be closed after a wake failed is added to that failure, not put in its place', async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'shell';
+  process.env.FAKE_HERDR_FAIL_workspace_close = 'boom';
+  const moved = () => writeRoom({ ...readRoom('a')!, createdAt: 1 });
+  await assert.rejects(
+    wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 200, slowStartMs: 400, afterTab: moved }),
+    /^Error: a changed while it was being woken; a: could not close its new tab \(w\d+\) — close it in herdr; the room stays parked$/,
+  );
+});
+
+test('a wake drops the pending reasons with the seat: the room dying again starts them afresh', async () => {
+  await open('a');
+  writeRoom({ ...readRoom('a')!, pending: { since: 1, reasons: ['uncommitted changes'] } });
+  parkByHand('a');
+  await wakeRoom('a', process.env, QUICK);
+  assert.equal(readRoom('a')!.pending, undefined);
+});
+
+test('a room whose close died after its tab closed (a pid-0 marker with minutes) is not woken: that close is finished first', async () => {
+  await open('a');
+  const rec = parkByHand('a');
+  const minutes = join(sb.dir, 'old-minutes.md');
+  writeFileSync(minutes, '# minutes of a close that did not finish\n');
+  writeFileSync(join(roomDir('a'), 'closing'), JSON.stringify({ pid: 0, token: 't', minutes, createdAt: rec.createdAt }));
+  const made = creates().length;
+  await assert.rejects(wakeRoom('a', process.env, QUICK), /^Error: a: its last close did not finish — finish it with: maitre room close a$/);
+  assert.equal(creates().length, made);
+  assert.deepEqual(readRoom('a'), rec);
+  assert.deepEqual(reservations(), []);
+});
+
+for (const [when, mode] of [
+  ['before its Claude starts', 'shell'],
+  ["after its SessionStart, before herdr shows it", 'start-unseen'],
+] as const) {
+  test(`closing the new tab by hand during a resume (${when}) is a refusal: no fresh Claude, the room stays parked`, async () => {
+    await open('a');
+    const parked = parkByHand('a');
+    process.env.FAKE_HERDR_RESUME = mode;
+    const closeIt = () => void setTimeout(() => killTabs(), 100);
+    await assert.rejects(wakeRoom('a', process.env, { ...QUICK, readyMs: 60_000, afterTab: closeIt }), /^Error: a: you closed its tab; wake it again when you want$/);
+    assert.equal(creates().length, 2, 'no fresh tab');
+    assert.equal(runs().filter((r) => r.includes("'--brief-file'")).length, 1, 'no fresh Claude');
+    assert.deepEqual(readRoom('a'), parked);
+    assert.deepEqual(reservations(), []);
+  });
+}
+
+test('a resume that reaches its deadline reads its tab for the reason: "No conversation found" there is said, not a timeout', async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'other';
+  process.env.FAKE_HERDR_RESUME_SCREEN = 'No conversation found with session ID: s1\n';
+  const w = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 300 });
+  assert.equal(w.resumed, false);
+  assert.match(w.lines[0], /could not be resumed \(its session was not found\)/);
+});
+
+test('a start kept waiting until its last deadline is failed, not kept, when its tab then shows the session picker', async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'shell';
+  process.env.FAKE_HERDR_RESUME_SCREEN = ' Resume session\n\n ⌕ Search…\n';
+  const w = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 200, slowStartMs: 400 });
+  assert.equal(w.resumed, false);
+  assert.match(w.lines[0], /could not be resumed \(the session picker opened instead\)/);
+});
+
+test('at its deadline, text on the screen of a Claude herdr sees is never taken for a failure: the start is kept', async () => {
+  await open('a');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'hang';
+  process.env.FAKE_HERDR_RESUME_SCREEN = 'No conversation found with session ID: s1\n';
+  const w = await wakeRoom('a', process.env, { ...QUICK, resumeTimeoutMs: 200, slowStartMs: 400 });
+  assert.deepEqual(w.lines, ['woke a: its session is still starting — check its tab']);
+  assert.equal(runs().filter((r) => r.includes("'--brief-file'")).length, 1, 'no fresh start');
+});
+
+// Round 2.
+
+test("a wake records the run of the tab it keeps, and a fresh Claude's run when one takes over", async () => {
+  await open('a');
+  parkByHand('a');
+  await wakeRoom('a', process.env, QUICK);
+  assert.equal(readRoom('a')!.run, wakeRun());
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'missing';
+  await wakeRoom('a', process.env, QUICK);
+  assert.equal(readRoom('a')!.run, wakeRun());
+  assert.match(runs().at(-1)!, /'--brief-file'/);
+});
+
+test("a seat from another herdr session counts only its own run's exit line, not another run's or a SessionEnd", async () => {
+  await open('a');
+  const rec = readRoom('a')!;
+  writeRoom({ ...rec, herdr: { ...rec.herdr!, session: 'elsewhere' }, seat: { releasedAt: Date.now() - 1_000, session: 's1', run: rec.run! } });
+  killTabs();
+  event('a', 'MaitreExit', { session: '', run: '0123456789abcdef' });
+  event('a', 'SessionEnd');
+  assert.equal(parkedState(readRoom('a')), undefined, 'a stray exit line and a SessionEnd prove nothing');
+  await assert.rejects(wakeRoom('a', process.env, QUICK), /a belongs to another herdr session \(elsewhere\)/);
+  event('a', 'MaitreExit', { session: '', run: rec.run! });
+  assert.equal(parkedState(readRoom('a')), 'parked');
+  assert.equal((await wakeRoom('a', process.env, QUICK)).resumed, true);
+});
+
+test("a fresh Claude whose record cannot be written takes its starting note back too", async () => {
+  project();
+  await open('a', 'proj');
+  parkByHand('a');
+  process.env.FAKE_HERDR_RESUME = 'missing';
+  process.env.FAKE_HERDR_ON_RUN = 'trust';
+  const moved = () => writeRoom({ ...readRoom('a')!, createdAt: 1 });
+  await assert.rejects(wakeRoom('a', process.env, { ...QUICK, trustTimeoutMs: 300, afterTab: moved }), /^Error: a changed while it was being woken$/);
+  assert.match(runs().at(-1)!, /'--brief-file'/, 'the fresh Claude was started');
+  const lines = readFileSync(eventsFile('a'), 'utf8').split('\n').filter((x) => x !== '').map((l) => JSON.parse(l) as HookLine);
+  const note = lines.findIndex((l) => l.event === 'MaitreStatus' && l.run === wakeRun());
+  assert.ok(note >= 0, "the fresh Claude's note was written");
+  assert.ok(lines.slice(note + 1).some((l) => l.event === 'MaitreExit' && l.run === wakeRun()), 'and taken back');
+  assert.notEqual(roomActivity('a').state, 'blocked');
+});
+
+test('a room whose last close did not finish is not offered as parked: room list, the router and a send say to finish that close', async () => {
+  await open('a');
+  const rec = parkByHand('a');
+  const minutes = join(sb.dir, 'old-minutes.md');
+  writeFileSync(minutes, '# minutes of a close that did not finish\n');
+  writeFileSync(join(roomDir('a'), 'closing'), JSON.stringify({ pid: 0, token: 't', minutes, createdAt: rec.createdAt }));
+  assert.equal(parkedState(readRoom('a')), undefined);
+  const [row] = await listRoomRows(process.env, { queue: false });
+  assert.match(row!.lounge, / — its close did not finish: maitre room close a$/);
+  assert.doesNotMatch(row!.lounge, /parked/);
+  await assert.rejects(sendToRoom('a', 'hello', process.env, { confirmMs: 200 }), /^Error: room a is not running — its last close did not finish: finish it with: maitre room close a$/);
+  event('a', 'SessionEnd');
+  const live = new LiveRooms(process.env);
+  for (const l of readFileSync(eventsFile('a'), 'utf8').split('\n').filter((x) => x !== '')) live.apply(JSON.parse(l) as HookLine);
+  assert.notEqual(live.snapshot().find((r) => r.room === 'a')?.state, 'parked', 'the lounge shows no Wake button for it');
 });

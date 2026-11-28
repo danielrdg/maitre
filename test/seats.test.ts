@@ -105,6 +105,7 @@ test('a quiet room on the couch parks: the seat (with its session) is written be
 
   assert.deepEqual(r, { result: 'parked', reason: 'parked' });
   assert.equal(during?.seat?.session, 's1', 'the session id of the room, from its hook events');
+  assert.equal(during?.seat?.run, rec.run, "the run of the tab whose Claude it stops");
   assert.ok(during!.seat!.releasedAt >= before);
   assert.equal(during!.tabs, 1, 'the seat is recorded while the tab is still open');
   assert.equal(during!.closing, true, 'parking holds the closing marker');

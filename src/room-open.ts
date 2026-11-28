@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,7 +9,7 @@ import {
   RoomBlockedError,
   agentInfo,
   closeWorkspace,
-  createWorkspace,
+  createLabeledWorkspace,
   ensureServer,
   herdrSession,
   listWorkspaces,
@@ -28,7 +29,7 @@ import { readFailed, readQueue } from './queue.js';
 import { couchHolds, listRooms, parked, patchRoom, readRoom, writeRoom, type RoomRecord } from './rooms.js';
 import { appendRoomLine } from './status.js';
 import { handleTrust, type TrustResult } from './trust.js';
-import { offersWake, parkedState, stillStarting, stillStartingError, wakeSession } from './wake.js';
+import { offersWake, parkedState, stillStarting, stillStartingError, unfinishedClose, wakeSession } from './wake.js';
 import { createScratch, createWorktree } from './worktree.js';
 
 export { BRIEF_HEADER };
@@ -60,7 +61,9 @@ const notRunning = (rec: RoomRecord, env: NodeJS.ProcessEnv) =>
     `room ${rec.room} is not running — ${
       parkedState(rec, env) !== undefined
         ? `wake it with: maitre room wake ${rec.room}`
-        : `open it again with: maitre room open …${crashedHint(rec, env) ? ` (or, if its Claude crashed, wake it with: maitre room wake ${rec.room})` : ''}`
+        : rec.closedBy === undefined && unfinishedClose(rec, env)
+          ? `its last close did not finish: finish it with: maitre room close ${rec.room}`
+          : `open it again with: maitre room open …${crashedHint(rec, env) ? ` (or, if its Claude crashed, wake it with: maitre room wake ${rec.room})` : ''}`
     }`,
   );
 const waitingOnYou = (room: string) => new Error(`room ${room} is waiting on you — answer it in its tab`);
@@ -192,7 +195,8 @@ export async function openRoom(
   try {
     const briefPath = writeBrief(room, opts.brief, env);
     ws = await createRoomTab({ room, project: project?.name, dir }, env);
-    const trust = await startInTab(room, dir, ws.paneId, roomPaneCommand(room, opts.model, { briefPath }), env, timing);
+    const run = randomBytes(8).toString('hex');
+    const trust = await startInTab(room, dir, ws.paneId, roomPaneCommand(room, opts.model, { briefPath, run }), env, timing);
     const rec: RoomRecord = {
       room,
       ...(project !== undefined ? { project: project.name } : {}),
@@ -205,6 +209,7 @@ export async function openRoom(
       createdAt: Date.now(),
       ...(opts.fromQueue !== undefined ? { fromQueue: opts.fromQueue } : {}),
       resumable: true,
+      run,
     };
     dropPrState(room, env);
     writeRoom(rec, env);
@@ -216,7 +221,7 @@ export async function openRoom(
 }
 
 export function createRoomTab(rec: { room: string; project?: string; dir: string }, env: NodeJS.ProcessEnv): Promise<{ workspaceId: string; paneId: string }> {
-  return createWorkspace({ cwd: rec.dir, label: roomLabel(rec), env: { MAITRE_ROOM: rec.room, MAITRE_HOME: maitreHome(env) } });
+  return createLabeledWorkspace({ cwd: rec.dir, label: roomLabel(rec), env: { MAITRE_ROOM: rec.room, MAITRE_HOME: maitreHome(env) } });
 }
 
 // Runs a fresh Claude (one with a brief) in the room's new tab and waits for it like an open does.
@@ -226,7 +231,7 @@ export async function startInTab(
   paneId: string,
   command: string,
   env: NodeJS.ProcessEnv,
-  timing: { trustTimeoutMs?: number; pollMs?: number; resumes?: string },
+  timing: { trustTimeoutMs?: number; pollMs?: number; resumes?: string; run?: string },
 ): Promise<TrustResult> {
   const events = roomEventsFile(room, env);
   const offset = fileSize(events);
@@ -238,14 +243,15 @@ export async function startInTab(
     started: () => sessionStarted(events, offset),
   });
   if (trust === 'no-agent') throw new Error(`room ${room} did not start: no Claude appeared in its tab (is \`claude\` on PATH?)`);
-  if (trust === 'unresolved' || trust === 'needs-you') noteStarting(room, trust === 'needs-you' ? TRUST_BLOCKED_TEXT : STARTING_TEXT, env, timing.resumes);
+  if (trust === 'unresolved' || trust === 'needs-you') noteStarting(room, trust === 'needs-you' ? TRUST_BLOCKED_TEXT : STARTING_TEXT, env, timing.resumes, timing.run);
   return trust;
 }
 
 // Shown in the lounge until the room's SessionStart clears it. `resumes`: the session of the room a wake
-// starts again (its own --resume, or a fresh Claude in its place); a fresh open has none.
-export function noteStarting(room: string, text: string, env: NodeJS.ProcessEnv, resumes?: string): void {
-  appendRoomLine(room, 'MaitreStatus', { status: 'blocked', text, options: [], starting: true, ...(resumes !== undefined ? { resumes } : {}) }, env);
+// starts again (its own --resume, or a fresh Claude in its place); a fresh open has none. `run`: the
+// `--run` id of the command a wake typed, so only that run's exit line ends the start.
+export function noteStarting(room: string, text: string, env: NodeJS.ProcessEnv, resumes?: string, run?: string): void {
+  appendRoomLine(room, 'MaitreStatus', { status: 'blocked', text, options: [], starting: true, ...(resumes !== undefined ? { resumes } : {}), ...(run !== undefined ? { run } : {}) }, env);
 }
 
 export const roomEventsFile = (room: string, env: NodeJS.ProcessEnv = process.env): string => join(roomDir(room, env), 'events.jsonl');
@@ -386,16 +392,22 @@ async function boxText(paneId: string): Promise<string | undefined> {
 
 // busy: the room was working; Claude Code injects the text into the running turn, between tool calls.
 // closing: the token of the room's closing marker, when the caller holds it to keep closers off.
+// woken: a wake came right before; a just-resumed Claude herdr calls working can show the typed text late.
 export async function deliverToRoom(
   room: string,
   text: string,
   env: NodeJS.ProcessEnv = process.env,
-  opts: { confirmMs?: number; closing?: string; watchMs?: number } = {},
+  opts: { confirmMs?: number; closing?: string; watchMs?: number; woken?: boolean } = {},
 ): Promise<Delivered> {
   const slug = roomSlug(room);
-  const rec = readRoom(slug, env);
-  if (rec === undefined) throw noRoom(slug);
-  if (opts.closing !== undefined ? !ownsClosing(slug, opts.closing, env) : isClosing(slug, env)) throw new Error(`${slug} is closing`);
+  const raw: unknown = readRoom(slug, env);
+  if (raw === undefined) throw noRoom(slug);
+  if (typeof raw !== 'object' || raw === null || !isRecord(raw as RoomRecord)) throw new Error(`room ${slug}: its record (room.json) is not valid`);
+  const rec = raw as RoomRecord;
+  const closing = () => {
+    if (opts.closing !== undefined ? !ownsClosing(slug, opts.closing, env) : isClosing(slug, env)) throw new Error(`${slug} is closing`);
+  };
+  closing();
   if (text.trim() === '') throw new Error('nothing to send');
   if (Buffer.byteLength(text) > MAX_BRIEF_BYTES) throw new Error(`the message is too long (at most ${MAX_BRIEF_BYTES} bytes)`);
   await ensureServer(env);
@@ -407,6 +419,8 @@ export async function deliverToRoom(
     throw notRunning(rec, env);
   }
   if (live === 'blocked') throw waitingOnYou(slug);
+  // Again right before typing: a close that took the marker since would type /exit after the request.
+  closing();
   const file = join(roomDir(slug, env), 'events.jsonl');
   const offset = fileSize(file);
   try {
@@ -420,7 +434,7 @@ export async function deliverToRoom(
   if (await confirmed(file, offset, text, ms)) return { result: 'delivered', busy };
   const paneId = rec.herdr!.paneId;
   // A busy room takes the text into its running turn: only a box that no longer holds it says so.
-  if (busy) {
+  if (busy && opts.woken !== true) {
     const held = await boxText(paneId);
     if (held !== undefined && !sameTyped(held, text)) return { result: 'unconfirmed', busy: true };
   }
@@ -428,7 +442,30 @@ export async function deliverToRoom(
   if (sent && (await confirmed(file, offset, text, ms))) return { result: 'delivered', busy };
   // The box no longer holds the text after maître's Enter: the hook line may just be late.
   if (sent && !holdsTyped(await readOr(paneId), text) && (await confirmed(file, offset, text, LATE_HOOK_MS))) return { result: 'delivered', busy };
-  return { result: confirmedNow(file, offset, text) ? 'delivered' : 'unsent', busy };
+  if (confirmedNow(file, offset, text)) return { result: 'delivered', busy };
+  // Under very high load the hook line came 16 s after maître's own Enter (a load of about 93): see whether
+  // that Enter started a turn.
+  if (sent && (await startedTurn(rec, paneId, env))) return { result: 'delivered', busy };
+  return { result: 'unsent', busy };
+}
+
+// Only after maître's own Enter, which it pressed over a box holding exactly its text: the box now empty,
+// and Claude at work (its "esc to interrupt" line right above the box, or herdr saying working). A pane that
+// cannot be read says nothing.
+async function startedTurn(rec: RoomRecord, paneId: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+  let screen: string;
+  try {
+    screen = await readPane(paneId, undefined, { ansi: true });
+  } catch {
+    return false;
+  }
+  if (inputText(screen) !== '') return false;
+  if (workingShown(screen)) return true;
+  try {
+    return (await probeRoom(rec, undefined, env)) === 'working';
+  } catch {
+    return false;
+  }
 }
 
 async function readOr(paneId: string): Promise<string> {
@@ -519,7 +556,14 @@ function loungeColumn(rec: RoomRecord, herdr: RoomLiveness, env: NodeJS.ProcessE
   }
   const parked = herdr === 'not running' && parkedState(rec, env) !== undefined;
   const column = loungeState(rec, herdr, parked ? 'parked' : (state?.state ?? '-'), last);
-  const hint = parked ? ` — wake: maitre room wake ${rec.room}` : herdr === 'not running' && crashedHint(rec, env) ? ` — if its Claude crashed, wake: maitre room wake ${rec.room}` : '';
+  const unfinished = herdr === 'not running' && unfinishedClose(rec, env);
+  const hint = parked
+    ? ` — wake: maitre room wake ${rec.room}`
+    : unfinished
+      ? ` — its close did not finish: maitre room close ${rec.room}`
+      : herdr === 'not running' && crashedHint(rec, env)
+        ? ` — if its Claude crashed, wake: maitre room wake ${rec.room}`
+        : '';
   return withNotice(`${column}${hint}`, rec, prompted, env);
 }
 
@@ -693,6 +737,16 @@ export function inputText(screen: string): string | undefined {
   const text = plainOf(rest);
   if (text === '' || (rest.every((x) => x.dim) && PLACEHOLDER.test(text))) return '';
   return text;
+}
+
+// Claude Code's line while it works ("✻ Thinking… (esc to interrupt)"), within the few lines right above
+// its input box: the same words further up are only text on screen.
+export function workingShown(screen: string): boolean {
+  const plain = screen.split('\n').map((l) => plainOf(cells(l)));
+  const rules = plain.flatMap((l, i) => (RULE.test(l.trim()) ? [i] : []));
+  if (rules.length < 2) return false;
+  const top = rules[rules.length - 2]!;
+  return plain.slice(Math.max(0, top - 3), top).some((l) => /\besc to interrupt\b/.test(l));
 }
 
 // A reason not to /exit the room: what its input box holds, or that it could not be read (the safe side).

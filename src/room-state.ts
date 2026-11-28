@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import type { HookLine } from './events.js';
+import { UNSEEN_EVENT, type HookLine } from './events.js';
 
 export const BRIEF_HEADER = '# Brief from the maître reception';
 
@@ -185,6 +185,7 @@ export function startingOnly(s: RoomState): boolean {
 
 export function reduce(prev: RoomState | undefined, ev: HookLine): RoomState {
   const event = str(ev.event) ?? '';
+  if (event === UNSEEN_EVENT && prev !== undefined) return prev;
   const session = prev === undefined ? undefined : sessionOf(prev, ev, event);
   if (session === 'stale') return prev!;
   // An exited room never comes back for its own session's late lines. SessionStart only fires on a

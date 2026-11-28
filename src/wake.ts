@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { roomActivity } from './activity.js';
-import { isClosing } from './closing.js';
+import { isClosing, leftMinutes, readClosing } from './closing.js';
 import { agentInfo, closeWorkspace, ensureServer, herdrSession, listWorkspaces, readPane, runInPane, sendKeys } from './herdr.js';
 import { fencedData, roomNotes } from './minutes.js';
 import { roomDir, roomSlug } from './paths.js';
@@ -29,8 +29,10 @@ import {
   writeBrief,
   type RoomLiveness,
 } from './room-open.js';
+import { UNSEEN_EVENT, type HookLine } from './events.js';
 import { isStartingNote } from './room-state.js';
 import { patchRoom, readRoom, type RoomRecord } from './rooms.js';
+import { appendRoomLine } from './status.js';
 import { trustDialogShown, trustScope } from './trust.js';
 import { ownedDir } from './vault.js';
 
@@ -86,10 +88,20 @@ export function wakeSession(rec: RoomRecord, env: NodeJS.ProcessEnv = process.en
   return isSessionId(s) ? s : undefined;
 }
 
-// Without a seat, nothing says the Claude of a room opened in another herdr session stopped, and from here
-// its tab cannot be seen: resuming would run that session twice.
+// The tab of a room opened in another herdr session cannot be seen from here: only a seat and a line saying
+// its Claude stopped after it show it is not running there: the exit line of the run the seat names, or, for
+// a seat that names none (written before runs were named), its session's SessionEnd or any exit line. A park
+// that died between writing the seat and stopping Claude leaves a seat on a running Claude; resuming then
+// would run that session twice.
 function elsewhere(rec: RoomRecord, env: NodeJS.ProcessEnv): boolean {
-  return rec.seat === undefined && rec.herdr !== undefined && rec.herdr.session !== herdrSession(env);
+  if (rec.herdr === undefined || rec.herdr.session === herdrSession(env)) return false;
+  const seat: unknown = rec.seat;
+  if (typeof seat !== 'object' || seat === null) return true;
+  const { releasedAt, session, run } = seat as { releasedAt?: unknown; session?: unknown; run?: unknown };
+  if (typeof releasedAt !== 'number') return true;
+  const stopped = (l: HookLine): boolean =>
+    typeof run === 'string' ? l.event === 'MaitreExit' && l.run === run : l.event === 'MaitreExit' || (l.event === 'SessionEnd' && l.session === session);
+  return !readEventsTail(rec.room, env).some((l) => typeof l.ts === 'number' && l.ts >= releasedAt && stopped(l));
 }
 
 // A Claude that stopped without a seat (a crash, a reboot) is offered for waking only on a record maître
@@ -100,10 +112,16 @@ export function offersWake(rec: RoomRecord): boolean {
   return (typeof seat === 'object' && seat !== null) || rec.resumable === true;
 }
 
+// A close that died after closing the room's tab left its minutes: woken, the room's next close would take
+// those minutes, of the time before the wake. That close is finished first (`maitre room close`).
+export function unfinishedClose(rec: RoomRecord, env: NodeJS.ProcessEnv = process.env): boolean {
+  return leftMinutes(readClosing(rec.room, env), rec.createdAt, existsSync(rec.dir)) !== undefined;
+}
+
 // Disk only: registered, not closed, offered, and a session this herdr session may resume. Whether its
 // Claude is gone is herdr's call.
 export function canWake(rec: RoomRecord, env: NodeJS.ProcessEnv = process.env): boolean {
-  return rec.closedBy === undefined && offersWake(rec) && !elsewhere(rec, env) && wakeSession(rec, env) !== undefined;
+  return rec.closedBy === undefined && offersWake(rec) && !elsewhere(rec, env) && !unfinishedClose(rec, env) && wakeSession(rec, env) !== undefined;
 }
 
 // A room whose Claude is gone (parked, or died) but that can be woken with its session: the router offers
@@ -112,30 +130,60 @@ export function parkedState(rec: unknown, env: NodeJS.ProcessEnv = process.env):
   return typeof rec === 'object' && rec !== null && isRecord(rec as RoomRecord) && canWake(rec as RoomRecord, env) ? 'parked' : undefined;
 }
 
-// A wake that ended "still starting" left its tab with maître's starting note on the session it resumes. Until
-// herdr shows that Claude (callers ask only once herdr says not running), the tab is not a dead room's, even
-// after the session's own SessionStart (herdr can take seconds more): nothing closes it, stamps it not running
-// or offers it as parked. It ends with the tab, with a line saying that start is over (its run's exit line,
-// its SessionEnd, another session), or STILL_STARTING_MS after the note: a start dead without its exit line
-// (a hard kill) must not hold the room for good, and the next wake then replaces that tab.
+// A wake that kept a tab before herdr showed its Claude left a mark on the session it resumes: its starting
+// note, or (a resumed Claude herdr does not show yet) the unseen mark, which only this guard reads, so the
+// lounge does not show that room blocked. Until herdr shows that Claude (callers ask only once herdr says not
+// running), the tab is not a dead room's, even after the session's own SessionStart (herdr can take seconds
+// more): nothing closes it, stamps it not running or offers it as parked. It ends with the tab, with the exit
+// line of the run the mark names (the run the record names too: a reopen or another wake is another run), or
+// STILL_STARTING_MS after the mark: a start dead without its exit line (a hard kill) must not hold the room
+// for good, and the next wake then replaces that tab. Lines of other tabs (a late SessionEnd of a tab closed
+// before, another session) say nothing about this one.
 export const STILL_STARTING_MS = 10 * 60_000;
+
+const startMark = (l: HookLine): boolean => isStartingNote(l) || l.event === UNSEEN_EVENT;
+
+// A mark that names no run (written before runs were named) keeps the older rule: any exit line, its
+// session's SessionEnd or another session ends it.
+function startOver(l: HookLine, mark: HookLine): boolean {
+  if (mark.run !== undefined) return l.event === 'MaitreExit' && l.run === mark.run;
+  if (l.event === 'MaitreExit') return true;
+  const session = typeof l.session === 'string' ? l.session : '';
+  return session !== '' && (session !== mark.resumes || l.event === 'SessionEnd');
+}
+
+// The mark belongs to this record: its run, or (a mark that names no run) the session the room would wake.
+function marksRecord(mark: HookLine, rec: RoomRecord, env: NodeJS.ProcessEnv): boolean {
+  if (typeof mark.resumes !== 'string' || mark.resumes === '') return false;
+  return mark.run !== undefined ? mark.run === rec.run : mark.resumes === wakeSession(rec, env);
+}
 
 export function stillStarting(rec: RoomRecord, workspaces: { id: string; label: string }[], env: NodeJS.ProcessEnv = process.env, now = Date.now()): boolean {
   const h = rec.herdr;
   if (h === undefined || h.session !== herdrSession(env) || !workspaces.some((w) => w.id === h.workspaceId && w.label === roomLabel(rec))) return false;
   const lines = readEventsTail(rec.room, env);
   let i = lines.length - 1;
-  while (i >= 0 && !isStartingNote(lines[i]!)) i--;
-  const note = lines[i];
-  if (note === undefined || typeof note.resumes !== 'string' || note.resumes === '' || note.resumes !== wakeSession(rec, env)) return false;
-  if (!(typeof note.ts === 'number' && now - note.ts <= STILL_STARTING_MS)) return false;
-  return lines.slice(i + 1).every((l) => l.event !== 'MaitreExit' && l.event !== 'SessionEnd' && !(typeof l.session === 'string' && l.session !== '' && l.session !== note.resumes));
+  while (i >= 0 && !startMark(lines[i]!)) i--;
+  const mark = lines[i];
+  if (mark === undefined || !marksRecord(mark, rec, env)) return false;
+  if (!(typeof mark.ts === 'number' && now - mark.ts <= STILL_STARTING_MS)) return false;
+  return !lines.slice(i + 1).some((l) => startOver(l, mark));
 }
 
 export const stillStartingError = (room: string, prefix = ''): Error =>
   new Error(`${prefix}${room} is still starting in its tab; if nothing is happening there, close that tab and wake it again`);
 
-type Verdict = { kind: 'resumed' } | { kind: 'failed'; reason: string } | { kind: 'needs-you'; trust: boolean } | { kind: 'starting' };
+// closed: the tab went away under the wake, which only the user does (or herdr losing it): never a failed
+// resume to replace with a fresh Claude.
+type Verdict = { kind: 'resumed' } | { kind: 'failed'; reason: string } | { kind: 'needs-you'; trust: boolean } | { kind: 'starting' } | { kind: 'closed' };
+
+// What on a resume's screen is evidence that it failed, and says why.
+function evidence(s: string, session: string): string | undefined {
+  if (notFound(session).test(s)) return 'its session was not found';
+  if (NO_CLAUDE.test(s)) return '`claude` was not found on PATH';
+  if (PICKER.test(s) && PICKER_BOX.test(s)) return 'the session picker opened instead';
+  return undefined;
+}
 
 async function screen(paneId: string): Promise<string> {
   try {
@@ -148,7 +196,8 @@ async function screen(paneId: string): Promise<string> {
 // The resume spike's recipe: this session's SessionStart wins over anything else seen; the trust dialog is
 // answered only in maître's own folders. A resume fails only on evidence: "No conversation found" on
 // screen, the picker, the room's command ending (`maitre room run`'s exit line, or claude not on PATH),
-// a Claude herdr saw and then missed two looks in a row, another session starting, or the tab gone. No
+// a Claude herdr saw and then missed two looks in a row, or another session starting. The tab gone is the
+// user's refusal, not a failure. No
 // agent in the tab is no evidence (a loaded machine took over 8 s to start claude), nor is a late
 // SessionStart (resumes took up to ~30 s): those are waited for until slowStartMs, then kept, still starting.
 async function verdict(paneId: string, dir: string, from: { file: string; offset: number; run: string }, session: string, t: Timing, env: NodeJS.ProcessEnv): Promise<Verdict> {
@@ -173,7 +222,7 @@ async function verdict(paneId: string, dir: string, from: { file: string; offset
       nextLook = Date.now() + t.herdrMs;
       const info = await agentInfo(paneId);
       if (resumed()) return { kind: 'resumed' };
-      if (info.status === 'gone') return failed('its tab was closed');
+      if (info.status === 'gone') return { kind: 'closed' };
       last = liveness(info);
       lastTrust = false;
       if (last === 'not running') {
@@ -204,8 +253,11 @@ async function verdict(paneId: string, dir: string, from: { file: string; offset
       if (resumed()) return { kind: 'resumed' };
       // Something on screen waits for an answer (a question Claude Code asks on resume): the user's.
       if (last === 'blocked') return { kind: 'needs-you', trust: lastTrust };
+      // The tab may say why; it fails the resume only where no Claude runs, as in the looks above.
+      const why = evidence(await screen(paneId), session);
+      if (why !== undefined && last === 'not running') return failed(why);
       // Another session started instead: the room's conversation is not in that tab.
-      if (starts().some((l) => typeof l.session === 'string' && l.session !== '' && l.session !== session)) return failed(`it did not start within ${t.resumeTimeoutMs / 1000} s`);
+      if (starts().some((l) => typeof l.session === 'string' && l.session !== '' && l.session !== session)) return failed(why ?? 'another session started in its tab instead');
       if (deadline < started + t.slowStartMs) {
         deadline = started + t.slowStartMs;
         continue;
@@ -227,7 +279,7 @@ async function ready(paneId: string, t: Timing): Promise<Settled> {
   let missing = 0;
   for (;;) {
     const info = await agentInfo(paneId);
-    if (info.status === 'gone') return { kind: 'failed', reason: 'its tab was closed' };
+    if (info.status === 'gone') return { kind: 'closed' };
     const live = liveness(info);
     if (live === 'idle' || live === 'working') return { kind: 'resumed' };
     if (live === 'blocked') return { kind: 'needs-you', trust: trustDialogShown(await screen(paneId)) };
@@ -240,7 +292,8 @@ async function ready(paneId: string, t: Timing): Promise<Settled> {
 }
 
 // Closing a tab that might still run a Claude is never assumed: only a tab herdr no longer lists is gone.
-async function dropTab(room: string, ws: { workspaceId: string }): Promise<void> {
+// `failure`: the error the wake is already failing with; a tab left open is added to it, not put in its place.
+async function dropTab(room: string, ws: { workspaceId: string }, failure?: unknown): Promise<void> {
   try {
     await closeWorkspace(ws.workspaceId);
   } catch {
@@ -252,15 +305,38 @@ async function dropTab(room: string, ws: { workspaceId: string }): Promise<void>
   } catch {
     gone = false;
   }
-  if (!gone) throw new Error(`${room}: could not close its new tab (${ws.workspaceId}) — close it in herdr; the room stays parked`);
+  if (gone) return;
+  const left = `${room}: could not close its new tab (${ws.workspaceId}) — close it in herdr; the room stays parked`;
+  if (failure instanceof Error) {
+    failure.message = `${failure.message}; ${left}`;
+    return;
+  }
+  throw new Error(left);
 }
 
-// One write, against the record as it is on disk: the new tab, and the seat and closedAt gone with it; a
-// woken room may be woken again.
-function record(rec: RoomRecord, ws: { workspaceId: string; paneId: string }, env: NodeJS.ProcessEnv): void {
+// The record of a kept tab, after the mark the guard reads. A record that cannot be written takes the mark
+// back with its run's end, so neither the guard nor the lounge keeps a start that is not on the record.
+function keep(rec: RoomRecord, ws: { workspaceId: string; paneId: string }, run: string, marked: boolean, env: NodeJS.ProcessEnv): void {
+  try {
+    record(rec, ws, run, env);
+  } catch (err) {
+    if (marked) {
+      try {
+        appendRoomLine(rec.room, 'MaitreExit', { run }, env);
+      } catch {
+        // the record's error says more
+      }
+    }
+    throw err;
+  }
+}
+
+// One write, against the record as it is on disk: the new tab, and the seat, closedAt and a dead room's
+// pending reasons gone with it; a woken room may be woken again.
+function record(rec: RoomRecord, ws: { workspaceId: string; paneId: string }, run: string, env: NodeJS.ProcessEnv): void {
   const next = patchRoom(
     rec,
-    ({ seat: _s, closedAt: _c, ...r }) => ({ ...r, herdr: { session: herdrSession(env), workspaceId: ws.workspaceId, paneId: ws.paneId }, resumable: true }),
+    ({ seat: _s, closedAt: _c, pending: _p, ...r }) => ({ ...r, herdr: { session: herdrSession(env), workspaceId: ws.workspaceId, paneId: ws.paneId }, resumable: true, run }),
     env,
   );
   if (next.herdr?.workspaceId !== ws.workspaceId) throw new Error(`${rec.room} changed while it was being woken`);
@@ -309,6 +385,9 @@ export async function wakeRoom(name: string, env: NodeJS.ProcessEnv = process.en
     const rec = readRoom(room, env);
     if (rec === undefined) throw new Error(`no room named ${room} — open it with: maitre room open …`);
     if (rec.closedBy !== undefined) throw new Error(`${room} is closed — open it again with: maitre room open …`);
+    if (unfinishedClose(rec, env)) {
+      throw new Error(`${room}: its last close did not finish — finish it with: maitre room close ${room}`);
+    }
     if (elsewhere(rec, env)) throw new Error(`${room} belongs to another herdr session (${rec.herdr!.session}): it cannot be checked from here`);
     await ensureServer(env);
     const workspaces = await listWorkspaces();
@@ -330,6 +409,7 @@ export async function wakeRoom(name: string, env: NodeJS.ProcessEnv = process.en
     let reason: string;
     const ws = await createRoomTab(rec, env);
     let kept = false;
+    let failure: unknown;
     try {
       const file = roomEventsFile(room, env);
       const offset = fileSize(file);
@@ -338,17 +418,22 @@ export async function wakeRoom(name: string, env: NodeJS.ProcessEnv = process.en
       await afterTab?.();
       const first = await verdict(ws.paneId, rec.dir, { file, offset, run }, session, t, env);
       const v: Settled = first.kind === 'resumed' ? await ready(ws.paneId, t) : first;
-      if (v.kind === 'needs-you') noteStarting(room, v.trust ? TRUST_BLOCKED_TEXT : STARTING_TEXT, env, session);
-      if (v.kind === 'starting') noteStarting(room, STARTING_TEXT, env, session);
+      if (v.kind === 'needs-you') noteStarting(room, v.trust ? TRUST_BLOCKED_TEXT : STARTING_TEXT, env, session, run);
+      if (v.kind === 'starting') noteStarting(room, STARTING_TEXT, env, session, run);
+      if (v.kind === 'unseen') appendRoomLine(room, UNSEEN_EVENT, { resumes: session, run }, env);
+      if (v.kind === 'closed') throw new Error(`${room}: you closed its tab; wake it again when you want`);
       if (v.kind !== 'failed') {
-        record(rec, ws, env);
+        keep(rec, ws, run, v.kind !== 'resumed', env);
         kept = true;
         return { resumed: true, lines: [resumedLine(room, v)], needsYou: v.kind !== 'resumed' };
       }
       reason = v.reason;
+    } catch (err) {
+      failure = err;
+      throw err;
     } finally {
       // A tab that may still hold a Claude: no fresh one is started next to it.
-      if (!kept) await dropTab(room, ws);
+      if (!kept) await dropTab(room, ws, failure);
     }
 
     const brief = await freshBrief(rec, reason, request, env);
@@ -356,25 +441,31 @@ export async function wakeRoom(name: string, env: NodeJS.ProcessEnv = process.en
     const before = existsSync(briefFile) ? readFileSync(briefFile) : undefined;
     const fresh = await createRoomTab(rec, env);
     kept = false;
+    failure = undefined;
     try {
       const briefPath = writeBrief(room, brief, env);
-      const trust = await startInTab(room, rec.dir, fresh.paneId, roomPaneCommand(room, rec.model, { briefPath }), env, {
+      const run = randomBytes(8).toString('hex');
+      const trust = await startInTab(room, rec.dir, fresh.paneId, roomPaneCommand(room, rec.model, { briefPath, run }), env, {
         trustTimeoutMs: t.trustTimeoutMs,
         pollMs: deps.pollMs,
         resumes: session,
+        run,
       });
-      record(rec, fresh, env);
+      keep(rec, fresh, run, trust === 'unresolved' || trust === 'needs-you', env);
       kept = true;
       const what = request !== undefined && request.trim() !== '' ? 'the room notes and your request' : 'the room notes';
       const line = `woke ${room} with a fresh Claude: its session could not be resumed (${reason}); its brief has ${what}`;
       return trust === 'needs-you'
         ? { resumed: false, lines: [`${line} — answer the folder-trust question in its tab`], needsYou: true }
         : { resumed: false, lines: [line], needsYou: false };
+    } catch (err) {
+      failure = err;
+      throw err;
     } finally {
       if (!kept) {
         if (before !== undefined) writeFileSync(briefFile, before, { mode: 0o600 });
         else rmSync(briefFile, { force: true });
-        await dropTab(room, fresh);
+        await dropTab(room, fresh, failure);
       }
     }
   } finally {

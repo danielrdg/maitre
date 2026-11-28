@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loungeFile, readLoungeInfo, type LoungeInfo } from '../src/lounge-file.js';
-import { ensureLounge, openWindow, screenSize, ticketUrl, uiLang } from '../src/open-app.js';
+import { ensureLounge, notifyDesktop, openWindow, screenSize, ticketUrl, uiLang } from '../src/open-app.js';
 import { fakeBin, type FakeBin } from './fake-bin.js';
 
 const MAITRE = fileURLToPath(new URL('../../bin/maitre', import.meta.url));
@@ -285,4 +285,18 @@ test('ticketUrl adds the language only when it is not English', async () => {
   } finally {
     await s.close();
   }
+});
+
+test("notifyDesktop runs notify-send without the Claude Code session's markers, keeping the desktop's variables", () => {
+  const { fb, home, env } = sandbox();
+  const out = join(home, 'notify-env.json');
+  writeFileSync(join(fb.bin, 'notify-send'), `#!${process.execPath}\nrequire('fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify({ argv: process.argv.slice(2), env: process.env }));\n`, { mode: 0o755 });
+  notifyDesktop('room a needs you', { ...env, CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'abc', CLAUDE_CODE_USE_VERTEX: '1', DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/bus' });
+  const seen = JSON.parse(readFileSync(out, 'utf8')) as { argv: string[]; env: Record<string, string> };
+  assert.deepEqual(seen.argv, ['maître', 'room a needs you']);
+  assert.equal(seen.env.CLAUDECODE, undefined);
+  assert.equal(seen.env.CLAUDE_CODE_SESSION_ID, undefined);
+  assert.equal(seen.env.CLAUDE_CODE_USE_VERTEX, '1');
+  assert.equal(seen.env.DISPLAY, ':99');
+  assert.equal(seen.env.DBUS_SESSION_BUS_ADDRESS, 'unix:path=/run/bus');
 });

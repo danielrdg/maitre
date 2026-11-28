@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { linkSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { roomDir } from './paths.js';
 
@@ -80,6 +80,12 @@ export function closerAlive(m: ClosingMarker, now = Date.now()): boolean {
   const start = m.start !== undefined ? processStart(m.pid) : undefined;
   if (start !== undefined) return start === m.start;
   return m.at === undefined || now - m.at <= MARKER_MAX_AGE_MS;
+}
+
+// The minutes a close that died after closing the room's tab (its marker set to pid 0, or the folder already
+// gone) left for the next close of that same opening of the room to finish with.
+export function leftMinutes(m: ClosingMarker | undefined, createdAt: number, dirThere: boolean): string | undefined {
+  return m?.minutes !== undefined && m.createdAt === createdAt && (!dirThere || m.pid === 0) && existsSync(m.minutes) ? m.minutes : undefined;
 }
 
 export function isClosing(room: string, env: NodeJS.ProcessEnv = process.env): boolean {

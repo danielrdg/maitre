@@ -7,7 +7,7 @@ import {
   HerdrError,
   agentInfo,
   closeWorkspace,
-  createWorkspace,
+  createLabeledWorkspace,
   ensureServer,
   focusWorkspace,
   herdrSession,
@@ -154,7 +154,7 @@ export function parseLoungeUrl(screen: string): string | undefined {
 }
 
 async function openTab(opts: { cwd: string; label: string; env: Record<string, string>; command: string[] }): Promise<Tab> {
-  const ws = await createWorkspace({ cwd: opts.cwd, label: opts.label, env: opts.env });
+  const ws = await createLabeledWorkspace({ cwd: opts.cwd, label: opts.label, env: opts.env });
   try {
     await runInPane(ws.paneId, opts.command.map(shellQuote).join(' '));
   } catch (err) {
@@ -176,14 +176,18 @@ async function waitForUrl(paneId: string, ms: number, pollMs: number): Promise<s
 // Every room in the registry is probed, closed or not: herdr may have restored its tab as a bare shell.
 // A room being opened or woken is left alone: its new tab is not on its record yet.
 async function sweepRooms(env: NodeJS.ProcessEnv, warnings: string[]): Promise<string[]> {
-  const workspaces = await listWorkspaces();
+  // The records before the tabs: a record that changed since (a wake that ended meanwhile) may name a tab
+  // newer than the list, which is then taken again.
+  const listedRooms = listRooms(env).filter(isRecord);
+  let workspaces = await listWorkspaces();
   const closed: string[] = [];
-  for (const listed of listRooms(env).filter(isRecord)) {
+  for (const listed of listedRooms) {
     try {
       // The reservation first, then the record: an opener writes the new ids before it lets go.
       if (isOpening(listed.room, env)) continue;
       const rec = readRoom(listed.room, env);
       if (rec === undefined || !isRecord(rec)) continue;
+      if (rec.herdr?.workspaceId !== listed.herdr?.workspaceId) workspaces = await listWorkspaces();
       if ((await probeRoom(rec, workspaces, env)) !== 'not running' || stillStarting(rec, workspaces, env)) continue;
       const hadTab = workspaces.some((w) => w.label === roomLabel(rec));
       await closeRoomTabs(rec, workspaces);

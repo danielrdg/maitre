@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { HookLine } from '../src/events.js';
@@ -10,6 +10,7 @@ import { roomDir } from '../src/paths.js';
 import { readPr, writePr } from '../src/pr-state.js';
 import { writeIndex, type Project } from '../src/projects.js';
 import { closeRoom } from '../src/janitor.js';
+import { closingFile, releaseClosing, takeClosing } from '../src/closing.js';
 import { BRIEF_HEADER, deliverToRoom, describeDelivery, holdsTyped, inputText, listRoomRows, markNotRunning, openRoom, promptMatches, roomLabel, sendToRoom, unwrapPasted } from '../src/room-open.js';
 import { reduce, type RoomState } from '../src/room-state.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
@@ -91,7 +92,8 @@ test('openRoom: a code room gets a worktree, a herdr tab running only quoted ma�
   assert.equal(run.length, 1);
   const cmd = run[0][3];
   assert.equal(run[0][2], 'w1:p1');
-  assert.equal(cmd, [MAITRE, 'room', 'run', 'nf-bug', '--brief-file', briefPath, '--', '--model', 'sonnet'].map(shellQuote).join(' '));
+  assert.match(rec.run ?? '', /^[0-9a-f]{16}$/, 'the record names the run its tab runs');
+  assert.equal(cmd, [MAITRE, 'room', 'run', 'nf-bug', '--run', rec.run!, '--brief-file', briefPath, '--', '--model', 'sonnet'].map(shellQuote).join(' '));
   assert.match(cmd, /^'[^'\n]*'( '[^'\n]*')*$/, 'every token is single-quoted, on one line');
   assert.ok(!cmd.includes('rm -rf'));
 });
@@ -252,6 +254,20 @@ test('herdr failing to create the tab leaves no registry entry and closes nothin
   await assert.rejects(openScratch(), /boom/);
   assert.equal(readRoom('x'), undefined);
   assert.deepEqual(herdrCalls('workspace', 'close'), []);
+});
+
+test('a tab create killed after herdr made the tab leaves no orphan: the bare tab with its label is closed, a live one never', async () => {
+  await openScratch('live');
+  const st = sb.state();
+  st.workspaces.w9 = { label: 'scratch / x' };
+  st.panes['w9:p1'] = { ws: 'w9', agent: 'idle' };
+  sb.setState(st);
+  process.env.FAKE_HERDR_HANG_AFTER_workspace_create = '1';
+  process.env.MAITRE_HERDR_TIMEOUT_MS = '5000';
+  await assert.rejects(openScratch(), /herdr workspace create: timed out/);
+  assert.equal(readRoom('x'), undefined);
+  const labels = Object.entries(sb.state().workspaces).map(([id, w]) => `${id} ${w.label}`).sort();
+  assert.deepEqual(labels, ['w1 scratch / live', 'w9 scratch / x'], 'the orphan is gone; a tab with a live agent under that label stays');
 });
 
 test('an unknown project or an unsafe model is refused before anything is created', async () => {
@@ -448,6 +464,102 @@ test('a hook line that lands late after maître\'s own Enter, the box emptied, s
   } finally {
     clearInterval(late);
   }
+});
+
+test('a hook line that never lands after maître\'s own Enter, the box emptied and the Claude at work, is taken as delivered', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-slow';
+  process.env.FAKE_HERDR_AFTER_ENTER = 'working';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 }), { result: 'delivered', busy: false });
+  assert.equal(enters().length, 1);
+});
+
+test('after maître\'s own Enter, Claude Code\'s "esc to interrupt" line right above an empty box is taken as delivered, whatever herdr says', async () => {
+  await openScratch();
+  const rule = '─'.repeat(40);
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-slow';
+  process.env.FAKE_HERDR_AFTER_ENTER_SCREEN = `> check the logout too\n\n✻ Thinking… (12s · esc to interrupt)\n\n${rule}\n❯\u00a0\n${rule}\n  ⏵⏵ auto mode on\n`;
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 }), { result: 'delivered', busy: false });
+  process.env.FAKE_HERDR_AFTER_ENTER_SCREEN = `an old reply that quotes (esc to interrupt)\n\n\n\n\n${rule}\n❯\u00a0\n${rule}\n`;
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 }), { result: 'unsent', busy: false }, 'only the line right above the box counts');
+});
+
+test('after maître\'s own Enter, a box that still holds its text is never taken as delivered, even with Claude at work above it', async () => {
+  await openScratch();
+  const rule = '─'.repeat(40);
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-stuck';
+  process.env.FAKE_HERDR_AFTER_ENTER = 'working';
+  process.env.FAKE_HERDR_AFTER_ENTER_SCREEN = `✻ Thinking… (esc to interrupt)\n\n${rule}\n❯\u00a0check the logout too\n${rule}\n`;
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 }), { result: 'unsent', busy: false });
+  assert.equal(enters().length, 1);
+});
+
+test('after maître\'s own Enter, an empty box on an idle Claude, or a pane that cannot be read, still needs you', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-slow';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 }), { result: 'unsent', busy: false }, 'idle');
+  process.env.FAKE_HERDR_AFTER_ENTER = 'working';
+  process.env.FAKE_HERDR_AFTER_ENTER_UNREADABLE = '1';
+  assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 }), { result: 'unsent', busy: false }, 'unreadable');
+});
+
+test('an empty box on a working Claude without maître\'s own Enter is not taken as delivered: it may be the user\'s prompt', async () => {
+  await openScratch();
+  process.env.FAKE_HERDR_PROMPT_HOOK = '0';
+  const typed = setInterval(() => {
+    if (herdrCalls('agent', 'prompt').length === 0) return;
+    clearInterval(typed);
+    const s = sb.state();
+    s.panes['w1:p1'].agent = 'working';
+    sb.setState(s);
+  }, 20);
+  try {
+    assert.deepEqual(await deliverToRoom('x', 'check the logout too', process.env, { confirmMs: 300 }), { result: 'unsent', busy: false });
+  } finally {
+    clearInterval(typed);
+  }
+});
+
+test('right after a wake, a room herdr calls working is watched like an idle one: text that shows up late in its box needs you', async () => {
+  await openScratch();
+  const s = sb.state();
+  s.panes['w1:p1'].agent = 'working';
+  sb.setState(s);
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-late';
+  assert.deepEqual(await deliverToRoom('x', 'later', process.env, { confirmMs: 300, woken: true }), { result: 'unsent', busy: true });
+  assert.deepEqual(enters(), [], 'no Enter into a working room');
+});
+
+test('a close that takes the marker after the first check, before the typing, stops the delivery: nothing is typed', async () => {
+  await openScratch();
+  const held = takeClosing('x');
+  assert.notEqual(held, 'busy');
+  const aside = `${closingFile('x')}.aside`;
+  renameSync(closingFile('x'), aside);
+  process.env.FAKE_HERDR_THEN_agent_get = JSON.stringify([aside, closingFile('x')]);
+  try {
+    await assert.rejects(deliverToRoom('x', 'hello', process.env, { confirmMs: 300 }), /^Error: x is closing$/);
+    assert.deepEqual(herdrCalls('agent', 'prompt'), []);
+  } finally {
+    if (held !== 'busy') releaseClosing('x', held.token);
+  }
+});
+
+test('room send to a room whose record is not an object says so, instead of a TypeError', async () => {
+  mkdirSync(roomDir('x'), { recursive: true });
+  writeFileSync(join(roomDir('x'), 'room.json'), 'null');
+  await assert.rejects(deliverToRoom('x', 'hello', process.env, { confirmMs: 300 }), /^Error: room x: its record \(room\.json\) is not valid$/);
+});
+
+test('maitre room close stopped by a draft in the input box never says it is writing the minutes', async () => {
+  await openScratch();
+  const st = sb.state();
+  st.panes['w1:p1']!.screen = `${'─'.repeat(40)}\n❯\u00a0my own draft\n${'─'.repeat(40)}\n`;
+  sb.setState(st);
+  const r = cli(['room', 'close', 'x']);
+  assert.equal(r.status, 1);
+  assert.equal(r.stdout, '');
+  assert.match(r.stderr, /x was not closed: unsent text in its input/);
 });
 
 test("a busy room's request still sitting in its box is not taken for delivered: it needs you", async () => {

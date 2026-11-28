@@ -32,7 +32,13 @@ const MAX_BODY_BYTES = 16 * 1024;
 const MAX_WAITING = 3;
 // A follow-up to a parked room runs the router, a wake and a delivery in one job: their worst cases add up
 // to about 190 s under load (188 s measured at worst). 240 s covers that with margin, so the reply (and its needsYou) still arrives.
+// It counts from when the job starts, never from when it joined the queue.
 export const RECEPTION_TIMEOUT_MS = 240_000;
+// The longest a request waits behind the running one before it gets "busy, try again" (429). One that waited
+// longer is behind a follow-up that wakes a room, which can hold the slot for minutes; the prompt window is
+// better told at once. With the ceiling, a reply comes within 300 s, as the terminal reception's Bash
+// timeout waits for a dispatch.
+export const RECEPTION_WAIT_MS = 60_000;
 const SHOW_ENV_TIMEOUT_MS = 5_000;
 const BUSY = 'the maître is busy, try again';
 const TOO_SLOW = 'the maître took too long to answer; check the lounge before sending it again';
@@ -55,17 +61,20 @@ export class TimeoutError extends Error {
   }
 }
 
-// One job runs at a time. The ceiling counts from run(): a job still waiting when it passes is dropped,
-// one already running keeps the slot until it really ends, so jobs never overlap.
+// One job runs at a time. A job waits at most waitMs for the slot, then is dropped as busy without running.
+// The ceiling counts from when it starts: a job past it rejects its caller, yet keeps the slot until it
+// really ends, so jobs never overlap.
 export class ReceptionQueue {
   private readonly maxWaiting: number;
   private readonly timeoutMs: number;
+  private readonly waitMs: number;
   private running = false;
   private readonly waiting: (() => void)[] = [];
 
-  constructor(opts: { maxWaiting?: number; timeoutMs?: number } = {}) {
+  constructor(opts: { maxWaiting?: number; timeoutMs?: number; waitMs?: number } = {}) {
     this.maxWaiting = opts.maxWaiting ?? MAX_WAITING;
     this.timeoutMs = opts.timeoutMs ?? RECEPTION_TIMEOUT_MS;
+    this.waitMs = opts.waitMs ?? RECEPTION_WAIT_MS;
   }
 
   get waitingCount(): number {
@@ -75,23 +84,28 @@ export class ReceptionQueue {
   run<T>(job: () => Promise<T>): Promise<T> {
     if (this.running && this.waiting.length >= this.maxWaiting) return Promise.reject(new BusyError());
     return new Promise<T>((resolve, reject) => {
+      let waited: NodeJS.Timeout | undefined;
       const start = () => {
+        clearTimeout(waited);
         this.running = true;
+        const ceiling = setTimeout(() => reject(new TimeoutError()), this.timeoutMs);
         new Promise<T>((r) => r(job()))
           .then(resolve, reject)
           .finally(() => {
-            clearTimeout(timer);
+            clearTimeout(ceiling);
             this.running = false;
             this.waiting.shift()?.();
           });
       };
-      const timer = setTimeout(() => {
+      if (!this.running) return start();
+      this.waiting.push(start);
+      waited = setTimeout(() => {
         const i = this.waiting.indexOf(start);
-        if (i >= 0) this.waiting.splice(i, 1);
-        reject(new TimeoutError());
-      }, this.timeoutMs);
-      if (this.running) this.waiting.push(start);
-      else start();
+        // Started meanwhile: its answer is the job's, never "busy".
+        if (i < 0) return;
+        this.waiting.splice(i, 1);
+        reject(new BusyError());
+      }, this.waitMs);
     });
   }
 }

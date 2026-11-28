@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { sendRequest, replyView, openTerminal, wakeRoom, receptionSession, promptPlacement, loungePlacement, CLOSE_AFTER_MS } from '../../lounge/js/reception.js';
+import { sendRequest, replyView, openTerminal, wakeRoom, oneWakeAtATime, receptionSession, promptPlacement, loungePlacement, CLOSE_AFTER_MS } from '../../lounge/js/reception.js';
 import { t } from '../../lounge/js/i18n.js';
 
 const json = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
@@ -185,4 +185,25 @@ test('wakeRoom posts to the room wake endpoint and hands back the wake lines or 
   const odd = await wakeRoom('p', fakeFetch(json(200, { kind: 'woken', lines: [5] })));
   assert.equal(odd.ok, false);
   assert.ok(odd.message.length > 0);
+});
+
+test('one wake at a time: Wake on another room while one wakes says so, the same room again says nothing, and the next wake runs', async () => {
+  let open;
+  const calls = [];
+  const wakes = oneWakeAtATime(async (who) => {
+    calls.push(who);
+    if (who === 'a') await new Promise((r) => { open = r; });
+    return { ok: true, lines: [`woke ${who}`] };
+  });
+  const a = wakes.run('a');
+  assert.equal(wakes.waking, 'a');
+  assert.deepEqual(await wakes.run('b', 'en'), { ok: false, message: t('panel.otherWaking', 'en') });
+  assert.deepEqual(await wakes.run('b', 'pt-BR'), { ok: false, message: t('panel.otherWaking', 'pt-BR') });
+  assert.notEqual(t('panel.otherWaking', 'pt-BR'), t('panel.otherWaking', 'en'));
+  assert.equal(await wakes.run('a'), null);
+  open();
+  assert.deepEqual(await a, { ok: true, lines: ['woke a'] });
+  assert.equal(wakes.waking, null);
+  assert.deepEqual(await wakes.run('b'), { ok: true, lines: ['woke b'] });
+  assert.deepEqual(calls, ['a', 'b']);
 });

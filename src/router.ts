@@ -7,7 +7,7 @@ import { readJson, writeJsonAtomic } from './config.js';
 import { cleanEnv } from './env.js';
 import { maitreHome, roomDir, roomSlug } from './paths.js';
 import { readIndex, type Project } from './projects.js';
-import { BRIEF_HEADER, deliverToRoom, describeDelivery, describeOpen, isRecord, listRoomRows, openRoom, probeRoom } from './room-open.js';
+import { BRIEF_HEADER, deliverToRoom, describeDelivery, describeOpen, isRecord, listRoomRows, openRoom, probeRoom, type Delivered } from './room-open.js';
 import { ensureServer } from './herdr.js';
 import { admit, appendToQueued, queuedRooms, readQueue, type QueueEntry } from './doorman.js';
 import { liveLounge } from './lounge-file.js';
@@ -15,7 +15,7 @@ import { listRooms, readRoom } from './rooms.js';
 import { isRequestId, readRequests } from './requests.js';
 import { hasMinutes, recentMinutes, withMinutes, type MinutesEntry } from './minutes.js';
 import { shownText } from './pending.js';
-import { parkedState, wakeRoom } from './wake.js';
+import { parkedState, wakeRoom, type Woken } from './wake.js';
 
 export type TaskType = 'simple' | 'explore' | 'change' | 'build' | 'decide';
 export type RouteModel = 'haiku' | 'sonnet' | 'opus';
@@ -405,6 +405,8 @@ async function wakeable(room: string, env: NodeJS.ProcessEnv): Promise<boolean> 
 
 const position = (room: string, env: NodeJS.ProcessEnv) => queuedRooms(env).find((q) => q.room === room)?.position;
 
+const firstLine = (err: unknown): string => (err instanceof Error ? err.message : String(err)).split('\n')[0]!.trim();
+
 // needsYou: the room waits on the user (folder-trust question) or the dispatch produced a warning.
 // A new room past capacity joins the queue; a follow-up to a queued room joins its entry.
 export async function dispatchRouteDetailed(id: string, env: NodeJS.ProcessEnv = process.env, opts: { confirmMs?: number } = {}): Promise<Dispatched> {
@@ -419,11 +421,23 @@ export async function dispatchRouteDetailed(id: string, env: NodeJS.ProcessEnv =
       return queuedReply(room, `queued: ${room} waits for a seat${n !== undefined ? ` (position ${n})` : ''}`, env);
     }
     if (await wakeable(room, env)) {
-      const woken = await wakeRoom(room, env, { request: text });
+      let woken: Woken;
+      try {
+        woken = await wakeRoom(room, env, { request: text });
+      } catch (err) {
+        // The wake refused or failed (a tab closed by hand, a close in progress): the request went nowhere.
+        return { room, lines: [firstLine(err), 'the request was not sent'], needsYou: true };
+      }
       // A fresh Claude got the request in its brief; a room waiting on the user cannot take it now.
       if (!woken.resumed) return { room, lines: woken.lines, needsYou: woken.needsYou };
       if (woken.needsYou) return { room, lines: [...woken.lines, 'the request was not sent: send it again once the room is ready in its tab'], needsYou: true };
-      const sent = await deliverToRoom(room, text, env, opts);
+      let sent: Delivered;
+      try {
+        sent = await deliverToRoom(room, text, env, { ...opts, woken: true });
+      } catch (err) {
+        // The room is woken all the same: its line stays with the reason the request did not reach it.
+        return { room, lines: [...woken.lines, `the request was not sent: ${firstLine(err)}`], needsYou: true };
+      }
       return { room, lines: [...woken.lines, describeDelivery(room, sent)], needsYou: sent.result === 'unsent' };
     }
     const sent = await deliverToRoom(room, text, env, opts);

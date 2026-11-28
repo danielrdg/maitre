@@ -11,6 +11,7 @@ import {
   readFailed,
   readQueue,
   reserveUnderLock,
+  RoomOpening,
   withQueueLock,
   writeFailed,
   writeQueue,
@@ -23,7 +24,7 @@ import { listRooms, readRoom, type RoomRecord } from './rooms.js';
 import { withMinutes } from './minutes.js';
 import type { Route } from './router.js';
 
-export { appendToQueued, queuedRooms, readFailed, readQueue, withQueueLock, type QueueEntry } from './queue.js';
+export { appendToQueued, queuedRooms, readFailed, readQueue, RoomOpening, withQueueLock, type QueueEntry } from './queue.js';
 
 // Failed opens in a row before a queued room leaves the queue for queue-failed.json.
 export const MAX_ATTEMPTS = 3;
@@ -80,7 +81,7 @@ export async function activeCount(env: NodeJS.ProcessEnv = process.env): Promise
   return seatsTaken(await probeActive(env), liveReservations(env), env);
 }
 
-const opening = (room: string) => new Error(`${room} is opening`);
+const opening = (room: string) => new RoomOpening(room);
 
 // A free seat → the `opening` reservation is written and the caller opens the room outside the lock,
 // then calls `release`, on success and on failure. No seat → the room joins the queue.
@@ -148,7 +149,7 @@ const sameEntry = (a: QueueEntry, b: QueueEntry) => a.room === b.room && a.queue
 // The head's name is registered and running. Opened by the doorman from this very entry (an earlier
 // tick that could not take it off the queue): its requests are in that room. Anything else opened that
 // name: the requests reached no room, so the entry is kept in queue-failed.json.
-function queuedEntry(room: string, env: NodeJS.ProcessEnv): QueueEntry | undefined {
+export function queuedEntry(room: string, env: NodeJS.ProcessEnv): QueueEntry | undefined {
   try {
     return readQueue(env).find((e) => e.room === room);
   } catch {
@@ -156,7 +157,7 @@ function queuedEntry(room: string, env: NodeJS.ProcessEnv): QueueEntry | undefin
   }
 }
 
-async function runningHead(entry: QueueEntry, env: NodeJS.ProcessEnv): Promise<'ours' | 'other' | undefined> {
+export async function runningHead(entry: QueueEntry, env: NodeJS.ProcessEnv): Promise<'ours' | 'other' | undefined> {
   const rec = readRoom(entry.room, env);
   if (!isObject(rec) || !isRecord(rec) || rec.closedBy !== undefined) return undefined;
   await ensureServer(env);
@@ -207,11 +208,12 @@ export interface DoormanResult {
 // (retried a minute later at the earliest) until its third failure in a row moves it to queue-failed.json.
 export async function doormanTick(
   env: NodeJS.ProcessEnv = process.env,
-  deps: { open?: (entry: QueueEntry, env: NodeJS.ProcessEnv) => Promise<unknown>; now?: () => number } = {},
+  // stopped: the lounge is stopping; no room is opened after it says so.
+  deps: { open?: (entry: QueueEntry, env: NodeJS.ProcessEnv) => Promise<unknown>; now?: () => number; stopped?: () => boolean } = {},
 ): Promise<DoormanResult> {
   const out: DoormanResult = { opened: [], gaveUp: [] };
   try {
-    await tick(out, env, deps.open ?? openQueued, deps.now ?? Date.now);
+    await tick(out, env, deps.open ?? openQueued, deps.now ?? Date.now, deps.stopped ?? (() => false));
     return out;
   } catch (err) {
     // What already happened is reported; the error comes back on the next tick.
@@ -225,12 +227,14 @@ async function tick(
   env: NodeJS.ProcessEnv,
   open: (entry: QueueEntry, env: NodeJS.ProcessEnv) => Promise<unknown>,
   now: () => number,
+  stopped: () => boolean,
 ): Promise<void> {
   const gaveUp = (e: QueueEntry, reason: string) => {
     logDecision({ room: e.room, decision: 'error', reasons: [reason] }, env);
     out.gaveUp.push({ room: e.room, requestIds: [...e.requestIds], reason });
   };
   for (;;) {
+    if (stopped()) return;
     const first = readQueue(env)[0];
     if (first === undefined) return;
     const running = await runningHead(first, env);
@@ -254,6 +258,7 @@ async function tick(
     if (backingOff(first, now())) return;
     const { capacity } = settings(env);
     const probe = await probeActive(env);
+    if (stopped()) return;
     const pick = await withQueueLock(env, () => {
       const head = readQueue(env)[0];
       if (head === undefined || backingOff(head, now())) return undefined;

@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { processStart } from '../src/closing.js';
@@ -365,7 +365,9 @@ test('couched rooms, rooms with a PR, closed and dead rooms do not count', async
   await open('d');
   writeRoom({ ...a, couch: { since: Date.now(), reasons: ['uncommitted changes'] } });
   const pr = { v: 1, ts: Date.now(), room: 'b', session: 's1', event: 'PostToolUse', tool: 'Bash', response: { stdout: 'https://github.com/o/r/pull/1\n' } };
-  writeFileSync(join(roomDir('b'), 'events.jsonl'), JSON.stringify(pr) + '\n', { flag: 'a' });
+  // Delivered: its turn ended on the PR (whisky).
+  const stop = { v: 1, ts: Date.now(), room: 'b', session: 's1', event: 'Stop' };
+  writeFileSync(join(roomDir('b'), 'events.jsonl'), JSON.stringify(pr) + '\n' + JSON.stringify(stop) + '\n', { flag: 'a' });
   const s = sb.state();
   delete s.workspaces[readRoom('d')!.herdr!.workspaceId];
   sb.setState(s);
@@ -542,4 +544,57 @@ test('a queued room that continues a closed one opens with the minutes, and a ne
   const brief = readFileSync(join(roomDir('again'), 'brief.md'), 'utf8');
   assert.ok(Buffer.byteLength(brief) <= 100_000 + 100);
   assert.match(brief, /# Minutes of old \(closed 2026-11-01\)/);
+});
+
+// #42: queue edge cases.
+
+test('an unreadable opening.json is kept aside, never overwritten with nothing', async () => {
+  mkdirSync(join(sb.home, 'state'), { recursive: true });
+  writeFileSync(openingFile(), '[{"room": "x", "pid": 1, "since"');
+  const release = await (await import('../src/queue.js')).reserve('y');
+  const aside = readdirSync(join(sb.home, 'state')).filter((f) => f.startsWith('opening.json.bad-'));
+  assert.equal(aside.length, 1);
+  assert.equal(readFileSync(join(sb.home, 'state', aside[0]!), 'utf8'), '[{"room": "x", "pid": 1, "since"');
+  assert.deepEqual(opening().map((r) => r.room), ['y']);
+  release();
+});
+
+test('maitre room open refuses a name in queue-failed.json until it is removed from there', async () => {
+  mkdirSync(join(sb.home, 'state'), { recursive: true });
+  writeFileSync(failedFile(), JSON.stringify([{ ...entry('c', ['1'], 1), failedAt: 2, lastError: 'boom' }]));
+  await assert.rejects(open('c'), /^Error: c failed to open from the queue/);
+  assert.equal(herdrCreates(), 0);
+  await closeRoom('c');
+  await open('c');
+});
+
+test('an open finds a tab an earlier open left (a crash before its record): a live Claude there stops it, a bare shell is closed', async () => {
+  // What an open that died between creating the tab and writing the record leaves: the tab, with Claude running the brief.
+  sb.setState({ next: 5, workspaces: { w1: { label: 'scratch / c' } }, panes: { 'w1:p1': { ws: 'w1', agent: 'working' } } });
+  await assert.rejects(open('c'), /an earlier open of c left a tab with Claude running/);
+  assert.equal(herdrCreates(), 0);
+  assert.ok(sb.state().workspaces.w1, 'that Claude is never closed');
+  sb.setState({ next: 5, workspaces: { w1: { label: 'scratch / c' } }, panes: { 'w1:p1': { ws: 'w1', agent: 'shell' } } });
+  const rec = await open('c');
+  assert.equal(sb.state().workspaces.w1, undefined, 'the bare tab is closed');
+  assert.ok(sb.state().workspaces[rec.herdr!.workspaceId]);
+});
+
+test('a doorman pass told to stop opens nothing more', async () => {
+  capacity(5);
+  request(1, 'one\n');
+  request(2, 'two\n');
+  writeQueue([entry('c', ['1'], Date.now() - 1000), entry('d', ['2'], Date.now() - 500)]);
+  const opened: string[] = [];
+  let stop = false;
+  const r = await doormanTick(process.env, {
+    open: async (e) => {
+      opened.push(e.room);
+      stop = true;
+    },
+    stopped: () => stop,
+  });
+  assert.deepEqual(opened, ['c']);
+  assert.deepEqual(r.opened, ['c']);
+  assert.deepEqual(readQueue().map((e) => e.room), ['d']);
 });

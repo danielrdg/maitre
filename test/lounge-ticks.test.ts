@@ -809,3 +809,75 @@ test('autoWake on: a room the janitor is closing or parking (marker held) is not
   assert.deepEqual(told.sent, []);
   assert.ok(out.includes('maitre: pr: did not tell alpha about its PR: it is closing'), out.join('\n'));
 });
+
+test('a changed janitor.intervalMinutes or pr.pollMinutes takes effect without a restart', async () => {
+  mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
+  writeFileSync(join(sb.home, 'config.json'), JSON.stringify({ roots: [], projects: {}, janitor: { intervalMinutes: 1 }, pr: { pollMinutes: 1 } }));
+  let polls = 0;
+  const f = fakes();
+  ticks = startTicks(process.env, { ...f.deps, pr: async () => (polls++, []) });
+  await ticks.idle();
+  writeFileSync(join(sb.home, 'config.json'), JSON.stringify({ roots: [], projects: {}, janitor: { intervalMinutes: 3 }, pr: { pollMinutes: 3 } }));
+  // The next tick still comes on the old interval, and reads the new one.
+  mock.timers.tick(MIN);
+  await ticks.idle();
+  assert.equal(f.calls.filter((c) => c === 'janitor').length, 2);
+  assert.equal(polls, 2);
+  mock.timers.tick(2 * MIN);
+  await ticks.idle();
+  assert.equal(f.calls.filter((c) => c === 'janitor').length, 2, 'not every minute any more');
+  assert.equal(polls, 2);
+  mock.timers.tick(MIN);
+  await ticks.idle();
+  assert.equal(f.calls.filter((c) => c === 'janitor').length, 3);
+  assert.equal(polls, 3);
+});
+
+test('stop resolves only once the tick in flight is over', async () => {
+  const slow = gate();
+  const f = fakes({ janitor: async () => (await slow.wait, []) });
+  ticks = startTicks(process.env, { ...f.deps, intervalMs: 60 * MIN });
+  let done = false;
+  const stopping = ticks.stop().then(() => (done = true));
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(done, false, 'the janitor pass is still running');
+  slow.open();
+  await stopping;
+  assert.equal(done, true);
+});
+
+test('once stop has begun, the doorman opens nothing: a tick in flight skips its doorman pass', async () => {
+  const slow = gate();
+  const f = fakes({ janitor: async () => (await slow.wait, []) });
+  ticks = startTicks(process.env, { ...f.deps, intervalMs: 60 * MIN });
+  await new Promise((r) => setTimeout(r, 20));
+  const stopping = ticks.stop();
+  slow.open();
+  await stopping;
+  assert.deepEqual(f.calls, ['janitor']);
+});
+
+test('maitre serve: a second stop signal exits at once, without waiting for the tick in flight', async () => {
+  await openRoom({ name: 'a', model: 'sonnet', taskType: 'change', brief: 'x' }, process.env, FAST);
+  const env = { ...sb.env, FAKE_HERDR_HANG_workspace_list: '1', MAITRE_HERDR_TIMEOUT_MS: '120000' };
+  const child = spawn(process.execPath, [MAITRE, 'serve', '--port', '0'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (c: string) => (out += c));
+  const exited = new Promise<number | null>((res) => child.on('exit', (c) => res(c)));
+  try {
+    const end = Date.now() + 30_000;
+    while (!/maitre serve:/.test(out) && Date.now() < end) await new Promise((r) => setTimeout(r, 50));
+    // The janitor's tick is now stuck on herdr.
+    await new Promise((r) => setTimeout(r, 1_000));
+    child.kill('SIGTERM');
+    await new Promise((r) => setTimeout(r, 1_000));
+    assert.equal(child.exitCode, null, 'the first signal waits for the tick');
+    const t0 = Date.now();
+    child.kill('SIGTERM');
+    await exited;
+    assert.ok(Date.now() - t0 < 5_000, `exited after ${Date.now() - t0} ms`);
+  } finally {
+    child.kill('SIGKILL');
+  }
+});

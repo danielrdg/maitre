@@ -93,7 +93,7 @@ test('isActive: running, open, not couched, no PR', () => {
   assert.equal(isActive(rec(), act(), false), false);
   assert.equal(isActive(rec({ closedBy: 'user' }), act(), true), false);
   assert.equal(isActive(rec({ couch: { since: 1, reasons: ['dirty'] } }), act(), true), false);
-  assert.equal(isActive(rec(), act({ prUrl: 'https://github.com/o/r/pull/1' }), true), false);
+  assert.equal(isActive(rec(), act({ prUrl: 'https://github.com/o/r/pull/1', state: 'whisky' }), true), false);
   assert.equal(isActive(rec(), act({ state: 'whisky' }), true), false);
 });
 
@@ -157,4 +157,10 @@ test("roomActivity: a block from maître's starting note alone is marked startin
     write(env, 'r2', [start(10), { ts: 20, event: 'MaitreStatus', status: 'blocked', text: 'Merge now?', options: ['yes'] }]);
     assert.equal(roomActivity('r2', env).starting, undefined, 'a block the agent declared');
   });
+});
+
+test('isActive: without pr.json, a room that once printed a PR counts again once it works', () => {
+  const pr = 'https://github.com/o/r/pull/1';
+  assert.equal(isActive(rec({ kind: 'scratch' }), act({ prUrl: pr, state: 'work' }), true), true);
+  assert.equal(isActive(rec({ kind: 'scratch' }), act({ prUrl: pr, state: 'whisky' }), true), false);
 });

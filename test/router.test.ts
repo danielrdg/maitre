@@ -626,22 +626,101 @@ test('concurrent maitre dispatch processes never both take the last seat', async
   assert.equal(sb.calls().filter((c) => c[0] === 'workspace' && c[1] === 'create').length, 1);
 });
 
-test('a follow-up to a room that is both queued and running goes to the running room', async () => {
+test('a name both queued and open as another room is refused up front: a follow-up or a new route to it is not sent', async () => {
   writeIndex(PROJECTS);
   await openRoom({ name: 'monads', model: 'haiku', taskType: 'simple', brief: 'x' }, process.env, FAST);
   writeQueue([{ room: 'monads', requestIds: ['1'], route: { ...MONADS, model: 'haiku' } as Route, queuedAt: Date.now(), attempts: 0 }]);
   writeRequest(1, 'first');
   writeRequest(2, 'and functors');
-  reply(envelope({ ...MONADS, room: { kind: 'existing', name: 'monads' } }));
-  assert.equal(cli(['route', '2']).status, 0);
-  const d = cli(['dispatch', '2']);
-  assert.equal(d.status, 0, d.stderr);
-  assert.equal(d.stdout, 'sent to monads\n');
+  mkdirSync(join(sb.home, 'reception', 'routes'), { recursive: true });
+  writeFileSync(routeFile(2), JSON.stringify({ route: { ...MONADS, room: { kind: 'existing', name: 'monads' }, model: 'haiku' }, requestIds: ['2'] }));
+  const before = sb.calls().filter((c) => c[0] === 'agent' && c[1] === 'prompt').length;
+  const r = await dispatchRouteDetailed('2', sb.env, { confirmMs: 200 });
+  assert.equal(r.needsYou, true);
+  assert.match(r.lines.join('\n'), /monads is both open and queued for another request/);
+  assert.match(r.lines.join('\n'), /the request was not sent/);
+  writeRequest(3, 'more');
+  writeFileSync(routeFile(3), JSON.stringify({ route: { ...MONADS, model: 'haiku' }, requestIds: ['3'] }));
+  const n = await dispatchRouteDetailed('3', sb.env, { confirmMs: 200 });
+  assert.equal(n.needsYou, true);
+  assert.match(n.lines.join('\n'), /the request was not sent/);
+  assert.equal(sb.calls().filter((c) => c[0] === 'agent' && c[1] === 'prompt').length, before, 'nothing typed into the other room');
   assert.deepEqual(
     readQueue().map((e) => e.requestIds),
     [['1']],
   );
 });
+
+test('a new route to a name that is open (not queued) is refused, never queued behind a full house', async () => {
+  writeIndex(PROJECTS);
+  capacity(1);
+  await openRoom({ name: 'monads', model: 'haiku', taskType: 'simple', brief: 'x' }, process.env, FAST);
+  writeRequest(1, 'again');
+  mkdirSync(join(sb.home, 'reception', 'routes'), { recursive: true });
+  writeFileSync(routeFile(1), JSON.stringify({ route: { ...MONADS, model: 'haiku' }, requestIds: ['1'] }));
+  const r = await dispatchRouteDetailed('1', sb.env, { confirmMs: 200 });
+  assert.equal(r.needsYou, true);
+  assert.match(r.lines.join('\n'), /room monads is already open.*\n?.*the request was not sent/s);
+  assert.deepEqual(readQueue(), []);
+});
+
+test('a follow-up to a queued room that is being opened gets a clear answer, not an error', async () => {
+  writeIndex(PROJECTS);
+  writeQueue([{ room: 'monads', requestIds: ['1'], route: { ...MONADS, model: 'haiku' } as Route, queuedAt: Date.now(), attempts: 0 }]);
+  writeRequest(1, 'first');
+  writeRequest(2, 'more');
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+  try {
+    await new Promise((r) => setTimeout(r, 50));
+    writeFileSync(openingFile(), JSON.stringify([{ room: 'monads', pid: child.pid, since: Date.now() }]));
+    mkdirSync(join(sb.home, 'reception', 'routes'), { recursive: true });
+    writeFileSync(routeFile(2), JSON.stringify({ route: { ...MONADS, room: { kind: 'existing', name: 'monads' }, model: 'haiku' }, requestIds: ['2'] }));
+    const r = await dispatchRouteDetailed('2', sb.env);
+    assert.equal(r.needsYou, true);
+    assert.deepEqual(r.lines, ['monads is opening: send it again once it is open', 'the request was not sent']);
+    writeFileSync(routeFile(2), JSON.stringify({ route: { ...MONADS, model: 'haiku' }, requestIds: ['2'] }));
+    const n = await dispatchRouteDetailed('2', sb.env);
+    assert.deepEqual(n.lines, ['monads is opening: send it again once it is open', 'the request was not sent']);
+  } finally {
+    child.kill();
+  }
+});
+
+test('with herdr down, a follow-up to a queued name joins its queue entry instead of failing', async () => {
+  writeIndex(PROJECTS);
+  writeQueue([{ room: 'monads', requestIds: ['1'], route: { ...MONADS, model: 'haiku' } as Route, queuedAt: Date.now(), attempts: 0 }]);
+  writeRoom({ room: 'monads', kind: 'scratch', dir: join(sb.home, 'scratch', 'monads'), model: 'haiku', taskType: 'simple', createdAt: 1, herdr: { session: 'maitre-test', workspaceId: 'w9', paneId: 'w9:p1' } });
+  writeRequest(1, 'first');
+  writeRequest(2, 'more');
+  mkdirSync(join(sb.home, 'reception', 'routes'), { recursive: true });
+  writeFileSync(routeFile(2), JSON.stringify({ route: { ...MONADS, room: { kind: 'existing', name: 'monads' }, model: 'haiku' }, requestIds: ['2'] }));
+  // No herdr on PATH at all.
+  const r = await dispatchRouteDetailed('2', { ...sb.env, PATH: join(sb.dir, 'no-bin') });
+  assert.match(r.lines[0]!, /^queued: monads waits for a seat/);
+  assert.deepEqual(
+    readQueue().map((e) => e.requestIds),
+    [['1', '2']],
+  );
+});
+
+test('a queued room the doorman opened that dies before the request reaches it: the reply says the request was not sent', async () => {
+  writeIndex(PROJECTS);
+  const queuedAt = Date.now() - 1000;
+  writeQueue([{ room: 'monads', requestIds: ['1'], route: { ...MONADS, model: 'haiku' } as Route, queuedAt, attempts: 0 }]);
+  writeRequest(1, 'first');
+  await openRoom({ name: 'monads', model: 'haiku', taskType: 'simple', brief: 'first', fromQueue: queuedAt }, process.env, FAST);
+  writeRequest(2, 'and functors');
+  mkdirSync(join(sb.home, 'reception', 'routes'), { recursive: true });
+  writeFileSync(routeFile(2), JSON.stringify({ route: { ...MONADS, model: 'haiku' }, requestIds: ['2'] }));
+  // The room's tab goes right after admit's look at the queue's head.
+  const dead = join(sb.dir, 'dead-state.json');
+  writeFileSync(dead, JSON.stringify({ next: 9, workspaces: {}, panes: {} }));
+  process.env.FAKE_HERDR_THEN_agent_get = JSON.stringify({ after: 3, moves: [[dead, sb.stateFile]] });
+  const r = await dispatchRouteDetailed('2', process.env, { confirmMs: 200 });
+  assert.equal(r.needsYou, true);
+  assert.equal(r.lines.at(-1), 'the request was not sent');
+});
+
 
 test('a new route naming a queued room the doorman already opened (settle never ran) delivers to that room and clears the entry', async () => {
   writeIndex(PROJECTS);
@@ -906,4 +985,41 @@ test('a minutes file larger than the cap is read only up to the cap and marked c
   const out = continuedMinutes('nf-big', 'backend', sb.env)!;
   assert.ok(Buffer.byteLength(out) < 7_000, String(Buffer.byteLength(out)));
   assert.match(out, /clipped/);
+});
+
+// Round 2.
+
+test('with herdr down, a follow-up to a queued name the doorman may already have opened is not sent and needs you', async () => {
+  writeIndex(PROJECTS);
+  const queuedAt = Date.now() - 1000;
+  writeQueue([{ room: 'monads', requestIds: ['1'], route: { ...MONADS, model: 'haiku' } as Route, queuedAt, attempts: 0 }]);
+  writeRoom({ room: 'monads', kind: 'scratch', dir: join(sb.home, 'scratch', 'monads'), model: 'haiku', taskType: 'simple', createdAt: 1, fromQueue: queuedAt, herdr: { session: 'maitre-test', workspaceId: 'w9', paneId: 'w9:p1' } });
+  writeRequest(1, 'first');
+  writeRequest(2, 'more');
+  mkdirSync(join(sb.home, 'reception', 'routes'), { recursive: true });
+  writeFileSync(routeFile(2), JSON.stringify({ route: { ...MONADS, room: { kind: 'existing', name: 'monads' }, model: 'haiku' }, requestIds: ['2'] }));
+  const r = await dispatchRouteDetailed('2', { ...sb.env, PATH: join(sb.dir, 'no-bin') });
+  assert.equal(r.needsYou, true);
+  assert.match(r.lines[0]!, /^could not check monads: /);
+  assert.equal(r.lines.at(-1), 'the request was not sent');
+  assert.deepEqual(
+    readQueue().map((e) => e.requestIds),
+    [['1']],
+  );
+});
+
+test('a delivery whose typing herdr failed (it may have typed already) never says not sent: it may not have been', async () => {
+  writeIndex(PROJECTS);
+  const queuedAt = Date.now() - 1000;
+  writeQueue([{ room: 'monads', requestIds: ['1'], route: { ...MONADS, model: 'haiku' } as Route, queuedAt, attempts: 0 }]);
+  writeRequest(1, 'first');
+  await openRoom({ name: 'monads', model: 'haiku', taskType: 'simple', brief: 'first', fromQueue: queuedAt }, process.env, FAST);
+  writeRequest(2, 'and functors');
+  mkdirSync(join(sb.home, 'reception', 'routes'), { recursive: true });
+  writeFileSync(routeFile(2), JSON.stringify({ route: { ...MONADS, room: { kind: 'existing', name: 'monads' }, model: 'haiku' }, requestIds: ['2'] }));
+  process.env.FAKE_HERDR_FAIL_agent_prompt = 'timeout';
+  const r = await dispatchRouteDetailed('2', process.env, { confirmMs: 200 });
+  assert.equal(r.needsYou, true);
+  assert.match(r.lines.join('\n'), /may not have been sent; check the room/);
+  assert.doesNotMatch(r.lines.join('\n'), /was not sent/);
 });

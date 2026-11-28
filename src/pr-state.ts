@@ -21,6 +21,8 @@ export interface PrState {
   seenAt: number;
   failing: string[];
   lastFeedbackAt?: string;
+  // The feedback seen at exactly lastFeedbackAt (gh's times have a one-second resolution).
+  lastFeedbackKeys?: string[];
   reviewDecision?: string;
   notice?: PrNotice;
   dance?: { until: number };
@@ -89,6 +91,7 @@ export function readPr(room: string, env: NodeJS.ProcessEnv = process.env): PrSt
     failing: p.failing.filter((f): f is string => typeof f === 'string'),
   };
   if (typeof p.lastFeedbackAt === 'string') pr.lastFeedbackAt = p.lastFeedbackAt;
+  if (Array.isArray(p.lastFeedbackKeys)) pr.lastFeedbackKeys = p.lastFeedbackKeys.filter((k): k is string => typeof k === 'string');
   if (typeof p.reviewDecision === 'string') pr.reviewDecision = p.reviewDecision;
   const n = notice(p.notice);
   if (n !== undefined) pr.notice = n;

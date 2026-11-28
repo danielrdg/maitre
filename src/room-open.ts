@@ -12,6 +12,7 @@ import {
   createLabeledWorkspace,
   ensureServer,
   herdrSession,
+  holdsAgent,
   listWorkspaces,
   prompt,
   readPane,
@@ -166,6 +167,8 @@ export async function openRoom(
   if (opts.fromQueue === undefined) {
     const queued = queuedPosition(room, env);
     if (queued !== undefined) throw new Error(`${room} is queued (position ${queued}); it opens when a seat frees, or remove it with: maitre room close ${room}`);
+    // Its requests reached no room: the failed entry goes first, so a close by name means one thing.
+    if (failedToOpen(room, env)) throw new Error(`${room} failed to open from the queue (see maitre room list); remove it with: maitre room close ${room}, then open it again`);
   }
   if (!MODEL.test(opts.model)) throw new Error(`invalid model ${JSON.stringify(opts.model)}`);
   if (Buffer.byteLength(opts.brief) > MAX_BRIEF_BYTES) throw new Error(`the brief is too long (at most ${MAX_BRIEF_BYTES} bytes)`);
@@ -174,16 +177,24 @@ export async function openRoom(
   if (isClosing(room, env)) throw new Error(`${room} is closing`);
   await ensureServer(env);
   const prev = readRoom(room, env);
+  const workspaces = await listWorkspaces();
   if (prev !== undefined) {
-    const workspaces = await listWorkspaces();
     if ((await probeRoom(prev, workspaces, env)) !== 'not running') throw new Error(`room ${room} is already open`);
     if (stillStarting(prev, workspaces, env)) throw stillStartingError(room, 'room ');
     // A fresh open would drop the session the room parked with, and its pr.json.
     if (prev.seat !== undefined && prev.closedBy === undefined) {
       throw new Error(`room ${room} is parked — wake it with: maitre room wake ${room} (or close it first with: maitre room close ${room})`);
     }
-    await closeRoomTabs(prev, workspaces);
   }
+  // A tab under the room's label that its record does not name: an open that died before writing the record
+  // (herdr's restored copies are bare shells). One whose Claude runs got the brief already: never closed,
+  // never doubled.
+  const labels = new Set([roomLabel({ room, project: project?.name }), ...(prev !== undefined ? [roomLabel(prev)] : [])]);
+  for (const w of workspaces) {
+    if (!labels.has(w.label) || w.id === prev?.herdr?.workspaceId) continue;
+    if (await holdsAgent(w.id)) throw new Error(`an earlier open of ${room} left a tab with Claude running (its record was never written) — check that tab, close it in herdr, then open the room again`);
+  }
+  for (const label of labels) await closeLabeledTabs(label, workspaces);
 
   let dir: string;
   let branch: string | undefined;
@@ -255,6 +266,14 @@ export function noteStarting(room: string, text: string, env: NodeJS.ProcessEnv,
 }
 
 export const roomEventsFile = (room: string, env: NodeJS.ProcessEnv = process.env): string => join(roomDir(room, env), 'events.jsonl');
+
+function failedToOpen(room: string, env: NodeJS.ProcessEnv): boolean {
+  try {
+    return readFailed(env).some((e) => e.room === room);
+  } catch {
+    return false;
+  }
+}
 
 // An unreadable queue holds no name that can be shown to be queued.
 function queuedPosition(room: string, env: NodeJS.ProcessEnv): number | undefined {
@@ -357,6 +376,14 @@ export async function sendToRoom(
   return (await deliverToRoom(room, text, env, opts)).result;
 }
 
+// herdr's prompt failed after it may have typed (a timeout, a bad answer): never "not sent".
+export class MaybeTyped extends Error {
+  constructor(room: string, cause: unknown) {
+    super(`${room}: ${(cause instanceof Error ? cause.message : String(cause)).split('\n')[0]} — the request may not have been sent; check the room`);
+    this.name = 'MaybeTyped';
+  }
+}
+
 // unsent: not confirmed, and the request may sit typed in the room's input box: the user has to look.
 // unconfirmed: only for a busy room whose box no longer holds the text (its running turn took it).
 export interface Delivered {
@@ -427,7 +454,7 @@ export async function deliverToRoom(
     await prompt(rec.herdr!.paneId, text, { wait: false });
   } catch (e) {
     if (e instanceof RoomBlockedError) throw waitingOnYou(slug);
-    throw e;
+    throw new MaybeTyped(slug, e);
   }
   const ms = opts.confirmMs ?? CONFIRM_MS;
   const busy = live === 'working';
@@ -664,6 +691,7 @@ export class CloseStopped extends Error {
 }
 
 export const UNSENT_TEXT = 'unsent text in its input';
+export const LOST_TEXT = 'its tab shows a Claude herdr does not detect';
 const NO_INPUT_LINE = 'could not find its input line';
 const RULE = /^─{8,}$/;
 const PROMPT_MARK = '❯';
@@ -762,6 +790,26 @@ export async function unsentInput(paneId: string): Promise<string | undefined> {
   return typed === '' ? undefined : UNSENT_TEXT;
 }
 
+// herdr not detecting a room's Claude does not prove it gone. In the room's own tab, without the exit line of
+// the run its record names, Claude's input box on screen says it may still be there (with a draft): a reason
+// not to close that tab. undefined: the tab is gone, its run ended, or it shows no input box.
+export async function lostClaude(rec: RoomRecord, env: NodeJS.ProcessEnv = process.env, workspaces?: Workspaces): Promise<string | undefined> {
+  const h = rec.herdr;
+  if (h === undefined || h.session !== herdrSession(env)) return undefined;
+  const list = workspaces ?? (await listWorkspaces());
+  if (!list.some((w) => w.id === h.workspaceId && w.label === roomLabel(rec))) return undefined;
+  if (typeof rec.run === 'string' && readEventsTail(rec.room, env).some((l) => l.event === 'MaitreExit' && l.run === rec.run)) return undefined;
+  let screen: string;
+  try {
+    screen = await readPane(h.paneId, undefined, { ansi: true });
+  } catch (err) {
+    return `could not read its tab: ${(err as Error).message.split('\n')[0]}`;
+  }
+  const typed = inputText(screen);
+  if (typed === undefined) return undefined;
+  return typed === '' ? LOST_TEXT : UNSENT_TEXT;
+}
+
 // The herdr half of closing: /exit an idle room with an empty input, then close its tab and any restored
 // copies. A janitor close never cuts a turn: only an idle room (or one already gone) is closed by it.
 export async function closeRoomTab(
@@ -773,6 +821,10 @@ export async function closeRoomTab(
   const workspaces = await listWorkspaces();
   const live = await probeRoom(rec, workspaces, env);
   if (opts.by === 'janitor' && live !== 'idle' && live !== 'not running') throw new CloseStopped(rec.room, 'active', 'room became active');
+  if (live === 'not running') {
+    const lost = await lostClaude(rec, env, workspaces);
+    if (lost !== undefined) throw new CloseStopped(rec.room, 'input', lost);
+  }
   if (live === 'idle') {
     const unsent = await unsentInput(rec.herdr!.paneId);
     if (unsent !== undefined) throw new CloseStopped(rec.room, 'input', unsent);
@@ -789,7 +841,12 @@ export async function closeRoomTab(
 // For a close by hand, before its minutes are written: the same input check closeRoomTab makes again.
 export async function checkInput(rec: RoomRecord, env: NodeJS.ProcessEnv = process.env): Promise<void> {
   await ensureServer(env);
-  if ((await probeRoom(rec, undefined, env)) !== 'idle') return;
+  const live = await probeRoom(rec, undefined, env);
+  if (live === 'not running') {
+    const lost = await lostClaude(rec, env);
+    if (lost !== undefined) throw new CloseStopped(rec.room, 'input', lost);
+  }
+  if (live !== 'idle') return;
   const unsent = await unsentInput(rec.herdr!.paneId);
   if (unsent !== undefined) throw new CloseStopped(rec.room, 'input', unsent);
 }

@@ -5,6 +5,7 @@ import { isIdle, isQuiet, roomActivity, type RoomActivity } from './activity.js'
 import { closerAlive, leftMinutes, noteClosing, ownsClosing, readClosing, releaseClosing, takeClosing, type ClosingMarker } from './closing.js';
 import { settings } from './config.js';
 import { cleanEnv } from './env.js';
+import { tryFileLock } from './file-lock.js';
 import { ensureServer, herdrSession, listWorkspaces } from './herdr.js';
 import { writeMinutes } from './minutes.js';
 import { maitreHome, roomSlug } from './paths.js';
@@ -12,9 +13,9 @@ import { checkPending } from './pending.js';
 import { roomPr, type PrState } from './pr-state.js';
 import { isOpening, removeQueued } from './queue.js';
 import { readIndex } from './projects.js';
-import { checkInput, CloseStopped, closeRoomTab, isRecord, markRunning, probeRoom, unsentInput, type RoomLiveness } from './room-open.js';
-import { listRooms, patchRoom, readRoom, sameRoom, writeRoom, type RoomRecord } from './rooms.js';
-import { park, whyPark, type ParkDeps } from './seats.js';
+import { checkInput, CloseStopped, closeRoomTab, isRecord, lostClaude, markRunning, probeRoom, unsentInput, type RoomLiveness } from './room-open.js';
+import { listRooms, patchRoom, readRoom, sameRoom, type RoomRecord } from './rooms.js';
+import { park, parkBlocker, whyPark, type ParkDeps } from './seats.js';
 import { stillStarting } from './wake.js';
 import { expectedDir, moveScratch, ownedDir } from './vault.js';
 
@@ -36,8 +37,16 @@ export interface CloseDeps {
   exitTimeoutMs?: number;
   writeMinutes?: typeof writeMinutes;
   heartbeatMs?: number;
+}
+
+// For tests only (forTests): a step between closing the tab and the rest of the close.
+interface Hooks {
   afterTabClosed?: () => void | Promise<void>;
 }
+
+// Why a close did not start: another closer holds the marker, the room is being opened, its record was
+// closed meanwhile, or it names another opening of the room now.
+export type CloseSkipped = 'busy' | 'opening' | 'closed' | 'changed';
 
 // The marker went stale under this closer (e.g. a long suspend) and another closer took it over.
 export class ClosingTakenOver extends Error {
@@ -114,12 +123,11 @@ function appendNote(minutes: string, lines: string[]): void {
   appendFileSync(minutes, ['', '## Not done when closing', '', ...lines.map((l) => `- ${l}`), ''].join('\n'));
 }
 
-export async function closeWithMinutes(
-  rec: RoomRecord,
-  by: 'janitor' | 'user',
-  env: NodeJS.ProcessEnv = process.env,
-  deps: CloseDeps = {},
-): Promise<ClosedRoom | 'busy'> {
+export function closeWithMinutes(rec: RoomRecord, by: 'janitor' | 'user', env: NodeJS.ProcessEnv = process.env, deps: CloseDeps = {}): Promise<ClosedRoom | CloseSkipped> {
+  return closeWith(rec, by, env, deps, {});
+}
+
+async function closeWith(rec: RoomRecord, by: 'janitor' | 'user', env: NodeJS.ProcessEnv, deps: CloseDeps, hooks: Hooks): Promise<ClosedRoom | CloseSkipped> {
   const room = rec.room;
   const held = takeClosing(room, env, { heartbeatMs: deps.heartbeatMs });
   if (held === 'busy') return 'busy';
@@ -132,10 +140,11 @@ export async function closeWithMinutes(
   let tabClosed = false;
   try {
     // Checked after taking the marker, while an opener reserves before checking it: one of them backs off.
-    if (isOpening(room, env)) return 'busy';
+    if (isOpening(room, env)) return 'opening';
     // The caller's record may be minutes old: someone else may have closed or reopened the room since.
     const current = readRoom(room, env);
-    if (current === undefined || current.closedBy !== undefined || !sameRoom(current, rec)) return 'busy';
+    if (current === undefined || current.closedBy !== undefined) return 'closed';
+    if (!sameRoom(current, rec)) return 'changed';
     const dirThere = exists(rec.dir);
     if (janitor && dirThere) ownedDir(rec, env);
     else if (janitor) gone(rec, env);
@@ -171,7 +180,7 @@ export async function closeWithMinutes(
     stillMine();
     await closeRoomTab(rec, env, { exitTimeoutMs: deps.exitTimeoutMs, by });
     tabClosed = true;
-    await deps.afterTabClosed?.();
+    await hooks.afterTabClosed?.();
 
     const notes: string[] = [];
     let worktreeRemoved = false;
@@ -179,11 +188,16 @@ export async function closeWithMinutes(
       if (dirThere) {
         // Plain `git worktree remove` deletes ignored files (a new .env too): the local checks run once more right before,
         // on a room whose tab is closed by now.
-        const late = (await checkPending(rec, snapshot, env, { local: true, running: false })).reasons;
+        const late = await checkPending(rec, snapshot, env, { local: true, running: false });
         stillMine();
-        const failed = late.length > 0 ? late.join('; ') : await removeWorktree(rec, ownedDir(rec, env), env);
+        const failed = late.reasons.length > 0 ? late.reasons.join('; ') : await removeWorktree(rec, ownedDir(rec, env), env);
         if (failed === undefined) worktreeRemoved = true;
         else notes.push(`worktree kept at ${rec.dir}: ${failed}`);
+        // Ignored files that showed up after the decision went too: the minutes list them as well.
+        const lateGone = late.ignoredGone.filter((p) => !(deps.ignoredGone ?? []).includes(p));
+        if (worktreeRemoved && lateGone.length > 0) {
+          appendFileSync(minutes, ['', 'Ignored files found right before the removal, gone with the worktree too:', '', ...lateGone.map((p) => `- \`${p}\``), ''].join('\n'));
+        }
       } else worktreeRemoved = true;
     } else if (janitor && rec.kind === 'scratch' && exists(rec.dir)) {
       stillMine();
@@ -199,12 +213,12 @@ export async function closeWithMinutes(
     }
 
     stillMine();
-    const fresh = readRoom(room, env);
-    if (sameRoom(fresh, rec)) writeRoom({ ...withoutSeat(withoutPending(withoutCouch(fresh))), closedAt: fresh.closedAt ?? Date.now(), closedBy: by }, env);
+    patchRoom(rec, (fresh) => ({ ...withoutSeat(withoutPending(withoutCouch(fresh))), closedAt: fresh.closedAt ?? Date.now(), closedBy: by }), env);
     return { minutes, worktreeRemoved, notes };
   } catch (err) {
-    // Before the tab closed the room is not closed: its minutes go. After, the next close finishes this one.
-    if (!tabClosed && minutes !== undefined && !reused) {
+    // Before the tab closed the room is not closed: its minutes go, unless another closer took the marker
+    // over (it may reuse them). After, the next close finishes this one.
+    if (!tabClosed && minutes !== undefined && !reused && ownsClosing(room, held.token, env)) {
       try {
         unlinkSync(minutes);
       } catch {
@@ -226,23 +240,43 @@ function gone(rec: RoomRecord, env: NodeJS.ProcessEnv): void {
   if (dir !== expected && dir !== join(maitreHome(env), sub)) throw new Error(`room ${rec.room}: ${rec.dir} is outside maître's folders`);
 }
 
-export type Dequeued = { room: string; dequeued: 'queue' | 'failed' };
+// open: a room of that name is open and stays so (only a queue entry was removed).
+export type Dequeued = { room: string; dequeued: 'queue' | 'failed'; open?: true };
 
 // `maitre room close`: minutes and the tab, the folder stays. `writing` runs once the input check passed,
-// right before the minutes are written. A room still waiting for a seat (or one
-// that failed to open from the queue) only leaves the queue: there is nothing else to close.
+// right before the minutes are written. A room still waiting for a seat (or one that failed to open from the
+// queue) leaves the queue. A queued name that is also open (an unclosed record) is closed as well; a name in
+// queue-failed.json is not: its entry is all that was asked for, and a close by hand would not spare a turn.
 export async function closeRoom(
   room: string,
   env: NodeJS.ProcessEnv = process.env,
   opts: { exitTimeoutMs?: number; writing?: () => void } = {},
-): Promise<(RoomRecord & { minutes?: string }) | Dequeued> {
+): Promise<(RoomRecord & { minutes?: string; dequeued?: Dequeued['dequeued'] }) | Dequeued> {
   const slug = roomSlug(room);
   const dequeued = await removeQueued(slug, env);
-  if (dequeued !== undefined) return { room: slug, dequeued };
+  if (dequeued !== undefined) {
+    const open = readRoom(slug, env);
+    if (open === undefined || open.closedBy !== undefined || isOpening(slug, env)) return { room: slug, dequeued };
+    if (dequeued === 'failed') return { room: slug, dequeued, open: true };
+    try {
+      return { ...(await closeOpen(slug, open, env, opts)), dequeued };
+    } catch (err) {
+      throw new Error(`removed ${slug} from the queue; ${(err as Error).message}`);
+    }
+  }
   // A reopen in progress has a new tab under the same label.
   if (isOpening(slug, env)) throw new Error(`${slug} is opening; close it once it is open`);
   const rec = readRoom(slug, env);
   if (rec === undefined) throw new Error(`no room named ${slug} — open it with: maitre room open …`);
+  return closeOpen(slug, rec, env, opts);
+}
+
+async function closeOpen(
+  slug: string,
+  rec: RoomRecord,
+  env: NodeJS.ProcessEnv,
+  opts: { exitTimeoutMs?: number; writing?: () => void },
+): Promise<RoomRecord & { minutes?: string }> {
   if (rec.closedBy !== undefined) {
     await closeRoomTab(rec, env, opts);
     return rec;
@@ -250,10 +284,18 @@ export async function closeRoom(
   // Before the minutes: text in the room's input would stop the close once they are written.
   await checkInput(rec, env);
   opts.writing?.();
-  const r = await closeWithMinutes(rec, 'user', env, { exitTimeoutMs: opts.exitTimeoutMs });
-  if (r === 'busy') {
+  let r: ClosedRoom | CloseSkipped;
+  try {
+    r = await closeWithMinutes(rec, 'user', env, { exitTimeoutMs: opts.exitTimeoutMs });
+  } catch (err) {
+    if (err instanceof ClosingTakenOver) logDecision({ room: slug, decision: 'error', reasons: ['closed by hand: another closer took over its close'] }, env);
+    throw err;
+  }
+  if (typeof r === 'string') {
     const now = readRoom(slug, env);
     if (now?.closedBy !== undefined) return now;
+    if (r === 'opening') throw new Error(`${slug} is opening; close it once it is open`);
+    if (r === 'changed') throw new Error(`${slug} was opened again meanwhile; close it again`);
     throw new Error(`${slug} is closing`);
   }
   return { ...(readRoom(slug, env) ?? rec), minutes: r.minutes };
@@ -274,7 +316,13 @@ function log(d: JanitorDecision, now: number, env: NodeJS.ProcessEnv, maxBytes: 
   const file = janitorLog(env);
   mkdirSync(join(maitreHome(env), 'state'), { recursive: true, mode: 0o700 });
   try {
-    if (statSync(file).size > maxBytes) renameSync(file, `${file}.1`);
+    // One rotation at a time (another process may be rotating): the size is checked again under the lock, and
+    // while another holds it, this line goes to the log as it is.
+    if (statSync(file).size > maxBytes) {
+      tryFileLock(`${file}.lock`, () => {
+        if (statSync(file).size > maxBytes) renameSync(file, `${file}.1`);
+      }, { waitMs: 200 });
+    }
   } catch {
     // no log yet
   }
@@ -301,6 +349,7 @@ interface Tick {
   workspaces: { id: string; label: string }[];
   close: CloseDeps;
   park: ParkDeps;
+  hooks: Hooks;
 }
 
 // A room's live state between turns: nothing it does can be cut by closing it or stopping its Claude.
@@ -319,13 +368,14 @@ function deadLongEnough(rec: RoomRecord, a: RoomActivity, t: Tick): boolean {
 function notePending(rec: RoomRecord, reasons: string[], t: Tick): RoomRecord {
   if (reasons.length === 0) return rec.pending === undefined ? rec : patchRoom(rec, withoutPending, t.env);
   const since = rec.pending?.since ?? t.now;
-  return patchRoom(rec, (r) => ({ ...r, pending: { since, reasons } }), t.env);
+  return patchRoom(rec, (r) => (r.closedBy !== undefined ? r : { ...r, pending: { since, reasons } }), t.env);
 }
 
 // A running room with something pending stays open, parked on the couch; `since` is kept across ticks.
 function couch(rec: RoomRecord, t: Tick, notes: string[], reasons: string[]): JanitorDecision {
   const since = rec.couch?.since ?? t.now;
-  if (!t.dryRun) patchRoom(rec, (r) => ({ ...r, couch: { since, reasons } }), t.env);
+  // Never on a record closed since it was read.
+  if (!t.dryRun) patchRoom(rec, (r) => (r.closedBy !== undefined ? r : { ...r, couch: { since, reasons } }), t.env);
   return { room: rec.room, decision: 'couch', reasons: [...notes, ...reasons] };
 }
 
@@ -340,8 +390,10 @@ interface Seen {
   parkWhy?: string;
 }
 
+const SKIPPED: Record<CloseSkipped, string> = { busy: 'being closed', opening: 'being opened', closed: 'already closed', changed: 'the room changed' };
+
 // The pending check, then the close. `why` is the decision's reason and, with `minutes`, the minutes' too.
-// undefined: something is pending and the room gives up its seat instead of going to the couch.
+// undefined: something is pending and the room may give up its seat (its couch is written all the same).
 async function closeIfClean(s: Seen, t: Tick, why: string, opts: { waitDead: boolean; minutes?: string }): Promise<JanitorDecision | undefined> {
   const { env, dryRun } = t;
   const { running, activity, marker, notes } = s;
@@ -351,37 +403,40 @@ async function closeIfClean(s: Seen, t: Tick, why: string, opts: { waitDead: boo
   let ignoredGone: string[] = [];
   if (exists(rec.dir)) {
     ownedDir(rec, env);
-    const pending = await checkPending(rec, activity, env, { running });
-    // `/exit` would be typed after a draft the user left in the room's input.
-    const unsent = running ? await unsentInput(rec.herdr!.paneId) : undefined;
+    const pending = await checkPending(rec, activity, env, { running, fetch: !dryRun });
+    // `/exit` would be typed after a draft the user left in the room's input; a tab herdr lost its Claude in
+    // may still hold one.
+    const unsent = running ? await unsentInput(rec.herdr!.paneId) : await lostClaude(rec, env, t.workspaces);
     const reasons = unsent !== undefined ? [...pending.reasons, unsent] : pending.reasons;
     if (!running && !dryRun) rec = notePending(rec, reasons, t);
     if (reasons.length > 0) {
       if (!running) return out('skip', [...notes, ...reasons]);
-      if (s.parkWhy !== undefined) return undefined;
-      return couch(rec, t, [...notes], reasons);
+      const couched = couch(rec, t, [...notes], reasons);
+      return s.parkWhy !== undefined ? undefined : couched;
     }
     ignoredGone = pending.ignoredGone;
     if (!running && opts.waitDead && !deadLongEnough(rec, activity, t)) return out('skip', [...notes, 'not idle yet']);
   } else {
     gone(rec, env);
     if (running) throw new Error(`room ${room}: ${rec.dir} does not exist`);
+    const lost = await lostClaude(rec, env, t.workspaces);
+    if (lost !== undefined) return out('skip', [...notes, lost]);
     // A close that died half-way is past the point of no return; anything else waits like a live room.
     if (marker === undefined && opts.waitDead && !deadLongEnough(rec, activity, t)) return out('skip', [...notes, 'not idle yet']);
     if (opts.minutes === undefined) why = 'not running, its folder is already gone';
   }
   if (dryRun) return out('close', [...notes, why]);
 
-  let r: ClosedRoom | 'busy';
+  let r: ClosedRoom | CloseSkipped;
   try {
-    r = await closeWithMinutes(rec, 'janitor', env, { ...t.close, activity, ignoredGone, ...(opts.minutes !== undefined ? { why: opts.minutes } : {}) });
+    r = await closeWith(rec, 'janitor', env, { ...t.close, activity, ignoredGone, ...(opts.minutes !== undefined ? { why: opts.minutes } : {}) }, t.hooks);
   } catch (err) {
     if (err instanceof RoomBecameActive || (err instanceof CloseStopped && err.kind === 'active')) return out('skip', [...notes, 'room became active']);
-    if (err instanceof CloseStopped) return couch(rec, t, notes, [err.reason]);
+    if (err instanceof CloseStopped) return running ? couch(rec, t, notes, [err.reason]) : out('skip', [...notes, err.reason]);
     if (err instanceof ClosingTakenOver) return out('skip', [...notes, 'another closer took over']);
     throw err;
   }
-  if (r === 'busy') return out('skip', [...notes, 'being closed']);
+  if (typeof r === 'string') return out('skip', [...notes, SKIPPED[r]]);
   return out('close', [...notes, why, ...r.notes]);
 }
 
@@ -404,6 +459,7 @@ async function decide(rec: RoomRecord, t: Tick): Promise<JanitorDecision> {
   // The tick's list may be minutes old by now: decide on the record as it is on disk.
   const current = readRoom(room, env);
   if (current === undefined || current.closedBy !== undefined) return out('skip', ['already closed']);
+  const listed = rec;
   rec = current;
   const marker = readClosing(room, env);
   if (marker !== undefined && closerAlive(marker)) return out('skip', ['being closed']);
@@ -413,6 +469,8 @@ async function decide(rec: RoomRecord, t: Tick): Promise<JanitorDecision> {
   if (rec.herdr !== undefined && rec.herdr.session !== herdrSession(env)) return out('skip', ['could not check: the room belongs to another herdr session']);
   let live: RoomLiveness;
   try {
+    // A record that changed since the tick's list (a wake that ended meanwhile) may name a tab newer than the tabs listed.
+    if (rec.herdr?.workspaceId !== listed.herdr?.workspaceId) t.workspaces = await listWorkspaces();
     live = await probeRoom(rec, t.workspaces, env);
   } catch (err) {
     return out('skip', [`could not check: herdr: ${message(err)}`]);
@@ -457,18 +515,31 @@ async function decide(rec: RoomRecord, t: Tick): Promise<JanitorDecision> {
   if (d !== undefined) return d;
 
   if (parkWhy !== undefined) {
-    if (dryRun) return out('park', [...notes, `quiet, ${parkWhy}`]);
+    if (dryRun) {
+      const blocker = await parkBlocker(rec, activity);
+      return blocker !== undefined ? out('skip', [...notes, blocker]) : out('park', [...notes, `quiet, ${parkWhy}`]);
+    }
     const p = await park(rec, env, t.park);
     return out(p.result === 'parked' ? 'park' : 'skip', [...notes, p.result === 'parked' ? `quiet, ${parkWhy}` : p.reason]);
   }
   return out('skip', ['not idle', ...notes]);
 }
 
+// stopped: the lounge is stopping; no room is decided after it says so.
+type TickDeps = { now?: () => number; dryRun?: boolean; close?: CloseDeps; park?: ParkDeps; logMaxBytes?: number; stopped?: () => boolean };
+
 // One pass over every registered room that is not closed (`closedBy` unset). Never throws.
-export async function janitorTick(
-  env: NodeJS.ProcessEnv = process.env,
-  deps: { now?: () => number; dryRun?: boolean; close?: CloseDeps; park?: ParkDeps; logMaxBytes?: number } = {},
-): Promise<JanitorDecision[]> {
+export function janitorTick(env: NodeJS.ProcessEnv = process.env, deps: TickDeps = {}): Promise<JanitorDecision[]> {
+  return tick(env, deps, {});
+}
+
+// The janitor with a step between closing a room's tab and the rest of its close: for tests only.
+export const forTests = {
+  janitorTick: (env: NodeJS.ProcessEnv, deps: TickDeps & Hooks): Promise<JanitorDecision[]> => tick(env, deps, { afterTabClosed: deps.afterTabClosed }),
+  closeWithMinutes: (rec: RoomRecord, by: 'janitor' | 'user', env: NodeJS.ProcessEnv, deps: CloseDeps, hooks: Hooks) => closeWith(rec, by, env, deps, hooks),
+};
+
+async function tick(env: NodeJS.ProcessEnv, deps: TickDeps, hooks: Hooks): Promise<JanitorDecision[]> {
   const dryRun = deps.dryRun === true;
   const clock = deps.now ?? Date.now;
   const recs = listRooms(env).filter((r) => isRecord(r) && r.closedBy === undefined);
@@ -489,9 +560,10 @@ export async function janitorTick(
   } catch (err) {
     tickError = `could not read the settings: ${message(err)}`;
   }
-  const t: Tick = { env, now: clock(), idleMs, releaseMs, dryRun, workspaces, close: deps.close ?? {}, park: { releaseMs, now: clock, ...deps.park } };
+  const t: Tick = { env, now: clock(), idleMs, releaseMs, dryRun, workspaces, close: deps.close ?? {}, park: { releaseMs, now: clock, ...deps.park }, hooks };
   const decisions: JanitorDecision[] = [];
   for (const rec of recs) {
+    if (deps.stopped?.() === true) break;
     let d: JanitorDecision;
     if (tickError !== undefined) d = { room: rec.room, decision: tickError === herdrError ? 'skip' : 'error', reasons: [tickError] };
     else {

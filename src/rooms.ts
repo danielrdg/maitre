@@ -1,6 +1,7 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { readJson, writeJsonAtomic } from './config.js';
+import { withFileLock } from './file-lock.js';
 import { maitreHome, roomDir } from './paths.js';
 
 export interface RoomRecord {
@@ -39,8 +40,12 @@ export function readRoom(room: string, env: NodeJS.ProcessEnv = process.env): Ro
   return readJson(roomFile(room, env)) as RoomRecord | undefined;
 }
 
+// Every write of a record happens under its short lock, so a patch (a read, then a write) never drops a
+// field another process wrote in between (a close's closedBy, a reopen's new record).
+const underLock = <T>(room: string, env: NodeJS.ProcessEnv, fn: () => T): T => withFileLock(`${roomFile(room, env)}.lock`, fn);
+
 export function writeRoom(rec: RoomRecord, env: NodeJS.ProcessEnv = process.env): void {
-  writeJsonAtomic(roomFile(rec.room, env), rec);
+  underLock(rec.room, env, () => writeJsonAtomic(roomFile(rec.room, env), rec));
 }
 
 export function listRooms(env: NodeJS.ProcessEnv = process.env): RoomRecord[] {
@@ -73,11 +78,13 @@ export function sameRoom(a: RoomRecord | undefined, b: RoomRecord): a is RoomRec
 // Read-modify-write against the record on disk, so a close or reopen in between is never overwritten.
 // A patch that returns the record unchanged writes nothing.
 export function patchRoom(rec: RoomRecord, patch: (r: RoomRecord) => RoomRecord, env: NodeJS.ProcessEnv = process.env): RoomRecord {
-  const fresh = readRoom(rec.room, env);
-  if (!sameRoom(fresh, rec)) return rec;
-  const next = patch(fresh);
-  if (next !== fresh) writeRoom(next, env);
-  return next;
+  return underLock(rec.room, env, () => {
+    const fresh = readRoom(rec.room, env);
+    if (!sameRoom(fresh, rec)) return rec;
+    const next = patch(fresh);
+    if (next !== fresh) writeJsonAtomic(roomFile(rec.room, env), next);
+    return next;
+  });
 }
 
 export type Parked = { since: number; reasons: string[] };

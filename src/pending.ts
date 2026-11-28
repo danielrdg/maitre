@@ -1,11 +1,14 @@
 import { execFile } from 'node:child_process';
 import { existsSync, realpathSync, statSync } from 'node:fs';
+import { readJson, writeJsonAtomic } from './config.js';
+import { roomDir } from './paths.js';
 import { readdir } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import type { RoomActivity } from './activity.js';
 import { cleanEnv } from './env.js';
 import { readIndex } from './projects.js';
 import type { RoomRecord } from './rooms.js';
+import { UNSAFE_LINE } from './text.js';
 
 export interface Pending {
   reasons: string[];
@@ -48,6 +51,7 @@ export function run(cmd: string, args: string[], cwd: string, env: NodeJS.Proces
       if (err === null) return done({ code: 0, stdout, stderr });
       const e = err as NodeJS.ErrnoException & { code?: number | string; killed?: boolean };
       if (e.code === 'ENOENT') return fail(new CheckError(`${cmd} not found`));
+      if (e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return fail(new CheckError(`${cmd} ${args[0]}: output too large`));
       if (e.killed) return fail(new CheckError(`${cmd} ${args[0]} timed out`));
       if (typeof e.code === 'number') return done({ code: e.code, stdout, stderr });
       fail(new CheckError(`${cmd} ${args[0]}: ${firstLine(e.message)}`));
@@ -85,6 +89,19 @@ export function isGitHubUrl(url: string): boolean {
   return host?.toLowerCase() === 'github.com';
 }
 
+// The owner and name of a GitHub repository as a git remote URL names it; undefined for anything else.
+export function githubRepo(url: string): { owner: string; repo: string } | undefined {
+  if (!isGitHubUrl(url)) return undefined;
+  let path: string;
+  try {
+    path = /^[a-z][a-z0-9+.-]*:\/\//i.test(url) ? new URL(url).pathname : url.slice(url.indexOf(':') + 1);
+  } catch {
+    return undefined;
+  }
+  const m = /^\/?([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(path);
+  return m === null ? undefined : { owner: m[1]!, repo: m[2]! };
+}
+
 // `git status --porcelain -z`: `XY path` per entry; a rename or copy adds its old path as a second field.
 function changedPaths(out: string): string[] {
   const fields = out.split('\0');
@@ -102,10 +119,13 @@ const SHOWN_PATHS = 3;
 const PATH_MAX = 60;
 
 // Outside text (file names, PR check names, logins) reaches room list, the log and the minutes:
-// control characters (C0, C1) and bidi overrides are replaced, long text clipped.
+// unsafe characters (src/text.ts) are replaced, long text clipped.
 export function shownText(s: string, max: number): string {
-  const flat = s.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, '?');
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+  const flat = s.replace(UNSAFE_LINE, '?');
+  if (flat.length <= max) return flat;
+  // Never half a surrogate pair at the cut.
+  const cut = flat.slice(0, max - 1);
+  return `${/[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut}…`;
 }
 
 function shownPaths(paths: string[]): string {
@@ -114,7 +134,7 @@ function shownPaths(paths: string[]): string {
 }
 
 function isEnvFile(path: string): boolean {
-  const name = basename(path.replace(/\/$/, ''));
+  const name = basename(path.replace(/\/$/, '')).toLowerCase();
   return name === '.env' || name.startsWith('.env.');
 }
 
@@ -123,20 +143,63 @@ function inNodeModules(path: string): boolean {
   return path.split('/').includes('node_modules');
 }
 
+// A walk that meets more than this, or runs longer, says it could not check: a huge ignored folder (a .venv,
+// a target/) must not stall a janitor tick.
+const WALK_MAX_ENTRIES = 10_000;
+const WALK_MAX_MS = 5_000;
+
+type Walk = { entries: number; until: number; top: string };
+
 // git collapses a wholly ignored folder and its pathspec excludes still descend into node_modules,
 // so the .env files inside collapsed folders are found here, skipping node_modules at any depth.
-async function envFilesUnder(top: string, rel: string, out: string[]): Promise<void> {
+async function envFilesUnder(top: string, rel: string, out: string[], walk: Walk = { entries: 0, until: Date.now() + WALK_MAX_MS, top: rel }): Promise<void> {
   const entries = await readdir(join(top, rel), { withFileTypes: true });
+  walk.entries += entries.length;
+  if (walk.entries > WALK_MAX_ENTRIES || Date.now() > walk.until) throw new CheckError(`too many files under ${shownText(walk.top, PATH_MAX)} to look for .env files`);
   entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   for (const e of entries) {
     const path = `${rel}${e.name}`;
     if (isEnvFile(path)) out.push(e.isDirectory() ? `${path}/` : path);
-    if (e.isDirectory() && e.name !== 'node_modules') await envFilesUnder(top, `${path}/`, out);
+    if (e.isDirectory() && e.name !== 'node_modules') await envFilesUnder(top, `${path}/`, out, walk);
   }
 }
 
-async function listPrs(branch: string, cwd: string, env: NodeJS.ProcessEnv): Promise<Pr[]> {
-  const args = ['pr', 'list', '--head', branch, '--state', 'all', '--json', 'state,headRefOid,url'];
+// git can list a wholly ignored folder next to ignored paths inside it: only the outermost are kept.
+function outermost(paths: string[]): string[] {
+  const dirs = paths.filter((p) => p.endsWith('/'));
+  return paths.filter((p) => !dirs.some((d) => d !== p && p.startsWith(d)));
+}
+
+const HIDDEN_MAX = 100;
+
+// Files git is told not to look at (assume-unchanged, skip-worktree) whose content on disk is not what the
+// index holds: git status never shows these changes, and removing the worktree would lose them.
+async function hiddenChanges(cwd: string, gitOut: (args: string[]) => Promise<string>): Promise<string[]> {
+  const flagged = (await gitOut(['ls-files', '-v', '-z']))
+    .split('\0')
+    .filter((e) => e.length > 2 && (e[0] === 'S' || (e[0] !== e[0]!.toUpperCase())))
+    .map((e) => e.slice(2))
+    .filter((p) => existsSync(join(cwd, p)));
+  if (flagged.length === 0) return [];
+  if (flagged.length > HIDDEN_MAX) throw new CheckError(`too many files hidden from git status (${flagged.length})`);
+  const staged = new Map<string, string>();
+  for (const e of (await gitOut(['ls-files', '-s', '-z', '--', ...flagged])).split('\0')) {
+    const tab = e.indexOf('\t');
+    if (tab > 0) staged.set(e.slice(tab + 1), e.split(' ')[1] ?? '');
+  }
+  const disk = (await gitOut(['hash-object', '--', ...flagged])).trim().split('\n');
+  return flagged.filter((p, i) => disk[i] !== staged.get(p));
+}
+
+// A fetch never starts gc or maintenance in the user's repository.
+const NO_GC = ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false'];
+
+// --repo: gh would otherwise pick the repository from all remotes (a fork, upstream).
+type Repo = { owner: string; repo: string };
+
+// `headOwner`: keep only PRs whose head is in that owner (a PR into upstream from the user's fork).
+async function listPrs(branch: string, repo: Repo, cwd: string, env: NodeJS.ProcessEnv, headOwner?: string): Promise<Pr[]> {
+  const args = ['pr', 'list', '--head', branch, '--state', 'all', '--json', `state,headRefOid,url${headOwner !== undefined ? ',headRepositoryOwner' : ''}`, '--repo', `${repo.owner}/${repo.repo}`];
   const out = must('gh', args, await run('gh', args, cwd, env, NET_TIMEOUT_MS));
   let parsed: unknown;
   try {
@@ -147,7 +210,12 @@ async function listPrs(branch: string, cwd: string, env: NodeJS.ProcessEnv): Pro
   const isPr = (p: unknown): p is Pr =>
     typeof p === 'object' && p !== null && ['state', 'headRefOid', 'url'].every((k) => typeof (p as Record<string, unknown>)[k] === 'string');
   if (!Array.isArray(parsed) || !parsed.every(isPr)) throw new CheckError('gh pr list: unexpected output');
-  return parsed;
+  if (headOwner === undefined) return parsed;
+  const owner = (p: Pr): string => {
+    const o = (p as unknown as Record<string, unknown>).headRepositoryOwner;
+    return typeof o === 'object' && o !== null && typeof (o as Record<string, unknown>).login === 'string' ? ((o as Record<string, unknown>).login as string) : '';
+  };
+  return parsed.filter((p) => owner(p).toLowerCase() === headOwner.toLowerCase());
 }
 
 // Landed: a merged PR whose head is HEAD or contains it (a squash merge leaves HEAD off the base).
@@ -158,7 +226,7 @@ async function isLanded(prs: Pr[], head: string, git: Git): Promise<boolean> {
     if (pr.headRefOid === head) return true;
     if (!(await hasCommit(pr.headRefOid))) {
       try {
-        await git(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules', 'origin', pr.headRefOid], NET_TIMEOUT_MS);
+        await git([...NO_GC, 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules', 'origin', pr.headRefOid], NET_TIMEOUT_MS);
       } catch {
         // not fetchable: not landed
       }
@@ -190,11 +258,35 @@ async function onlyInWorktreeHistory(branch: string, git: Git): Promise<boolean>
   if (oids.size === 0) return false;
   const kept = must('git', ['reflog'], await git(['reflog', 'show', '--format=%H', '-n', String(BRANCH_REFLOG_LIMIT), `refs/heads/${branch}`]));
   const known = kept.split('\n').filter((o) => OID.test(o));
-  const out = must('git', ['rev-list'], await git(['rev-list', '--max-count=1', ...oids, '--not', '--all', ...known]));
+  // A commit whose object is gone (pruned) holds nothing to keep: --ignore-missing drops it, while any
+  // other error still fails the check. A branch named like an oid in a checkout line is dropped the same way.
+  const out = must('git', ['rev-list'], await git(['rev-list', '--ignore-missing', '--max-count=1', ...oids, '--not', '--all', ...known]));
   return out.trim() !== '';
 }
 
-async function checkCode(rec: RoomRecord, env: NodeJS.ProcessEnv, reasons: string[], ignoredGone: string[], local: boolean): Promise<void> {
+// The unpushed count's fetch of a room's branch runs at most this often (it writes refs/remotes/origin/<branch>
+// in the project's clone and goes over the network); in between, the remote-tracking ref as last fetched counts.
+const FETCH_EVERY_MS = 30 * 60_000;
+const fetchedFile = (rec: RoomRecord, env: NodeJS.ProcessEnv) => join(roomDir(rec.room, env), 'fetched.json');
+
+function fetchedLately(rec: RoomRecord, env: NodeJS.ProcessEnv): boolean {
+  try {
+    const at = (readJson(fetchedFile(rec, env)) as { at?: unknown } | undefined)?.at;
+    return typeof at === 'number' && Number.isFinite(at) && at <= Date.now() && Date.now() - at < FETCH_EVERY_MS;
+  } catch {
+    return false;
+  }
+}
+
+function noteFetch(rec: RoomRecord, env: NodeJS.ProcessEnv): void {
+  try {
+    writeJsonAtomic(fetchedFile(rec, env), { at: Date.now() });
+  } catch {
+    // not throttled then: the fetch itself is still bounded by its timeout
+  }
+}
+
+async function checkCode(rec: RoomRecord, env: NodeJS.ProcessEnv, reasons: string[], ignoredGone: string[], local: boolean, fetch: boolean): Promise<void> {
   const cwd = rec.dir;
   const tenv = toolEnv(env);
   const git: Git = (args, timeout = GIT_TIMEOUT_MS) => run('git', args, cwd, tenv, timeout);
@@ -211,7 +303,7 @@ async function checkCode(rec: RoomRecord, env: NodeJS.ProcessEnv, reasons: strin
 
   const branch = rec.branch;
   const usable = await attempt(async () => {
-    if (branch === undefined) throw new CheckError('room has no branch');
+    if (branch === undefined || branch === '') throw new CheckError('room has no branch');
     let isDir = false;
     try {
       isDir = statSync(cwd).isDirectory();
@@ -222,7 +314,7 @@ async function checkCode(rec: RoomRecord, env: NodeJS.ProcessEnv, reasons: strin
     const top = (await gitOut(['rev-parse', '--show-toplevel'])).trim();
     if (realpathSync(top) !== realpathSync(cwd)) throw new CheckError(`not the top of a git worktree: ${cwd}`);
   });
-  if (!usable || branch === undefined) return;
+  if (!usable || branch === undefined || branch === '') return;
 
   await attempt(async () => {
     const gitDir = resolve(cwd, (await gitOut(['rev-parse', '--git-dir'])).trim());
@@ -241,10 +333,16 @@ async function checkCode(rec: RoomRecord, env: NodeJS.ProcessEnv, reasons: strin
   });
 
   await attempt(async () => {
+    const hidden = await hiddenChanges(cwd, gitOut);
+    if (hidden.length > 0) reasons.push(`changes hidden from git status: ${shownPaths(hidden)}`);
+  });
+
+  await attempt(async () => {
     const out = await gitOut(['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory']);
-    const paths = out.split('\0').filter((p) => p !== '');
+    const all = out.split('\0').filter((p) => p !== '');
     const kept = (p: string): boolean => isEnvFile(p) && !inNodeModules(p);
-    const envs = paths.filter(kept);
+    const envs = all.filter(kept);
+    const paths = outermost(all);
     for (const p of paths) if (p.endsWith('/') && !isEnvFile(p) && !inNodeModules(p)) await envFilesUnder(cwd, p, envs);
     if (envs.length > 0) reasons.push(`untracked .env files: ${[...new Set(envs)].join(', ')}`);
     const gone = paths.filter((p) => !kept(p)).map((p) => {
@@ -282,7 +380,7 @@ async function checkCode(rec: RoomRecord, env: NodeJS.ProcessEnv, reasons: strin
 
   let head = '';
   let unpushed = 0;
-  const counted = await attempt(async () => {
+  const count = async (): Promise<void> => {
     head = (await gitOut(['rev-parse', 'HEAD'])).trim();
     const upstream = (await gitOut(['for-each-ref', '--format=%(upstream)', `refs/heads/${branch}`])).trim();
     // An upstream that is a local branch (branch.<name>.remote = .) says nothing about the remote.
@@ -300,22 +398,40 @@ async function checkCode(rec: RoomRecord, env: NodeJS.ProcessEnv, reasons: strin
       against = `refs/remotes/origin/${base}`;
       if (!(await refExists(against))) throw new CheckError(`origin/${base} not found`);
     }
-    const count = (await gitOut(['rev-list', '--count', `${against}..HEAD`])).trim();
-    if (!/^\d+$/.test(count)) throw new CheckError('git rev-list: unexpected count');
-    unpushed = Number(count);
+    const n = (await gitOut(['rev-list', '--count', `${against}..HEAD`])).trim();
+    if (!/^\d+$/.test(n)) throw new CheckError('git rev-list: unexpected count');
+    unpushed = Number(n);
+  };
+  const counted = await attempt(async () => {
+    await count();
+    if (unpushed === 0 || !fetch || fetchedLately(rec, env)) return;
+    // The remote refs are as last fetched: a push from another machine shows only after a fetch of the branch.
+    // Best effort, at most every FETCH_EVERY_MS per room; without it the count stands, the safe side.
+    noteFetch(rec, env);
+    const fetched = await git([...NO_GC, 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`], NET_TIMEOUT_MS).catch(() => undefined);
+    if (fetched?.code === 0) await count();
   });
   if (!counted) return;
 
-  let github = false;
+  let github: Repo | undefined;
+  let upstream: Repo | undefined;
   const remoteRead = await attempt(async () => {
-    github = isGitHubUrl((await gitOut(['remote', 'get-url', 'origin'])).trim());
+    github = githubRepo((await gitOut(['remote', 'get-url', 'origin'])).trim());
+    // A fork workflow: origin is the user's fork, its PRs go into upstream. No such remote: none.
+    const up = await git(['remote', 'get-url', 'upstream']);
+    upstream = up.code === 0 ? githubRepo(up.stdout.trim()) : undefined;
   });
 
   let prs: Pr[] = [];
   let ghFailure: string | undefined;
-  if (remoteRead && github) {
+  if (remoteRead && github !== undefined) {
+    const origin: Repo = github;
     try {
-      prs = await listPrs(branch, cwd, tenv);
+      prs = await listPrs(branch, origin, cwd, tenv);
+      if (upstream !== undefined && !(upstream.owner.toLowerCase() === origin.owner.toLowerCase() && upstream.repo.toLowerCase() === origin.repo.toLowerCase())) {
+        const seen = new Set(prs.map((p) => p.url));
+        prs.push(...(await listPrs(branch, upstream, cwd, tenv, origin.owner)).filter((p) => !seen.has(p.url)));
+      }
     } catch (err) {
       ghFailure = `could not check: ${message(err)}`;
     }
@@ -335,17 +451,18 @@ async function checkCode(rec: RoomRecord, env: NodeJS.ProcessEnv, reasons: strin
 // A wrong "nothing pending" deletes someone's work: every check that fails is itself a reason.
 // `local`: only what lives in the worktree folder (no remote refs, no gh), for the check right before removal.
 // `running: false`: the caller knows its Claude is gone, so maître's own starting note asks nothing.
+// `fetch: false` (a dry run): the branch is never fetched and nothing is written.
 export async function checkPending(
   rec: RoomRecord,
   activity: RoomActivity,
   env: NodeJS.ProcessEnv = process.env,
-  opts: { local?: boolean; running?: boolean } = {},
+  opts: { local?: boolean; running?: boolean; fetch?: boolean } = {},
 ): Promise<Pending> {
   const reasons: string[] = [];
   const ignoredGone: string[] = [];
   if (rec.kind !== 'scratch') {
     try {
-      await checkCode(rec, env, reasons, ignoredGone, opts.local === true);
+      await checkCode(rec, env, reasons, ignoredGone, opts.local === true, opts.fetch !== false);
     } catch (err) {
       reasons.push(`could not check: ${message(err)}`);
     }

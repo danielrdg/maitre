@@ -261,7 +261,10 @@ test('a tab create killed after herdr made the tab leaves no orphan: the bare ta
   const st = sb.state();
   st.workspaces.w9 = { label: 'scratch / x' };
   st.panes['w9:p1'] = { ws: 'w9', agent: 'idle' };
-  sb.setState(st);
+  // It shows up after the open looked for tabs an earlier open left (that look refuses a live one up front).
+  const staged = join(sb.dir, 'staged-state.json');
+  writeFileSync(staged, JSON.stringify(st));
+  process.env.FAKE_HERDR_THEN_workspace_list = JSON.stringify([staged, sb.stateFile]);
   process.env.FAKE_HERDR_HANG_AFTER_workspace_create = '1';
   process.env.MAITRE_HERDR_TIMEOUT_MS = '5000';
   await assert.rejects(openScratch(), /herdr workspace create: timed out/);

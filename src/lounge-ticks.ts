@@ -1,5 +1,5 @@
 import { releaseClosing, retryClosings, takeClosing } from './closing.js';
-import { settings } from './config.js';
+import { DEFAULTS, settings } from './config.js';
 import { doormanTick, type DoormanResult } from './doorman.js';
 import { ensureServer } from './herdr.js';
 import { janitorTick, type JanitorDecision } from './janitor.js';
@@ -45,7 +45,9 @@ export interface Ticks {
   roomUpdate(room: RoomState): void;
   // Resolves once no tick runs and none is due.
   idle(): Promise<void>;
-  stop(): void;
+  // No tick starts after it; resolves once the tick and the PR poll in flight are over (a janitor pass stops
+  // before its next room), so the process can exit without cutting a close.
+  stop(): Promise<void>;
 }
 
 export const DOORMAN_DEBOUNCE_MS = 2_000;
@@ -54,8 +56,8 @@ const WATCHDOG_MS = 10 * 60_000;
 // A room leaving, delivering (a PR) or parked on the couch stops counting as active. A closed room is
 // sent as exit too. Busy rooms working send many other events: none of them can free a seat.
 const FREES_SEAT = new Set(['exit', 'whisky', 'couch', 'parked']);
-const DEFAULT_INTERVAL_MS = 5 * 60_000;
-const DEFAULT_POLL_MS = 2 * 60_000;
+const DEFAULT_INTERVAL_MS = DEFAULTS.intervalMinutes * 60_000;
+const DEFAULT_POLL_MS = DEFAULTS.pollMinutes * 60_000;
 const PR_URL = /^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/pull\/\d+$/;
 // A GitHub login (a bot as `app/<name>` or `<name>[bot]`): nothing else from outside reaches a room.
 const LOGIN = /^(app\/)?[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(\[bot\])?$/;
@@ -82,8 +84,9 @@ async function liveness(rec: RoomRecord, env: NodeJS.ProcessEnv): Promise<RoomLi
 }
 
 export function startTicks(env: NodeJS.ProcessEnv = process.env, deps: TickDeps = {}): Ticks {
-  const janitor = deps.janitor ?? ((e) => janitorTick(e));
-  const doorman = deps.doorman ?? ((e) => doormanTick(e));
+  let stopped = false;
+  const janitor = deps.janitor ?? ((e) => janitorTick(e, { stopped: () => stopped }));
+  const doorman = deps.doorman ?? ((e) => doormanTick(e, { stopped: () => stopped }));
   const log = deps.log ?? ((l) => console.log(l));
   const warn = deps.warn ?? ((l) => console.error(l));
   const notify = deps.notify ?? ((m) => notifyDesktop(m, env));
@@ -102,8 +105,9 @@ export function startTicks(env: NodeJS.ProcessEnv = process.env, deps: TickDeps 
       pollMs ??= DEFAULT_POLL_MS;
     }
   }
-  intervalMs = Math.min(MAX_INTERVAL_MS, Math.max(MIN_INTERVAL_MS, intervalMs));
-  pollMs = Math.min(MAX_INTERVAL_MS, Math.max(MIN_INTERVAL_MS, pollMs));
+  const clamp = (ms: number) => Math.min(MAX_INTERVAL_MS, Math.max(MIN_INTERVAL_MS, ms));
+  intervalMs = clamp(intervalMs);
+  pollMs = clamp(pollMs);
 
   // What was last told per room, and the last failure of each: an unchanged couch or error is told once,
   // and how often it repeated is told when it changes.
@@ -165,7 +169,6 @@ export function startTicks(env: NodeJS.ProcessEnv = process.env, deps: TickDeps 
 
   let running: Promise<void> | undefined;
   let due: 'full' | 'doorman' | undefined;
-  let stopped = false;
 
   // In-flight guard: a tick asked for while one runs is folded into one run after it.
   const run = (kind: 'full' | 'doorman'): void => {
@@ -187,7 +190,8 @@ export function startTicks(env: NodeJS.ProcessEnv = process.env, deps: TickDeps 
         warn(`maitre: janitor: ${message(err)}`);
       }
       if (kind === 'full') await janitorPass();
-      await doormanPass();
+      // Once stop has begun, no room is opened.
+      if (!stopped) await doormanPass();
       try {
         deps.after?.();
       } catch {
@@ -330,9 +334,33 @@ export function startTicks(env: NodeJS.ProcessEnv = process.env, deps: TickDeps 
       });
   };
 
-  const timer = setInterval(() => run('full'), intervalMs);
+  // The settings are read again on every timer: a changed janitor.intervalMinutes or pr.pollMinutes takes
+  // effect from that timer's next tick on, without a restart. A config that cannot be read keeps the current one.
+  const fresh = (pick: (s: ReturnType<typeof settings>) => number): number | undefined => {
+    try {
+      return clamp(pick(settings(env)));
+    } catch {
+      return undefined;
+    }
+  };
+  // Each timer schedules the next one from the settings as they are then.
+  const onTimer = () => {
+    const i = stopped || deps.intervalMs !== undefined ? undefined : fresh((s) => s.intervalMs);
+    if (i !== undefined) intervalMs = i;
+    timer = setTimeout(onTimer, intervalMs);
+    timer.unref();
+    run('full');
+  };
+  const onPollTimer = () => {
+    const p = stopped || deps.pollMs !== undefined ? undefined : fresh((s) => s.pollMs);
+    if (p !== undefined) pollMs = p;
+    prTimer = setTimeout(onPollTimer, pollMs);
+    prTimer.unref();
+    poll();
+  };
+  let timer = setTimeout(onTimer, intervalMs);
   timer.unref();
-  const prTimer = setInterval(poll, pollMs);
+  let prTimer = setTimeout(onPollTimer, pollMs);
   prTimer.unref();
   let debounce: NodeJS.Timeout | undefined;
   const roomChanged = () => {
@@ -382,14 +410,18 @@ export function startTicks(env: NodeJS.ProcessEnv = process.env, deps: TickDeps 
         if (running !== undefined) await running;
       }
     },
-    stop() {
+    async stop() {
       stopped = true;
       due = undefined;
-      clearInterval(timer);
-      clearInterval(prTimer);
+      clearTimeout(timer);
+      clearTimeout(prTimer);
       clearInterval(seats);
       clearTimeout(debounce);
       debounce = undefined;
+      while (running !== undefined || polling !== undefined) {
+        if (polling !== undefined) await polling;
+        if (running !== undefined) await running;
+      }
     },
   };
 }

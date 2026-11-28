@@ -5,8 +5,11 @@
 // FAKE_GH_FAIL: a file of lines; a call with an argument equal to one of them fails (exit 1).
 // FAKE_GH_DATA: a JSON file { view: { <url>: pr }, list: { <branch>: [pr] } } read on every call:
 //   `pr view <url>` prints view[url] (unknown url: exit 1), `pr list --head <b>` prints list[b] (default [],
-//   cut to --limit). Without it, FAKE_GH_PRS (a JSON file, `[]` when absent) is printed as the answer.
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+//   cut to --limit); with `--repo <r>` and a `repos: { <r>: { <branch>: [pr] } }` entry, that repo's lists.
+//   Without it, FAKE_GH_PRS (a JSON file, `[]` when absent) is printed as the answer, or, with
+//   FAKE_GH_PRS_BY_REPO (a JSON file { <repo>: [pr] }) and `--repo <r>`, that repo's list.
+// FAKE_GH_THEN='["from","to"]': after the call, renames from to to (once: from is gone).
+import { appendFileSync, existsSync, readFileSync, renameSync } from 'node:fs';
 
 const argv = process.argv.slice(2);
 const log = process.env.FAKE_GH_LOG;
@@ -39,7 +42,9 @@ if (dataFile) {
     if (pr === undefined) fail(`no pull requests found for ${argv[2]}`);
     process.stdout.write(JSON.stringify(pr));
   } else if (argv[0] === 'pr' && argv[1] === 'list') {
-    const all = data.list?.[flag('--head')] ?? [];
+    const repo = flag('--repo');
+    const lists = repo !== undefined && data.repos?.[repo] !== undefined ? data.repos[repo] : data.list;
+    const all = lists?.[flag('--head')] ?? [];
     const limit = flag('--limit');
     process.stdout.write(JSON.stringify(limit === undefined ? all : all.slice(0, Number(limit))));
   } else {
@@ -48,5 +53,16 @@ if (dataFile) {
   process.exit(0);
 }
 
+const then = process.env.FAKE_GH_THEN;
+if (then) {
+  const [from, to] = JSON.parse(then);
+  if (existsSync(from)) renameSync(from, to);
+}
+const byRepo = process.env.FAKE_GH_PRS_BY_REPO;
+const repoFlag = argv.indexOf('--repo') === -1 ? undefined : argv[argv.indexOf('--repo') + 1];
+if (byRepo && existsSync(byRepo) && repoFlag !== undefined) {
+  process.stdout.write(JSON.stringify(JSON.parse(readFileSync(byRepo, 'utf8'))[repoFlag] ?? []));
+  process.exit(0);
+}
 const prs = process.env.FAKE_GH_PRS;
 process.stdout.write(prs && existsSync(prs) ? readFileSync(prs, 'utf8') : '[]');

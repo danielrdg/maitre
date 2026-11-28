@@ -389,6 +389,31 @@ test("maitre: a room left still starting in its tab (its wake's starting note is
   assert.equal(readRoom('slow')!.closedAt, undefined);
 });
 
+test('maitre: a room woken while the sweep runs (its record changed after the tabs were listed) is not stamped not running', async () => {
+  const rec = (room: string, workspaceId: string): RoomRecord => ({
+    room, kind: 'scratch', dir: join(sb.home, 'scratch', room), model: 'sonnet', taskType: 'simple',
+    herdr: { session: 'maitre-test', workspaceId, paneId: `${workspaceId}:p1` }, createdAt: 1, resumable: true,
+  });
+  writeRoom(rec('live', 'w1'));
+  writeRoom({ ...rec('woke', 'w2'), seat: { releasedAt: 1, session: 's1' } });
+  const base = { next: 9, workspaces: { w1: { label: 'scratch / live' } }, panes: { 'w1:p1': { ws: 'w1', agent: 'working' } } };
+  sb.setState(base);
+  // What a wake that finishes right after the sweep listed the tabs leaves: its new tab, and the record naming it.
+  const woken = join(sb.dir, 'woken-state.json');
+  const wokenRec = join(sb.dir, 'woken-room.json');
+  const record = join(roomDir('woke'), 'room.json');
+  writeFileSync(woken, JSON.stringify({ ...base, workspaces: { ...base.workspaces, w5: { label: 'scratch / woke' } }, panes: { ...base.panes, 'w5:p1': { ws: 'w5', agent: 'idle' } } }));
+  writeFileSync(wokenRec, JSON.stringify(rec('woke', 'w5')));
+  // The start lists the tabs once, and the sweep once more.
+  process.env.FAKE_HERDR_THEN_workspace_list = JSON.stringify({ after: 2, moves: [[woken, sb.stateFile], [wokenRec, record]] });
+  const r = await startMaitre(process.env, { ...FAST, open: () => {} });
+  assert.equal(existsSync(woken), false, 'the wake landed during the sweep');
+  assert.deepEqual(r.closedRooms, []);
+  assert.equal(readRoom('woke')!.herdr!.workspaceId, 'w5');
+  assert.equal(readRoom('woke')!.closedAt, undefined, 'not stamped not running');
+  assert.equal(sb.state().workspaces.w5?.label, 'scratch / woke');
+});
+
 test('maitre: the reception trust dialog is answered on screen', async () => {
   process.env.FAKE_HERDR_ON_RUN = 'trust';
   const r = await startMaitre(process.env, { ...FAST, open: () => {} });

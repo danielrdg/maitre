@@ -9,6 +9,7 @@ import { LiveRooms, liveRoutes } from '../src/live-api.js';
 import {
   BusyError,
   RECEPTION_TIMEOUT_MS,
+  RECEPTION_WAIT_MS,
   ReceptionQueue,
   TimeoutError,
   displayEnv,
@@ -22,7 +23,7 @@ import { startLoungeServer, type LoungeServer } from '../src/lounge-server.js';
 import { writeIndex, type Project } from '../src/projects.js';
 import { closeRoom } from '../src/janitor.js';
 import { openRoom } from '../src/room-open.js';
-import { readRoom } from '../src/rooms.js';
+import { readRoom, writeRoom } from '../src/rooms.js';
 import { claimLounge } from '../src/lounge-file.js';
 import { QUEUE_HINT } from '../src/router.js';
 import { WORST_DELIVERY_MS } from '../src/room-open.js';
@@ -172,7 +173,8 @@ const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 test("the lounge reception's ceiling covers a follow-up's worst case (route, wake, delivery) with a margin", () => {
   const worst = ROUTER_TIMEOUT_MS + WORST_WAKE_MS + WORST_DELIVERY_MS;
   assert.ok(RECEPTION_TIMEOUT_MS >= worst + 30_000, `${RECEPTION_TIMEOUT_MS} < ${worst} + 30 s`);
-  assert.ok(RECEPTION_TIMEOUT_MS < 300_000);
+  assert.ok(RECEPTION_WAIT_MS > 0);
+  assert.ok(RECEPTION_TIMEOUT_MS + RECEPTION_WAIT_MS <= 300_000, 'no longer than the terminal reception waits on a dispatch');
 });
 
 test('ReceptionQueue runs one job at a time, lets 3 wait and refuses the next with BusyError', async () => {
@@ -224,8 +226,8 @@ test('ReceptionQueue: a timed-out job rejects with TimeoutError but keeps the sl
   assert.deepEqual(order, ['start a', 'end a', 'start b']);
 });
 
-test('ReceptionQueue: a waiting job whose ceiling passes is dropped, never run, and frees its waiting place', async () => {
-  const q = new ReceptionQueue({ timeoutMs: 100 });
+test('ReceptionQueue: a job that waits in the queue past its wait cap is refused as busy, never run, and frees its waiting place', async () => {
+  const q = new ReceptionQueue({ timeoutMs: 10_000, waitMs: 100 });
   const g = gate();
   const ran: string[] = [];
   const a = q.run(async () => {
@@ -233,12 +235,38 @@ test('ReceptionQueue: a waiting job whose ceiling passes is dropped, never run, 
     await g.wait;
   });
   const b = q.run(async () => void ran.push('b'));
-  await assert.rejects(a, TimeoutError);
-  await assert.rejects(b, TimeoutError);
+  await assert.rejects(b, BusyError);
+  assert.equal(q.waitingCount, 0);
   const later = ['c', 'd', 'e'].map((n) => q.run(async () => void ran.push(n)));
   g.open();
+  await a;
   for (const r of await Promise.allSettled(later)) assert.equal(r.status, 'fulfilled');
   assert.deepEqual(ran, ['a', 'c', 'd', 'e']);
+});
+
+test('ReceptionQueue: the ceiling counts from when a job starts, not from when it joined the queue', async () => {
+  const q = new ReceptionQueue({ timeoutMs: 1_000, waitMs: 5_000 });
+  const slow = (name: string) => async () => {
+    await tick(700);
+    return name;
+  };
+  const [a, b] = [q.run(slow('a')), q.run(slow('b'))];
+  assert.equal(await a, 'a');
+  assert.equal(await b, 'b', 'b waited 700 ms and ran 700 ms: over 1 s in all, within its own ceiling');
+});
+
+test('ReceptionQueue: a job that started inside its wait cap is never refused as busy afterwards', async () => {
+  const q = new ReceptionQueue({ timeoutMs: 10_000, waitMs: 100 });
+  const a = q.run(async () => {
+    await tick(50);
+    return 'a';
+  });
+  const b = q.run(async () => {
+    await tick(300);
+    return 'b';
+  });
+  assert.equal(await a, 'a');
+  assert.equal(await b, 'b', 'b started at 50 ms and was still running when its wait cap passed');
 });
 
 // --- /api/reception
@@ -256,6 +284,19 @@ test('reception: a request is stored verbatim, routed and dispatched to a new sc
   assert.equal(readFileSync(join(requestsDir(), '1.md'), 'utf8'), 'what is a monad?\n');
   assert.equal(readRoom('monads')?.kind, 'scratch');
   assert.equal(herdrCalls('workspace', 'create').length, 1);
+});
+
+test('reception: a follow-up whose wake fails (its new tab closed by hand) answers 200, says the request was not sent, and needs you', async () => {
+  writeIndex([]);
+  await openRoom({ name: 'monads', model: 'sonnet', taskType: 'change', brief: 'x' }, process.env, FAST);
+  writeRoom({ ...readRoom('monads')!, seat: { releasedAt: Date.now(), session: 's1' }, closedAt: Date.now() });
+  sb.setState({ ...sb.state(), workspaces: {}, panes: {} });
+  routerSays({ project: null, room: { kind: 'existing', name: 'monads' }, taskType: 'change', hasCode: false, confidence: 0.9 });
+  process.env.FAKE_HERDR_RESUME = 'closed';
+  const port = await start();
+  const res = await post(port, { text: 'and the functor laws?' });
+  assert.equal(res.status, 200, res.body);
+  assert.deepEqual(res.json, { kind: 'dispatched', id: '1', room: 'monads', lines: ['monads: you closed its tab; wake it again when you want', 'the request was not sent'], needsYou: true });
 });
 
 test('reception: past capacity the new room is queued; with the lounge live there is no hint', async () => {
@@ -486,7 +527,7 @@ test('reception: past the ceiling the caller gets 504, and the next request runs
   await tick(50);
   assert.deepEqual(order, ['start 1']);
   g.open();
-  // The next request's own ceiling runs while it waits, so it is released well inside it.
+  // The next request waits for the slot within its wait cap, and its own ceiling starts when it runs.
   const res = await next;
   assert.equal(res.status, 200, res.body);
   assert.deepEqual(order, ['start 1', 'end 1', 'start 2', 'end 2']);

@@ -215,7 +215,7 @@ export function notifyDesktop(message: string, env: NodeJS.ProcessEnv = process.
   const bin = findBinary('notify-send', env);
   if (bin === undefined) return;
   try {
-    spawnSync(bin, ['maître', message], { env, stdio: 'ignore', timeout: TOOL_MS });
+    spawnSync(bin, ['maître', message], { env: cleanEnv(env), stdio: 'ignore', timeout: TOOL_MS });
   } catch {
     // A notification is best effort.
   }

@@ -64,7 +64,7 @@ export async function park(rec: RoomRecord, env: NodeJS.ProcessEnv = process.env
     const unsent = await unsentInput(current.herdr!.paneId);
     if (unsent !== undefined) return skip(unsent);
 
-    const mine = { releasedAt: Date.now(), session: activity.session };
+    const mine = { releasedAt: Date.now(), session: activity.session, ...(current.run !== undefined ? { run: current.run } : {}) };
     const was = current.seat;
     const next = patchRoom(current, (r) => (r.seat?.releasedAt !== was?.releasedAt || r.seat?.session !== was?.session ? r : { ...r, seat: mine }), env);
     if (next.seat !== mine) return skip('the room changed');

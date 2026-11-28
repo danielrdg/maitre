@@ -11,7 +11,7 @@ import { hudModel, renderHud, renderHelp } from './hud.js';
 import { STEPS } from './demo.js';
 import { STEP, makeRngs, createWorld, stepWorld, ringNow, demoActions } from './sim.js';
 import { createLiveCast, createBell, titleFor, LiveSource } from './live.js';
-import { receptionSession, openTerminal, wakeRoom, loungePlacement } from './reception.js';
+import { receptionSession, openTerminal, wakeRoom, oneWakeAtATime, loungePlacement } from './reception.js';
 
 // ?capture=1 is for README art: no overlays, no sound, and a clock that counts
 // simulation steps instead of wall time. A script that sets window.__maitreManualClock
@@ -243,13 +243,12 @@ export function boot(doc = document) {
   // Kept here, not in the panel DOM: a room event re-renders the panel and re-enables its button.
   let termError = null, termBusy = false;
   // A wake takes up to a minute: who is being woken, and the last answer, outlive a re-render too.
-  let waking = null, woke = null;
+  const wakes = oneWakeAtATime(a => wakeRoom(a.id, undefined, lang));
+  let woke = null;
   function closePanel() { panel.style.display = 'none'; panelFor = null; termError = null; woke = null; }
   async function wakeFor(a) {
-    if (waking) return null;
-    waking = a;
-    let r;
-    try { r = await wakeRoom(a.id, undefined, lang); } finally { waking = null; }
+    const r = await wakes.run(a, lang);
+    if (r === null) return null;
     woke = { agent: a, result: r };
     if (panelFor === a) openPanel(a);
     return r;
@@ -269,7 +268,7 @@ export function boot(doc = document) {
       lang, portrait: portrait(a, makeCanvas), onClose: closePanel,
       ...(live ? {
         onTerminal: () => terminalFor(a), terminalError: termError?.agent === a ? termError.message : null,
-        onWake: () => wakeFor(a), waking: waking === a, wakeResult: woke?.agent === a ? woke.result : null,
+        onWake: () => wakeFor(a), waking: wakes.waking === a, wakeResult: woke?.agent === a ? woke.result : null,
       } : {}),
     });
     panel.style.display = 'block';

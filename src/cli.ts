@@ -14,7 +14,7 @@ import { loadConfig, saveConfig } from './config.js';
 import { maitreHome, roomSlug } from './paths.js';
 import { readIndex, scanProjects, writeIndex } from './projects.js';
 import { closeRoom, formatDecisions, janitorTick } from './janitor.js';
-import { readFailed, readQueue, reserve } from './queue.js';
+import { reserve } from './queue.js';
 import { deliverToRoom, describeDelivery, describeOpen, listRoomRows, openRoom, type RoomRow } from './room-open.js';
 import { attach, runReception, startMaitre } from './reception.js';
 import { parseSetupArgs, runSetup, type SetupOptions } from './setup.js';
@@ -288,15 +288,6 @@ async function openDoor(cmd: 'open' | 'prompt', env: NodeJS.ProcessEnv = process
   return 1;
 }
 
-// Only decides whether to say the minutes are being written; closeRoom reads the queue again.
-function waiting(room: string): boolean {
-  try {
-    return readQueue().some((e) => e.room === room) || readFailed().some((e) => e.room === room);
-  } catch {
-    return false;
-  }
-}
-
 async function roomCommand(args: Extract<CliArgs, { cmd: 'room-open' | 'room-send' | 'room-list' | 'room-close' | 'room-wake' }>): Promise<void> {
   if (args.cmd === 'room-open') {
     let brief = args.brief;
@@ -328,8 +319,7 @@ async function roomCommand(args: Extract<CliArgs, { cmd: 'room-open' | 'room-sen
     const rows = await listRoomRows(process.env, { warn: (w) => console.error(`maitre: warning: ${w}`) });
     console.log(rows.length === 0 ? 'no rooms' : formatRows(rows).join('\n'));
   } else {
-    if (!waiting(roomSlug(args.room))) console.log('writing the minutes…');
-    const rec = await closeRoom(args.room);
+    const rec = await closeRoom(args.room, process.env, { writing: () => console.log('writing the minutes…') });
     if ('dequeued' in rec) console.log(rec.dequeued === 'queue' ? `removed ${rec.room} from the queue` : `removed ${rec.room} from the failed queue`);
     else {
       console.log(`closed ${rec.room}`);

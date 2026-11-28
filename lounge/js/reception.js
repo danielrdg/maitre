@@ -100,6 +100,21 @@ export async function wakeRoom(room, fetchImpl = fetch, lang = 'en') {
   return { ok: false, message };
 }
 
+// One wake at a time. run(who) resolves to the wake's answer; to null for the room already waking (its
+// button is busy); and, while another room wakes, to an answer that says so.
+export function oneWakeAtATime(wake) {
+  let current = null;
+  return {
+    get waking() { return current; },
+    async run(who, lang = 'en') {
+      if (current === who) return null;
+      if (current !== null) return { ok: false, message: t('panel.otherWaking', lang) };
+      current = who;
+      try { return await wake(who); } finally { current = null; }
+    },
+  };
+}
+
 // Chrome ignores size and position flags when the profile already runs, so the page places itself.
 export function promptPlacement(screen) {
   const left = screen.availLeft ?? 0, top = screen.availTop ?? 0;

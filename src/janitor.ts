@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { isIdle, isQuiet, roomActivity, type RoomActivity } from './activity.js';
-import { closerAlive, noteClosing, ownsClosing, readClosing, releaseClosing, takeClosing, type ClosingMarker } from './closing.js';
+import { closerAlive, leftMinutes, noteClosing, ownsClosing, readClosing, releaseClosing, takeClosing, type ClosingMarker } from './closing.js';
 import { settings } from './config.js';
 import { cleanEnv } from './env.js';
 import { ensureServer, herdrSession, listWorkspaces } from './herdr.js';
@@ -143,9 +143,9 @@ export async function closeWithMinutes(
 
     // A close that died after its tab was closed (folder gone, or marker left with pid 0) keeps its minutes,
     // unless the room was opened again since: those minutes are of the earlier opening.
-    const prev = held.previous;
-    if (prev?.minutes !== undefined && prev.createdAt === rec.createdAt && (!dirThere || prev.pid === 0) && existsSync(prev.minutes)) {
-      minutes = prev.minutes;
+    const left = leftMinutes(held.previous, rec.createdAt, dirThere);
+    if (left !== undefined) {
+      minutes = left;
       reused = true;
     } else {
       let looseEnds = deps.looseEnds;
@@ -228,12 +228,13 @@ function gone(rec: RoomRecord, env: NodeJS.ProcessEnv): void {
 
 export type Dequeued = { room: string; dequeued: 'queue' | 'failed' };
 
-// `maitre room close`: minutes and the tab, the folder stays. A room still waiting for a seat (or one
+// `maitre room close`: minutes and the tab, the folder stays. `writing` runs once the input check passed,
+// right before the minutes are written. A room still waiting for a seat (or one
 // that failed to open from the queue) only leaves the queue: there is nothing else to close.
 export async function closeRoom(
   room: string,
   env: NodeJS.ProcessEnv = process.env,
-  opts: { exitTimeoutMs?: number } = {},
+  opts: { exitTimeoutMs?: number; writing?: () => void } = {},
 ): Promise<(RoomRecord & { minutes?: string }) | Dequeued> {
   const slug = roomSlug(room);
   const dequeued = await removeQueued(slug, env);
@@ -248,6 +249,7 @@ export async function closeRoom(
   }
   // Before the minutes: text in the room's input would stop the close once they are written.
   await checkInput(rec, env);
+  opts.writing?.();
   const r = await closeWithMinutes(rec, 'user', env, { exitTimeoutMs: opts.exitTimeoutMs });
   if (r === 'busy') {
     const now = readRoom(slug, env);

@@ -16,10 +16,13 @@ export const HOOK_EVENTS = [
 
 export type HookEvent = (typeof HOOK_EVENTS)[number];
 
+// A wake's mark on a resumed Claude herdr does not show yet: only the still-starting guard reads it.
+export const UNSEEN_EVENT = 'MaitreUnseen';
+
 // Claude Code's own reminders (the idle one comes about a minute after Stop) are not the room doing
-// anything: they never reset the idle clock, make a couch stale or abort a close.
+// anything: they never reset the idle clock, make a couch stale or abort a close. Nor is maître's unseen mark.
 export function countsAsActivity(line: Pick<HookLine, 'event'>): boolean {
-  return line.event !== 'Notification';
+  return line.event !== 'Notification' && line.event !== UNSEEN_EVENT;
 }
 
 export interface HookLine {
@@ -53,7 +56,8 @@ export interface HookLine {
   starting?: boolean;
   // On a starting note: the session the start resumes (a wake); none for a fresh open.
   resumes?: string;
-  // On MaitreExit: the id of the `maitre room run` that ended (`--run`), when it was given one.
+  // On MaitreExit: the id of the `maitre room run` that ended (`--run`), when it was given one. On a
+  // wake's starting note: the run it started, whose exit line alone ends the start.
   run?: string;
   text?: string;
   options?: string[];

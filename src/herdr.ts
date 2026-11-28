@@ -182,6 +182,33 @@ export async function createWorkspace(opts: {
   return { workspaceId, paneId };
 }
 
+// A create killed after herdr made the tab (its timeout) leaves a tab whose id never came back. It is found
+// by its label and closed, only while none of its panes holds an agent: a Claude's tab is never touched.
+export async function createLabeledWorkspace(opts: { cwd: string; label: string; env: Record<string, string> }): Promise<{ workspaceId: string; paneId: string }> {
+  try {
+    return await createWorkspace(opts);
+  } catch (err) {
+    try {
+      await closeBareTabs(opts.label);
+    } catch {
+      // the create's error says more
+    }
+    throw err;
+  }
+}
+
+async function closeBareTabs(label: string): Promise<void> {
+  for (const w of await listWorkspaces()) {
+    if (w.label !== label) continue;
+    let bare = true;
+    for (const pane of await listPanes(w.id)) {
+      const info = await agentInfo(pane);
+      if (info.agent !== undefined || (info.status !== 'unknown' && info.status !== 'gone')) bare = false;
+    }
+    if (bare) await closeWorkspace(w.id);
+  }
+}
+
 export async function runInPane(paneId: string, command: string): Promise<void> {
   await herdr(['pane', 'run', paneId, command]);
 }

@@ -366,6 +366,64 @@ test('a dispatch that wakes a parked room and leaves the request typed there nee
   assert.deepEqual(d, { room: 'nf-bug', lines: ['woke nf-bug: resumed its session', "not confirmed: the request may be typed in nf-bug's input — check its tab and press Enter there"], needsYou: true });
 });
 
+test('a dispatch that wakes a parked room keeps the wake line when the delivery after it throws, and needs you', async () => {
+  writeIndex(PROJECTS);
+  await openRoom({ name: 'nf-bug', project: undefined, model: 'sonnet', taskType: 'change', brief: 'fix the NF bug' }, process.env, FAST);
+  writeRoom({ ...readRoom('nf-bug')!, seat: { releasedAt: Date.now(), session: 's1' }, closedAt: Date.now() });
+  sb.setState({ ...sb.state(), workspaces: {}, panes: {} });
+  writeRequest(13, 'also handle the cancelled notes');
+  mkdirSync(join(sb.home, 'reception', 'routes'), { recursive: true });
+  writeFileSync(routeFile(13), JSON.stringify({ route: { project: null, room: { kind: 'existing', name: 'nf-bug' }, taskType: 'change', model: 'sonnet', hasCode: true, confidence: 0.7 }, requestIds: ['13'] }));
+  process.env.FAKE_HERDR_FAIL_agent_prompt = 'boom';
+  const d = await dispatchRouteDetailed('13', process.env, { confirmMs: 300 });
+  assert.equal(d.needsYou, true);
+  assert.equal(d.lines[0], 'woke nf-bug: resumed its session');
+  assert.match(d.lines[1]!, /^the request was not sent: .*boom/);
+  assert.equal(d.lines.length, 2);
+});
+
+function parkedFollowUp(id: number): void {
+  writeRoom({ ...readRoom('nf-bug')!, seat: { releasedAt: Date.now(), session: 's1' }, closedAt: Date.now() });
+  sb.setState({ ...sb.state(), workspaces: {}, panes: {} });
+  writeRequest(id, 'also handle the cancelled notes');
+  mkdirSync(join(sb.home, 'reception', 'routes'), { recursive: true });
+  writeFileSync(routeFile(id), JSON.stringify({ route: { project: null, room: { kind: 'existing', name: 'nf-bug' }, taskType: 'change', model: 'sonnet', hasCode: true, confidence: 0.7 }, requestIds: [String(id)] }));
+}
+
+test('a follow-up that wakes a room herdr then calls working watches its box: text that shows up late needs you, and gets no Enter', async () => {
+  writeIndex(PROJECTS);
+  await openRoom({ name: 'nf-bug', project: undefined, model: 'sonnet', taskType: 'change', brief: 'fix the NF bug' }, process.env, FAST);
+  parkedFollowUp(14);
+  process.env.FAKE_HERDR_RESUME = 'start-working';
+  process.env.FAKE_HERDR_PROMPT_HOOK = 'typed-late';
+  const d = await dispatchRouteDetailed('14', process.env, { confirmMs: 300 });
+  assert.deepEqual(d, { room: 'nf-bug', lines: ['woke nf-bug: resumed its session', "not confirmed: the request may be typed in nf-bug's input — check its tab and press Enter there"], needsYou: true });
+  assert.equal(sb.calls().filter((c) => c[0] === 'agent' && c[1] === 'send-keys').length, 0);
+});
+
+test('a follow-up whose wake fails (its new tab closed by hand) says the request was not sent, and needs you', async () => {
+  writeIndex(PROJECTS);
+  await openRoom({ name: 'nf-bug', project: undefined, model: 'sonnet', taskType: 'change', brief: 'fix the NF bug' }, process.env, FAST);
+  parkedFollowUp(15);
+  process.env.FAKE_HERDR_RESUME = 'closed';
+  const d = await dispatchRouteDetailed('15', process.env, { confirmMs: 300 });
+  assert.deepEqual(d, { room: 'nf-bug', lines: ['nf-bug: you closed its tab; wake it again when you want', 'the request was not sent'], needsYou: true });
+  assert.equal(sb.calls().filter((c) => c[0] === 'agent' && c[1] === 'prompt').length, 0);
+});
+
+test('route does not offer a room whose last close did not finish', async () => {
+  writeIndex(PROJECTS);
+  await openRoom({ name: 'nf-bug', project: undefined, model: 'sonnet', taskType: 'change', brief: 'fix the NF bug' }, process.env, FAST);
+  const rec = readRoom('nf-bug')!;
+  writeRoom({ ...rec, seat: { releasedAt: Date.now(), session: 's1' }, closedAt: Date.now() });
+  sb.setState({ ...sb.state(), workspaces: {}, panes: {} });
+  const minutes = join(sb.dir, 'old-minutes.md');
+  writeFileSync(minutes, '# minutes\n');
+  writeFileSync(join(roomDir('nf-bug'), 'closing'), JSON.stringify({ pid: 0, token: 't', minutes, createdAt: rec.createdAt }));
+  await route('more work', reply(envelope(NEW_ROOM)));
+  assert.doesNotMatch(claudeCalls().at(-1)!.argv[1]!, /^- nf-bug \|/m);
+});
+
 test('route lists a room left still starting in its tab as starting, not parked', async () => {
   writeIndex(PROJECTS);
   await openRoom({ name: 'nf-bug', project: undefined, model: 'sonnet', taskType: 'change', brief: 'fix the NF bug' }, process.env, FAST);

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RoomActivity } from '../src/activity.js';
-import { checkPending, isGitHubUrl } from '../src/pending.js';
+import { checkPending, isGitHubUrl, run } from '../src/pending.js';
 import { writeIndex, type Project } from '../src/projects.js';
 import type { RoomRecord } from '../src/rooms.js';
 import { createScratch, createWorktree } from '../src/worktree.js';
@@ -22,8 +22,13 @@ const GIT_ENV = {
   GIT_COMMITTER_EMAIL: 't@t',
 };
 
+// No global or system git config, hooks or signing from the machine running the tests.
+const GIT_HOME = mkdtempSync(join(tmpdir(), 'maitre-pending-home-'));
+const CLEAN_GIT = { PATH: process.env.PATH, HOME: GIT_HOME, XDG_CONFIG_HOME: join(GIT_HOME, '.config'), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', ...GIT_ENV };
+process.on('exit', () => rmSync(GIT_HOME, { recursive: true, force: true }));
+
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, ...GIT_ENV }, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  return execFileSync('git', args, { cwd, encoding: 'utf8', env: CLEAN_GIT, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
 function tryGit(cwd: string, ...args: string[]): void {
@@ -214,7 +219,7 @@ test('a nested node_modules left out by an anchored /node_modules/ pattern is no
     async ({ rec, env, dir }) => {
       mkdirSync(join(dir, 'a', 'node_modules', 'z'), { recursive: true });
       writeFileSync(join(dir, 'a', 'node_modules', 'z', '.env'), 'SECRET=1');
-      assert.deepEqual(await checkPending(rec, READY, env), { reasons: [], ignoredGone: ['a/', 'a/node_modules/'] });
+      assert.deepEqual(await checkPending(rec, READY, env), { reasons: [], ignoredGone: ['a/'] });
     },
     { gitignore: '.env*\n/node_modules/\n' },
   );
@@ -329,7 +334,7 @@ test('squash-merged PR whose head is the local HEAD, remote branch deleted: land
     github();
     prs([{ state: 'MERGED', headRefOid: head, url: 'https://github.com/example/repo/pull/7' }]);
     assert.deepEqual((await checkPending(rec, READY, env)).reasons, []);
-    assert.deepEqual(ghCalls(), [{ argv: ['pr', 'list', '--head', rec.branch!, '--state', 'all', '--json', 'state,headRefOid,url'], cwd: dir }]);
+    assert.deepEqual(ghCalls(), [{ argv: ['pr', 'list', '--head', rec.branch!, '--state', 'all', '--json', 'state,headRefOid,url', '--repo', 'example/repo'], cwd: dir }]);
   });
 });
 
@@ -536,5 +541,175 @@ test('local mode: worktree checks only, no gh call and no pushed/PR question', a
     writeFileSync(join(dir, 'wip.txt'), 'x');
     assert.deepEqual((await checkPending(rec, READY, env, { local: true })).reasons, ['uncommitted changes: wip.txt']);
     assert.equal(ghCalls().length, 0);
+  });
+});
+
+test('a walk for .env files that meets too many entries stops and says it could not check', async () => {
+  await withRoom(async ({ rec, env, dir }) => {
+    mkdirSync(join(dir, 'dist', 'many'), { recursive: true });
+    for (let i = 0; i <= 10_000; i++) writeFileSync(join(dir, 'dist', 'many', `f${i}`), '');
+    const r = await checkPending(rec, READY, env);
+    assert.deepEqual(r.reasons, ['could not check: too many files under dist/ to look for .env files']);
+  });
+});
+
+test('a git output over the buffer is reported as too large, not as timed out', async () => {
+  await assert.rejects(run(process.execPath, ['-e', 'process.stdout.write("x".repeat(20 * 1024 * 1024))'], tmpdir(), process.env, 60_000), /output too large/);
+});
+
+test('ignored files gone with the worktree are listed at the top level only', async () => {
+  await withRoom(async ({ rec, env, dir }) => {
+    mkdirSync(join(dir, 'a', 'b'), { recursive: true });
+    writeFileSync(join(dir, 'a', 'x.log'), 'x');
+    writeFileSync(join(dir, 'a', 'b', 'c.log'), 'x');
+    assert.deepEqual(await checkPending(rec, READY, env), { reasons: [], ignoredGone: ['a/'] });
+  });
+});
+
+test('an empty branch is no branch, even on a detached HEAD', async () => {
+  await withRoom(async ({ rec, env, dir }) => {
+    git(dir, 'checkout', '-q', '--detach');
+    assert.deepEqual((await checkPending({ ...rec, branch: '' }, READY, env)).reasons, ['could not check: room has no branch']);
+  });
+});
+
+test('the fetch of a PR head runs without gc or maintenance', async () => {
+  await withRoom(async ({ root, rec, env, commit, github, prs }) => {
+    const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8', env: { PATH: process.env.PATH } }).trim();
+    const log = join(root, 'git.log');
+    rmSync(join(root, 'bin', 'git'));
+    writeFileSync(join(root, 'bin', 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\nexec "${real}" "$@"\n`);
+    chmodSync(join(root, 'bin', 'git'), 0o755);
+    commit('a.txt');
+    github();
+    prs([{ state: 'MERGED', headRefOid: 'a'.repeat(40), url: 'https://github.com/example/repo/pull/7' }]);
+    await checkPending(rec, READY, env);
+    const fetch = readFileSync(log, 'utf8').split('\n').find((l) => l.includes('fetch') && l.includes('a'.repeat(40)));
+    assert.ok(fetch?.startsWith('-c gc.auto=0 -c maintenance.auto=false fetch'), fetch);
+  });
+});
+
+test('.env files in any case are pending', async () => {
+  await withRoom(
+    async ({ rec, env, dir }) => {
+      writeFileSync(join(dir, '.ENV'), 'SECRET=1');
+      mkdirSync(join(dir, 'conf'));
+      writeFileSync(join(dir, 'conf', '.Env.local'), 'SECRET=1');
+      assert.deepEqual((await checkPending(rec, READY, env)).reasons, ['untracked .env files: .ENV, conf/.Env.local']);
+    },
+    { gitignore: '.ENV\nconf/\n' },
+  );
+});
+
+test('changes hidden from git status (assume-unchanged, skip-worktree) are pending; unchanged ones are not', async () => {
+  await withRoom(async ({ rec, env, dir, commit }) => {
+    commit('a.txt', 'one');
+    commit('b.txt', 'one');
+    commit('c.txt', 'one');
+    git(dir, 'push', '-q', '-u', 'origin', rec.branch!);
+    git(dir, 'update-index', '--assume-unchanged', 'a.txt');
+    git(dir, 'update-index', '--skip-worktree', 'b.txt', 'c.txt');
+    writeFileSync(join(dir, 'a.txt'), 'two');
+    writeFileSync(join(dir, 'b.txt'), 'two');
+    assert.deepEqual((await checkPending(rec, READY, env)).reasons, ['changes hidden from git status: a.txt, b.txt']);
+  });
+});
+
+test('a push made elsewhere is fetched before the commits are counted', async () => {
+  await withRoom(async ({ root, rec, env, dir, commit }) => {
+    commit('a.txt');
+    // Pushed by URL, as from another machine: origin's remote refs here do not know it.
+    git(dir, 'push', '-q', join(root, 'remote.git'), `HEAD:refs/heads/${rec.branch!}`);
+    assert.deepEqual((await checkPending(rec, READY, env)).reasons, []);
+  });
+});
+
+test('a commit of the HEAD reflog whose object is gone is not a reason, and stops nothing', async () => {
+  await withRoom(async ({ clone, rec, env, dir, commit }) => {
+    git(dir, 'checkout', '-q', '--detach');
+    const lost = commit('lost.txt');
+    git(dir, 'switch', '-q', rec.branch!);
+    rmSync(join(clone, '.git', 'objects', lost.slice(0, 2), lost.slice(2)));
+    assert.deepEqual((await checkPending(rec, READY, env)).reasons, []);
+  });
+});
+
+test('a branch named like an oid in the HEAD reflog is not read as a lost commit', async () => {
+  await withRoom(async ({ rec, env, dir }) => {
+    git(dir, 'checkout', '-q', '-b', 'b'.repeat(40));
+    git(dir, 'checkout', '-q', rec.branch!);
+    assert.deepEqual((await checkPending(rec, READY, env)).reasons, []);
+  });
+});
+
+// Round 2: fork workflows (R31).
+
+test('a fork workflow: an open PR into upstream from the fork keeps the room pending; a stranger\'s does not', async () => {
+  await withRoom(async ({ root, rec, env, dir, commit, clone, ghCalls }) => {
+    commit('a.txt');
+    git(dir, 'push', '-q', '-u', 'origin', rec.branch!);
+    git(clone, 'remote', 'set-url', 'origin', 'https://github.com/me/repo.git');
+    git(clone, 'remote', 'add', 'upstream', 'https://github.com/example/repo.git');
+    const byRepo = join(root, 'by-repo.json');
+    writeFileSync(byRepo, JSON.stringify({
+      'me/repo': [],
+      'example/repo': [
+        { state: 'OPEN', headRefOid: 'x', url: 'https://github.com/example/repo/pull/7', headRepositoryOwner: { login: 'me' } },
+        { state: 'OPEN', headRefOid: 'y', url: 'https://github.com/example/repo/pull/8', headRepositoryOwner: { login: 'stranger' } },
+      ],
+    }));
+    const r = await checkPending(rec, READY, { ...env, FAKE_GH_PRS_BY_REPO: byRepo });
+    assert.deepEqual(r.reasons, ['PR open: https://github.com/example/repo/pull/7']);
+    assert.deepEqual(ghCalls().map((c) => c.argv[c.argv.indexOf('--repo') + 1]), ['me/repo', 'example/repo']);
+  });
+});
+
+test('origin only: gh is asked for origin\'s repository alone', async () => {
+  await withRoom(async ({ rec, env, github, ghCalls }) => {
+    github();
+    await checkPending(rec, READY, env);
+    assert.deepEqual(ghCalls().map((c) => c.argv[c.argv.indexOf('--repo') + 1]), ['example/repo']);
+  });
+});
+
+// Round 2: the unpushed count's fetch (R32).
+
+function logGit(root: string): () => string[] {
+  const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8', env: { PATH: process.env.PATH } }).trim();
+  const log = join(root, 'git.log');
+  rmSync(join(root, 'bin', 'git'));
+  writeFileSync(join(root, 'bin', 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\nexec "${real}" "$@"\n`);
+  chmodSync(join(root, 'bin', 'git'), 0o755);
+  return () => (existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter((l) => / fetch /.test(` ${l} `) || l.startsWith('fetch')) : []);
+}
+
+test('the branch fetch runs without gc, at most once per room per 30 minutes; in between the remote ref stands', async () => {
+  await withRoom(async ({ root, rec, env, dir, commit }) => {
+    const fetches = logGit(root);
+    commit('a.txt');
+    git(dir, 'push', '-q', join(root, 'remote.git'), `HEAD:refs/heads/${rec.branch!}`);
+    assert.deepEqual((await checkPending(rec, READY, env)).reasons, []);
+    assert.equal(fetches().length, 1);
+    assert.ok(fetches()[0]!.startsWith('-c gc.auto=0 -c maintenance.auto=false fetch'), fetches()[0]);
+    commit('b.txt');
+    git(dir, 'push', '-q', join(root, 'remote.git'), `HEAD:refs/heads/${rec.branch!}`);
+    assert.deepEqual((await checkPending(rec, READY, env)).reasons, ['1 commit(s) not pushed'], 'the last fetch stands');
+    assert.equal(fetches().length, 1);
+    const stamp = join(env.MAITRE_HOME!, 'state', 'rooms', 'alpha', 'fetched.json');
+    writeFileSync(stamp, JSON.stringify({ at: Date.now() - 31 * 60_000 }));
+    assert.deepEqual((await checkPending(rec, READY, env)).reasons, []);
+    assert.equal(fetches().length, 2);
+  });
+});
+
+test('without fetch (a dry run) nothing is fetched and nothing is written', async () => {
+  await withRoom(async ({ root, clone, rec, env, dir, commit }) => {
+    const fetches = logGit(root);
+    commit('a.txt');
+    git(dir, 'push', '-q', join(root, 'remote.git'), `HEAD:refs/heads/${rec.branch!}`);
+    assert.deepEqual((await checkPending(rec, READY, env, { fetch: false })).reasons, ['1 commit(s) not pushed']);
+    assert.deepEqual(fetches(), []);
+    assert.equal(existsSync(join(env.MAITRE_HOME!, 'state', 'rooms', 'alpha', 'fetched.json')), false);
+    assert.equal(git(clone, 'for-each-ref', `refs/remotes/origin/${rec.branch!}`), '');
   });
 });

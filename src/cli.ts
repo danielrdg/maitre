@@ -320,13 +320,16 @@ async function roomCommand(args: Extract<CliArgs, { cmd: 'room-open' | 'room-sen
     console.log(rows.length === 0 ? 'no rooms' : formatRows(rows).join('\n'));
   } else {
     const rec = await closeRoom(args.room, process.env, { writing: () => console.log('writing the minutes…') });
-    if ('dequeued' in rec) console.log(rec.dequeued === 'queue' ? `removed ${rec.room} from the queue` : `removed ${rec.room} from the failed queue`);
-    else {
+    if (rec.dequeued !== undefined) console.log(rec.dequeued === 'queue' ? `removed ${rec.room} from the queue` : `removed ${rec.room} from the failed queue`);
+    if ('open' in rec && rec.open === true) console.log(`room ${rec.room} is still open; close it with: maitre room close ${rec.room}`);
+    if ('kind' in rec) {
       console.log(`closed ${rec.room}`);
       if (rec.minutes !== undefined) console.log(`minutes: ${rec.minutes}`);
     }
   }
 }
+
+const STOP_WAIT_MS = 60_000;
 
 export async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
@@ -499,12 +502,21 @@ export async function main(argv: string[]): Promise<void> {
   tail?.start();
   const unwatch = rooms?.watch();
   let ticks: Ticks | undefined;
+  let stopping = false;
+  // A tick in flight finishes first: a close cut by the exit would be resumed later from its marker.
   const stop = () => {
-    ticks?.stop();
-    unwatch?.();
-    tail?.stop();
-    if (live) releaseLounge();
-    void server.close().then(() => process.exit(0));
+    // A second signal: the user does not want to wait for the tick.
+    if (stopping) process.exit(0);
+    stopping = true;
+    void (async () => {
+      // Not forever: a tick stuck on a call that never returns must not keep the service from stopping.
+      await Promise.race([ticks?.stop(), new Promise((r) => setTimeout(r, STOP_WAIT_MS).unref())]);
+      unwatch?.();
+      tail?.stop();
+      if (live) releaseLounge();
+      await server.close();
+      process.exit(0);
+    })();
   };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);

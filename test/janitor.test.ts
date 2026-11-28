@@ -5,12 +5,12 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFile
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { closingFile, isClosing, processStart, releaseClosing, takeClosing } from '../src/closing.js';
-import { closeRoom, closeWithMinutes, janitorLog, janitorTick } from '../src/janitor.js';
+import { closeRoom, closeWithMinutes, forTests, janitorLog, janitorTick } from '../src/janitor.js';
 import { writeMinutes } from '../src/minutes.js';
 import { roomDir } from '../src/paths.js';
 import { writePr, type PrState } from '../src/pr-state.js';
 import { writeIndex, type Project } from '../src/projects.js';
-import { openRoom, sendToRoom } from '../src/room-open.js';
+import { checkInput, closeRoomTab, openRoom, sendToRoom } from '../src/room-open.js';
 import { readRoom, writeRoom, type RoomRecord } from '../src/rooms.js';
 import { openingFile } from '../src/queue.js';
 import { herdrSandbox, type HerdrSandbox } from './herdr-sandbox.js';
@@ -665,7 +665,7 @@ test('a room closed by hand while a tick runs is not closed again by that tick',
 test('closeWithMinutes with a record someone else closed meanwhile does nothing', async () => {
   const rec = await open('a');
   writeRoom({ ...rec, closedAt: 1, closedBy: 'user' });
-  assert.equal(await closeWithMinutes(rec, 'janitor'), 'busy');
+  assert.equal(await closeWithMinutes(rec, 'janitor'), 'closed');
   assert.deepEqual(minutesFiles(), []);
   assert.equal(readRoom('a')!.closedBy, 'user');
 });
@@ -809,7 +809,7 @@ test('a closer taken over after its tab closed neither removes the worktree nor 
   age('a', 5 * HOURS);
   const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
   try {
-    const [d] = await janitorTick(process.env, { close: { afterTabClosed: () => takeOverMarker('a', child.pid!) } });
+    const [d] = await forTests.janitorTick(process.env, { afterTabClosed: () => takeOverMarker('a', child.pid!) });
     assert.deepEqual(d, { room: 'a', decision: 'skip', reasons: ['another closer took over'] });
     assert.ok(existsSync(rec.dir));
     assert.equal(readRoom('a')!.closedBy, undefined);
@@ -825,7 +825,7 @@ test('a scratch closer taken over after its tab closed moves no files', async ()
   age('s', 5 * HOURS);
   const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
   try {
-    const [d] = await janitorTick(process.env, { close: { afterTabClosed: () => takeOverMarker('s', child.pid!) } });
+    const [d] = await forTests.janitorTick(process.env, { afterTabClosed: () => takeOverMarker('s', child.pid!) });
     assert.equal(d!.decision, 'skip');
     assert.ok(existsSync(join(rec.dir, 'notes.md')));
     assert.equal(readRoom('s')!.closedBy, undefined);
@@ -867,7 +867,7 @@ test('a resumed close taken over after its tab closed does not write the record'
   writeFileSync(closingFile('a'), JSON.stringify({ pid: deadPid(), token: 'dead' }));
   const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
   try {
-    const [d] = await janitorTick(process.env, { close: { afterTabClosed: () => takeOverMarker('a', child.pid!) } });
+    const [d] = await forTests.janitorTick(process.env, { afterTabClosed: () => takeOverMarker('a', child.pid!) });
     assert.deepEqual(d, { room: 'a', decision: 'skip', reasons: ['another closer took over'] });
     assert.equal(readRoom('a')!.closedBy, undefined);
   } finally {
@@ -884,7 +884,7 @@ test('a room being opened (an opening reservation by a live process) is skipped 
     await new Promise((r) => setTimeout(r, 50));
     writeFileSync(openingFile(), JSON.stringify([{ room: 'a', pid: child.pid, since: Date.now() }]));
     assert.deepEqual(await janitorTick(), [{ room: 'a', decision: 'skip', reasons: ['being opened'] }]);
-    assert.equal(await closeWithMinutes(rec, 'janitor'), 'busy');
+    assert.equal(await closeWithMinutes(rec, 'janitor'), 'opening');
     await assert.rejects(closeRoom('a'), /^Error: a is opening; close it once it is open$/);
     assert.equal(Object.keys(sb.state().workspaces).length, 1);
     assert.ok(existsSync(rec.dir));
@@ -902,7 +902,7 @@ test('the closer never stamps closedBy on a record reopened while it closed', as
   const rec = await open('s');
   age('s', 5 * HOURS);
   const reopened = { ...rec, createdAt: rec.createdAt + 1, herdr: { ...rec.herdr!, workspaceId: 'w99' } };
-  const r = await closeWithMinutes(rec, 'user', process.env, { afterTabClosed: () => writeRoom(reopened) });
+  const r = await forTests.closeWithMinutes(rec, 'user', process.env, {}, { afterTabClosed: () => writeRoom(reopened) });
   assert.notEqual(r, 'busy');
   const after = readRoom('s')!;
   assert.equal(after.closedBy, undefined);
@@ -1149,4 +1149,298 @@ test('the stale-seat take-back removes only the seat it read: a fresh seat writt
   const [d] = await janitorTick();
   assert.deepEqual(readRoom('a')!.seat, fresh);
   assert.ok(!d.reasons.includes('seat taken back: its Claude is running'), d.reasons.join('; '));
+});
+
+test('a room woken while the tick runs (its record changed after the tabs were listed) is not stamped not running', async () => {
+  const rec = (room: string, workspaceId: string): RoomRecord => ({
+    room, kind: 'scratch', dir: join(sb.home, 'scratch', room), model: 'sonnet', taskType: 'simple',
+    herdr: { session: 'maitre-test', workspaceId, paneId: `${workspaceId}:p1` }, createdAt: 1, resumable: true,
+  });
+  mkdirSync(join(sb.home, 'scratch', 'woke'), { recursive: true });
+  writeRoom({ ...rec('woke', 'w2'), seat: { releasedAt: 1, session: 's1' } });
+  const base = { next: 9, workspaces: {}, panes: {} };
+  sb.setState(base);
+  // What a wake that finishes right after the tick listed the tabs leaves: its new tab, and the record naming it.
+  const woken = join(sb.dir, 'woken-state.json');
+  const wokenRec = join(sb.dir, 'woken-room.json');
+  writeFileSync(woken, JSON.stringify({ ...base, workspaces: { w5: { label: 'scratch / woke' } }, panes: { 'w5:p1': { ws: 'w5', agent: 'idle' } } }));
+  writeFileSync(wokenRec, JSON.stringify(rec('woke', 'w5')));
+  process.env.FAKE_HERDR_THEN_workspace_list = JSON.stringify({ after: 1, moves: [[woken, sb.stateFile], [wokenRec, join(roomDir('woke'), 'room.json')]] });
+  await janitorTick();
+  assert.equal(existsSync(woken), false, 'the wake landed during the tick');
+  assert.equal(readRoom('woke')!.herdr!.workspaceId, 'w5');
+  assert.equal(readRoom('woke')!.closedAt, undefined, 'not stamped not running');
+});
+
+
+// #40: janitor, parking and closing edge cases.
+
+// herdr no longer detects the agent in the room's own tab, which still shows `screen`.
+function lostByHerdr(room: string, screen: string): void {
+  const st = sb.state();
+  const pane = st.panes[readRoom(room)!.herdr!.paneId]!;
+  pane.agent = 'shell';
+  pane.screen = screen;
+  sb.setState(st);
+}
+const box = (typed: string) => `${'─'.repeat(40)}\n❯ ${typed}\n${'─'.repeat(40)}\n`;
+
+test("a dead room whose own tab still shows Claude's box (herdr lost it) is not closed: no /exit, tab kept, no minutes", async () => {
+  await open('a');
+  age('a', 5 * HOURS);
+  lostByHerdr('a', box('half a thought'));
+  const [d] = await janitorTick();
+  assert.deepEqual(d, { room: 'a', decision: 'skip', reasons: ['unsent text in its input'] });
+  lostByHerdr('a', box(''));
+  const [e] = await janitorTick();
+  assert.deepEqual(e, { room: 'a', decision: 'skip', reasons: ['its tab shows a Claude herdr does not detect'] });
+  assert.equal(Object.keys(sb.state().workspaces).length, 1);
+  assert.equal(exitSent(), false);
+  assert.deepEqual(minutesFiles(), []);
+  assert.equal(readRoom('a')!.closedBy, undefined);
+  await assert.rejects(closeRoom('a'), /its tab shows a Claude herdr does not detect/);
+});
+
+test("a dead room whose own tab shows a shell, or whose run's exit line is there, is closed", async () => {
+  await open('a');
+  age('a', 5 * HOURS);
+  lostByHerdr('a', '$ \n');
+  assert.equal((await janitorTick())[0]!.decision, 'close');
+  await open('b');
+  age('b', 5 * HOURS);
+  lostByHerdr('b', box('left on screen after it exited'));
+  event('b', 'MaitreExit', { run: readRoom('b')!.run }, Date.now() - 5 * HOURS);
+  assert.equal((await janitorTick()).find((x) => x.room === 'b')!.decision, 'close');
+});
+
+test('--dry-run does not promise a park that a draft or a missing session id would skip', async () => {
+  await open('draft');
+  await open('nosession');
+  for (const room of ['draft', 'nosession']) writeRoom({ ...readRoom(room)!, couch: { since: Date.now() - HOURS, reasons: ['x'] } });
+  event('draft', 'Stop');
+  age('draft', 2 * HOURS);
+  // Only lines without a session id.
+  writeFileSync(eventsFile('nosession'), JSON.stringify({ v: 1, ts: Date.now() - 2 * HOURS, room: 'nosession', event: 'Stop' }) + '\n');
+  typeInto('draft', 'not sent');
+  const ds = await janitorTick(process.env, { dryRun: true });
+  assert.deepEqual(ds, [
+    { room: 'draft', decision: 'skip', reasons: ['unsent text in its input'] },
+    { room: 'nosession', decision: 'skip', reasons: ['no session id'] },
+  ]);
+});
+
+test('a room that may park but has something pending is on the couch even when its park is skipped', async () => {
+  project();
+  const rec = await open('a', 'proj');
+  unpushed(rec);
+  pr(rec);
+  age('a', 5 * HOURS);
+  typeInto('a', 'draft');
+  const [d] = await janitorTick();
+  assert.deepEqual(d, { room: 'a', decision: 'skip', reasons: ['unsent text in its input'] });
+  assert.deepEqual(readRoom('a')!.couch?.reasons, ['1 commit(s) not pushed', 'unsent text in its input']);
+});
+
+test('ignored files that appear between the decision and the removal are in the minutes too', async () => {
+  project();
+  const rec = await open('a', 'proj');
+  age('a', 5 * HOURS);
+  const [d] = await forTests.janitorTick(process.env, {
+    afterTabClosed: () => {
+      mkdirSync(join(rec.dir, 'node_modules', 'late'), { recursive: true });
+      writeFileSync(join(rec.dir, 'node_modules', 'late', 'x.js'), 'x');
+    },
+  });
+  assert.equal(d!.decision, 'close');
+  const text = readFileSync(join(minutesDir(), minutesFiles()[0]!), 'utf8');
+  assert.match(text, /`node_modules\/`/);
+});
+
+test('a log rotation waits for one in progress: janitor.log.1 is never overwritten by a second rotation', async () => {
+  await open('a');
+  mkdirSync(join(sb.home, 'state'), { recursive: true });
+  writeFileSync(janitorLog(), 'x'.repeat(100) + '\n');
+  writeFileSync(`${janitorLog()}.1`, 'OLD\n');
+  // Another process holds the rotation lock.
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+  try {
+    await new Promise((r) => setTimeout(r, 50));
+    writeFileSync(`${janitorLog()}.lock`, JSON.stringify({ pid: child.pid, token: 'other' }));
+    await janitorTick(process.env, { logMaxBytes: 10 });
+    assert.equal(readFileSync(`${janitorLog()}.1`, 'utf8'), 'OLD\n', 'not rotated while another rotation holds the lock');
+  } finally {
+    child.kill();
+  }
+  rmSync(`${janitorLog()}.lock`);
+  writeFileSync(janitorLog(), 'x'.repeat(100) + '\n');
+  // A decision not logged before (an unchanged skip is not logged again).
+  await open('b');
+  await janitorTick(process.env, { logMaxBytes: 10 });
+  assert.match(readFileSync(`${janitorLog()}.1`, 'utf8'), /^x+\n/);
+});
+
+test("a close stopped after its marker was taken over keeps the minutes: they may be the new closer's", async () => {
+  const rec = await open('a');
+  age('a', 5 * HOURS);
+  let written = '';
+  await assert.rejects(
+    closeWithMinutes(rec, 'janitor', process.env, {
+      writeMinutes: async (input, env) => {
+        written = await writeMinutes(input, env);
+        // Another closer takes the marker over (and may reuse these minutes), and the room moves on.
+        writeFileSync(closingFile('a'), JSON.stringify({ pid: 0, token: 'other', minutes: written, createdAt: rec.createdAt }));
+        event('a', 'UserPromptSubmit', { prompt: 'more' });
+        return written;
+      },
+    }),
+  );
+  assert.ok(existsSync(written), 'the minutes stay');
+});
+
+test('a skip says why: a record closed meanwhile, reopened meanwhile, or being opened', async () => {
+  const rec = await open('a');
+  const reopened = { ...rec, createdAt: rec.createdAt + 1 };
+  writeRoom(reopened);
+  assert.equal(await closeWithMinutes(rec, 'janitor'), 'changed');
+});
+
+test('the couch is never written on a record closed meanwhile', async () => {
+  project();
+  const rec = await open('a', 'proj');
+  unpushed(rec);
+  age('a', 5 * HOURS);
+  const staged = join(sb.dir, 'room.json.staged');
+  writeFileSync(staged, JSON.stringify({ ...readRoom('a')!, closedAt: 1, closedBy: 'user' }));
+  // Lands right after decide's herdr probe, before the couch is written.
+  process.env.FAKE_HERDR_THEN_agent_get = JSON.stringify([staged, join(roomDir('a'), 'room.json')]);
+  await janitorTick();
+  assert.equal(readRoom('a')!.closedBy, 'user');
+  assert.equal(readRoom('a')!.couch, undefined);
+});
+
+test('a close by hand whose marker another closer took over is logged', async () => {
+  const rec = await open('a');
+  event('a', 'Stop', { transcript: transcript() });
+  process.env.FAKE_CLAUDE_SLEEP_MS = '1500';
+  process.env.FAKE_CLAUDE_STDOUT = JSON.stringify({ type: 'result', is_error: false, result: SUMMARY });
+  const closing = closeRoom('a');
+  const t0 = Date.now();
+  while (!existsSync(closingFile('a')) && Date.now() - t0 < 10_000) await new Promise((r) => setTimeout(r, 10));
+  await new Promise((r) => setTimeout(r, 300));
+  writeFileSync(closingFile('a'), JSON.stringify({ pid: 0, token: 'other' }));
+  await assert.rejects(closing, /another closer took over/);
+  const last = logLines().at(-1);
+  assert.deepEqual([last.room, last.decision, last.reasons], ['a', 'error', ['closed by hand: another closer took over its close']]);
+  assert.ok(rec);
+});
+
+test('room close on a name both queued and open removes it from the queue and closes the room', async () => {
+  await open('a');
+  mkdirSync(join(sb.home, 'state'), { recursive: true });
+  const route = { room: { kind: 'new', name: 'a' }, project: null, model: 'sonnet', taskType: 'change' };
+  writeFileSync(join(sb.home, 'state', 'queue.json'), JSON.stringify([{ room: 'a', requestIds: ['1'], route, queuedAt: 1, attempts: 0 }]));
+  const r = await closeRoom('a');
+  assert.equal((r as { dequeued?: string }).dequeued, 'queue');
+  assert.equal(readRoom('a')!.closedBy, 'user');
+  assert.deepEqual(JSON.parse(readFileSync(join(sb.home, 'state', 'queue.json'), 'utf8')), []);
+});
+
+test('a janitor pass told to stop decides no room after that', async () => {
+  await open('a');
+  await open('b');
+  let asked = 0;
+  const ds = await janitorTick(process.env, { stopped: () => ++asked > 1 });
+  assert.deepEqual(ds.map((d) => d.room), ['a']);
+});
+
+// Round 2.
+
+test('room close on a name in queue-failed.json removes that entry only: an open room of that name keeps running', async () => {
+  await open('a');
+  mkdirSync(join(sb.home, 'state'), { recursive: true });
+  const route = { room: { kind: 'new', name: 'a' }, project: null, model: 'sonnet', taskType: 'change' };
+  writeFileSync(join(sb.home, 'state', 'queue-failed.json'), JSON.stringify([{ room: 'a', requestIds: ['1'], route, queuedAt: 1, attempts: 3, failedAt: 2, lastError: 'opened outside the queue' }]));
+  const r = await closeRoom('a');
+  assert.deepEqual(r, { room: 'a', dequeued: 'failed', open: true });
+  assert.equal(readRoom('a')!.closedBy, undefined);
+  assert.equal(exitSent(), false);
+});
+
+test('room close on a queued and open name whose close stops says the queue entry was removed', async () => {
+  await open('a');
+  mkdirSync(join(sb.home, 'state'), { recursive: true });
+  const route = { room: { kind: 'new', name: 'a' }, project: null, model: 'sonnet', taskType: 'change' };
+  writeFileSync(join(sb.home, 'state', 'queue.json'), JSON.stringify([{ room: 'a', requestIds: ['1'], route, queuedAt: 1, attempts: 0 }]));
+  typeInto('a', 'a draft');
+  await assert.rejects(closeRoom('a'), /^Error: removed a from the queue; a was not closed: unsent text in its input/);
+  assert.deepEqual(JSON.parse(readFileSync(join(sb.home, 'state', 'queue.json'), 'utf8')), []);
+  assert.equal(readRoom('a')!.closedBy, undefined);
+});
+
+test('a dry run never fetches: the remote-tracking ref of a branch pushed elsewhere is not written', async () => {
+  const p = project();
+  const rec = await open('a', 'proj');
+  unpushed(rec);
+  git(rec.dir, 'push', '-q', join(sb.dir, 'remote.git'), 'HEAD:refs/heads/maitre/a');
+  age('a', 5 * HOURS);
+  const [d] = await janitorTick(process.env, { dryRun: true });
+  assert.deepEqual(d, { room: 'a', decision: 'couch', reasons: ['1 commit(s) not pushed'] });
+  assert.equal(git(p.path, 'for-each-ref', 'refs/remotes/origin/maitre/a'), '');
+});
+
+// Round 2: each lost-Claude check alone, and the notePending guard.
+
+test('the janitor checks a lost Claude before any minutes: the writer is never called, the reason is kept as pending', async () => {
+  await open('a');
+  age('a', 5 * HOURS);
+  lostByHerdr('a', box('half a thought'));
+  let wrote = 0;
+  const [d] = await janitorTick(process.env, { close: { writeMinutes: async () => (wrote++, '/nowhere') } });
+  assert.deepEqual(d, { room: 'a', decision: 'skip', reasons: ['unsent text in its input'] });
+  assert.equal(wrote, 0);
+  assert.deepEqual(readRoom('a')!.pending?.reasons, ['unsent text in its input']);
+});
+
+test('a dead room whose folder is gone and whose tab still shows Claude is skipped before any minutes', async () => {
+  const rec = await open('a');
+  age('a', 5 * HOURS);
+  rmSync(rec.dir, { recursive: true });
+  lostByHerdr('a', box(''));
+  let wrote = 0;
+  const [d] = await janitorTick(process.env, { close: { writeMinutes: async () => (wrote++, '/nowhere') } });
+  assert.deepEqual(d, { room: 'a', decision: 'skip', reasons: ['its tab shows a Claude herdr does not detect'] });
+  assert.equal(wrote, 0);
+});
+
+test('closeRoomTab alone refuses the tab of a lost Claude', async () => {
+  await open('a');
+  lostByHerdr('a', box('draft'));
+  await assert.rejects(closeRoomTab(readRoom('a')!, process.env, { by: 'user' }), /unsent text in its input/);
+  assert.equal(Object.keys(sb.state().workspaces).length, 1);
+});
+
+test('the input check of a close by hand alone refuses a lost Claude, before "writing the minutes…"', async () => {
+  await open('a');
+  lostByHerdr('a', box(''));
+  await assert.rejects(checkInput(readRoom('a')!), /its tab shows a Claude herdr does not detect/);
+  let writing = false;
+  await assert.rejects(closeRoom('a', process.env, { writing: () => (writing = true) }), /herdr does not detect/);
+  assert.equal(writing, false);
+});
+
+test('pending is never written on a record closed meanwhile', async () => {
+  const p = project();
+  const rec = await open('a', 'proj');
+  writeFileSync(join(rec.dir, 'wip.txt'), 'x');
+  git(p.path, 'remote', 'set-url', 'origin', 'https://github.com/example/repo.git');
+  killTabs();
+  age('a', 5 * HOURS);
+  const staged = join(sb.dir, 'room.json.staged');
+  writeFileSync(staged, JSON.stringify({ ...readRoom('a')!, closedAt: 1, closedBy: 'user' }));
+  // Lands during the pending check (its gh call), before the pending reasons are written.
+  process.env.FAKE_GH_THEN = JSON.stringify([staged, join(roomDir('a'), 'room.json')]);
+  await janitorTick();
+  assert.equal(existsSync(staged), false, 'the close landed');
+  assert.equal(readRoom('a')!.closedBy, 'user');
+  assert.equal(readRoom('a')!.pending, undefined);
 });

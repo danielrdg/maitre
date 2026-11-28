@@ -1,17 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RoomActivity } from '../src/activity.js';
-import { MINUTES_SYSTEM, roomNotes, transcriptExcerpt, writeMinutes } from '../src/minutes.js';
+import { continuedMinutes, hasMinutes, MINUTES_SYSTEM, recentMinutes, roomNotes, transcriptExcerpt, writeMinutes } from '../src/minutes.js';
 import { roomDir } from '../src/paths.js';
 import { writePr } from '../src/pr-state.js';
 import { writeIndex } from '../src/projects.js';
 import type { RoomRecord } from '../src/rooms.js';
-import { moveScratch, ownedDir, type MoveOps } from '../src/vault.js';
+import { moveScratch, noClobberRename, ownedDir, type MoveOps } from '../src/vault.js';
 
 const FAKE_CLAUDE = fileURLToPath(new URL('../../test/fixtures/fake-claude-router.mjs', import.meta.url));
 const GIT_ENV = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -393,5 +393,227 @@ test('the path guard refuses folders outside maitre, symlinks out and the wrong 
     assert.equal(readFileSync(join(outside, 'keep'), 'utf8'), 'k');
     mkdirSync(join(c.home, 'worktrees', 'proj', 'alpha'), { recursive: true });
     assert.equal(ownedDir(c.rec(), c.env), join(c.home, 'worktrees', 'proj', 'alpha'));
+  });
+});
+
+// #42: vault and minutes edge cases.
+
+const exdev = () => {
+  throw Object.assign(new Error('cross-device'), { code: 'EXDEV' });
+};
+
+test('across devices a partial copy is found, removed, and nothing is lost', async () => {
+  await withCtx((c) => {
+    const dir = join(c.home, 'scratch', 'notes');
+    mkdirSync(join(dir, 'sub'), { recursive: true });
+    writeFileSync(join(dir, 'sub', 'x'), 'x');
+    writeFileSync(join(dir, 'sub', 'y'), 'y');
+    const rec = c.rec({ room: 'notes', kind: 'scratch', dir });
+    const partial: MoveOps = {
+      rename: exdev,
+      copy: (from, to) => {
+        mkdirSync(to);
+        writeFileSync(join(to, 'x'), readFileSync(join(from, 'x')));
+      },
+      remove: () => assert.fail('must not remove the source'),
+    };
+    assert.throws(() => moveScratch(rec, c.env, partial), /copy/);
+    assert.deepEqual(readdirSync(join(c.vault, 'rooms', 'notes')), [], 'no partial entry left in the vault');
+    assert.deepEqual(readdirSync(join(dir, 'sub')).sort(), ['x', 'y']);
+  });
+});
+
+test("a copy a crash left half-made is cleaned up by the next move; nothing maître did not make is touched", async () => {
+  await withCtx((c) => {
+    const dir = join(c.home, 'scratch', 'notes');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'a.txt'), 'a');
+    const dest = join(c.vault, 'rooms', 'notes');
+    const moving = join(c.vault, 'rooms', '.maitre-moving');
+    mkdirSync(dest, { recursive: true });
+    mkdirSync(join(moving, 'notes-0123abcd-a.txt'), { recursive: true });
+    writeFileSync(join(moving, 'notes.json'), JSON.stringify(['notes-0123abcd-a.txt']));
+    // Not maître's: a scratch file with that look, moved in earlier, and a stray entry nobody listed.
+    writeFileSync(join(dest, '.maitre-moving-1-a.txt'), 'mine');
+    writeFileSync(join(moving, 'notes-ffffffff-b.txt'), 'stray');
+    moveScratch(c.rec({ room: 'notes', kind: 'scratch', dir }), c.env);
+    assert.deepEqual(readdirSync(dest).sort(), ['.maitre-moving-1-a.txt', 'a.txt']);
+    assert.deepEqual(readdirSync(moving).sort(), ['notes-ffffffff-b.txt']);
+  });
+});
+
+test('the move into the vault never replaces a name an outside writer created meanwhile', async () => {
+  await withCtx((c) => {
+    const dir = join(c.home, 'scratch', 'notes');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'a.txt'), 'ours');
+    let first = true;
+    const racing: MoveOps = {
+      rename: (from, to) => {
+        if (first) writeFileSync(to, 'theirs');
+        first = false;
+        noClobberRename(from, to);
+      },
+      copy: () => assert.fail('no copy'),
+      remove: () => assert.fail('no remove'),
+    };
+    const dest = moveScratch(c.rec({ room: 'notes', kind: 'scratch', dir }), c.env, racing);
+    assert.equal(readFileSync(join(dest, 'a.txt'), 'utf8'), 'theirs');
+    assert.equal(readFileSync(join(dest, 'a-2.txt'), 'utf8'), 'ours');
+  });
+});
+
+test("a symlink at the vault's rooms or rooms/<room> is refused, like one in maître's own folders", async () => {
+  await withCtx((c) => {
+    const elsewhere = join(c.root, 'elsewhere');
+    mkdirSync(elsewhere);
+    const dir = join(c.home, 'scratch', 'notes');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'a.txt'), 'a');
+    mkdirSync(join(c.vault, 'rooms'), { recursive: true });
+    symlinkSync(elsewhere, join(c.vault, 'rooms', 'notes'));
+    assert.throws(() => moveScratch(c.rec({ room: 'notes', kind: 'scratch', dir }), c.env), /symlink/);
+    assert.deepEqual(readdirSync(elsewhere), []);
+    assert.ok(existsSync(join(dir, 'a.txt')));
+    // The vault's rooms/ itself.
+    rmSync(join(c.vault, 'rooms'), { recursive: true });
+    symlinkSync(elsewhere, join(c.vault, 'rooms'));
+    assert.throws(() => moveScratch(c.rec({ room: 'notes', kind: 'scratch', dir }), c.env), /symlink/);
+    assert.deepEqual(readdirSync(elsewhere), []);
+    assert.ok(existsSync(join(dir, 'a.txt')));
+  });
+});
+
+test('vault folders are created private (0700)', async () => {
+  await withCtx(async (c) => {
+    const dir = join(c.home, 'scratch', 'notes');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'a.txt'), 'a');
+    moveScratch(c.rec({ room: 'notes', kind: 'scratch', dir }), c.env);
+    for (const d of [c.vault, join(c.vault, 'rooms'), join(c.vault, 'rooms', 'notes')]) assert.equal(statSync(d).mode & 0o777, 0o700, d);
+    rmSync(c.vault, { recursive: true });
+    await writeMinutes({ rec: c.rec({ kind: 'scratch', project: undefined }), activity: ACT, closedBy: 'user', looseEnds: [], ignoredGone: [] }, c.env);
+    for (const d of [c.vault, join(c.vault, 'minutes')]) assert.equal(statSync(d).mode & 0o777, 0o700, d);
+  });
+});
+
+test('a project name with a newline or markdown is flattened in the links, the heading and the writing prompt', async () => {
+  await withCtx(async (c) => {
+    process.env.FAKE_CLAUDE_STDOUT = envelope('## What was asked\nx');
+    const t = c.transcript([user('hi'), assistant('ok')]);
+    try {
+      const path = await writeMinutes({ rec: c.rec({ project: 'proj\n# Injected\n' }), activity: { ...ACT, transcript: t }, closedBy: 'user', looseEnds: [], ignoredGone: [] }, { ...c.env, FAKE_CLAUDE_STDOUT: envelope('## What was asked\nx') });
+      const text = readFileSync(path, 'utf8');
+      assert.doesNotMatch(text, /^# Injected/m);
+      assert.match(text, /\[\[proj # Injected\]\]/);
+      const prompt = claudeCalls(c.claudeLog)[0]!.argv[1]!;
+      assert.match(prompt, /in project "proj # Injected"/);
+    } finally {
+      delete process.env.FAKE_CLAUDE_STDOUT;
+    }
+  });
+});
+
+test("meta and sidechain lines are not the user's words: left out of the excerpt", async () => {
+  await withCtx((c) => {
+    const p = c.transcript([
+      user('the real ask'),
+      { ...user('<command-name>/clear</command-name>'), isMeta: true },
+      { ...user('a subagent prompt'), isSidechain: true },
+      { ...assistant([{ type: 'text', text: 'subagent reply' }]), isSidechain: true },
+      assistant([{ type: 'text', text: 'done' }]),
+    ]);
+    assert.equal(transcriptExcerpt(p), 'User: the real ask\n\nAssistant: done');
+  });
+});
+
+test("the commits in the fallback minutes are the room's own: never an enclosing repository's", async () => {
+  await withCtx(async (c) => {
+    const parent = join(c.root, 'outer');
+    mkdirSync(join(parent, 'sub'), { recursive: true });
+    const g = (...args: string[]) => execFileSync('git', args, { cwd: parent, env: { ...c.env, ...GIT_ENV, GIT_CONFIG_GLOBAL: '/dev/null' } });
+    g('init', '-q', '-b', 'main');
+    g('commit', '-q', '--allow-empty', '-m', 'base');
+    g('update-ref', 'refs/remotes/origin/main', 'HEAD');
+    g('commit', '-q', '--allow-empty', '-m', 'the outer repo commit');
+    writeIndex([{ name: 'proj', path: parent, base: 'main', branchPrefix: 'maitre/' }], c.env);
+    const notes = await roomNotes(c.rec({ dir: join(parent, 'sub') }), c.env);
+    assert.doesNotMatch(notes, /outer repo commit/);
+  });
+});
+
+test('the same-day order of minutes counts suffixes as numbers (-10 after -2)', async () => {
+  await withCtx((c) => {
+    const dir = join(c.vault, 'minutes');
+    mkdirSync(dir, { recursive: true });
+    const body = (asked: string) => `---\nroom: "r"\nproject: "proj"\nclosed: 2026-11-01T10:00:00.000Z\n---\n\n## What was asked\n\n${asked}\n`;
+    writeFileSync(join(dir, '2026-11-01-r-2.md'), body('second'));
+    writeFileSync(join(dir, '2026-11-01-r-10.md'), body('tenth'));
+    const same = new Date('2026-11-01T12:00:00Z');
+    utimesSync(join(dir, '2026-11-01-r-2.md'), same, same);
+    utimesSync(join(dir, '2026-11-01-r-10.md'), same, same);
+    assert.equal(recentMinutes(c.env)[0]!.asked, 'tenth');
+  });
+});
+
+test('the closed date of minutes is the local day, like the file name', async () => {
+  const tz = process.env.TZ;
+  process.env.TZ = 'America/Sao_Paulo';
+  try {
+    await withCtx((c) => {
+      const dir = join(c.vault, 'minutes');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, '2026-11-01-r.md'), '---\nroom: "r"\nclosed: 2026-11-02T01:00:00.000Z\n---\n\n## What was asked\n\nx\n');
+      assert.equal(recentMinutes(c.env)[0]!.closed, '2026-11-01');
+    });
+  } finally {
+    if (tz === undefined) delete process.env.TZ;
+    else process.env.TZ = tz;
+  }
+});
+
+test('continued minutes leave out the front matter and keep CRLF lines as lines', async () => {
+  await withCtx((c) => {
+    const dir = join(c.vault, 'minutes');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '2026-11-01-alpha.md'), '---\r\nroom: "alpha"\r\nproject: "proj"\r\nclosed: 2026-11-01T10:00:00.000Z\r\nclosedBy: janitor\r\n---\r\n\r\n## What was asked\r\n\r\nthe ask\r\n');
+    const out = continuedMinutes('alpha', 'proj', c.env)!;
+    assert.doesNotMatch(out, /closedBy/);
+    assert.doesNotMatch(out, /\?/);
+    assert.match(out, /^## What was asked\n\nthe ask$/m);
+  });
+});
+
+test('the router scan of the vault is capped: minutes past the newest 1000 files are not opened', async () => {
+  await withCtx((c) => {
+    const dir = join(c.vault, 'minutes');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '2025-01-01-ancient.md'), '---\nroom: "ancient"\nclosed: 2025-01-01T10:00:00.000Z\n---\n');
+    for (let i = 0; i < 1000; i++) writeFileSync(join(dir, `2026-11-01-r${i}.md`), `---\nroom: "r${i}"\nclosed: 2026-11-01T10:00:00.000Z\n---\n`);
+    assert.equal(hasMinutes('ancient', null, c.env), false);
+    assert.equal(hasMinutes('r999', null, c.env), true);
+  });
+});
+
+test('a FIFO named like minutes is never opened (the scan would hang)', async () => {
+  await withCtx((c) => {
+    const dir = join(c.vault, 'minutes');
+    mkdirSync(dir, { recursive: true });
+    execFileSync('mkfifo', [join(dir, '2026-11-02-pipe.md')]);
+    writeFileSync(join(dir, '2026-11-01-r.md'), '---\nroom: "r"\nclosed: 2026-11-01T10:00:00.000Z\n---\n');
+    assert.equal(recentMinutes(c.env).map((m) => m.room).join(), 'r');
+  });
+});
+
+test("a symlinked <vault>/minutes is refused like the vault's rooms: no minutes written through it, none listed", async () => {
+  await withCtx(async (c) => {
+    const elsewhere = join(c.root, 'elsewhere');
+    mkdirSync(elsewhere);
+    writeFileSync(join(elsewhere, '2026-11-01-r.md'), '---\nroom: "r"\nclosed: 2026-11-01T10:00:00.000Z\n---\n');
+    mkdirSync(c.vault, { recursive: true });
+    symlinkSync(elsewhere, join(c.vault, 'minutes'));
+    await assert.rejects(writeMinutes({ rec: c.rec(), activity: ACT, closedBy: 'user', looseEnds: [], ignoredGone: [] }, c.env), /symlink/);
+    assert.deepEqual(readdirSync(elsewhere), ['2026-11-01-r.md']);
+    assert.deepEqual(recentMinutes(c.env), []);
   });
 });

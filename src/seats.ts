@@ -29,6 +29,13 @@ export function whyPark(rec: RoomRecord, a: RoomActivity, pr: Pick<PrState, 'sta
 
 const withoutSeat = ({ seat: _s, ...r }: RoomRecord): RoomRecord => r;
 
+// What would make a park of this quiet room skip, checked by a dry run too: no session to resume it with,
+// or a draft in its input box (closeRoomTab checks it again right before /exit).
+export async function parkBlocker(rec: RoomRecord, activity: RoomActivity): Promise<string | undefined> {
+  if (activity.session === undefined) return 'no session id';
+  return unsentInput(rec.herdr!.paneId);
+}
+
 export async function parkRoom(rec: RoomRecord, env: NodeJS.ProcessEnv = process.env, deps: ParkDeps = {}): Promise<'parked' | 'skip'> {
   return (await park(rec, env, deps)).result;
 }
@@ -59,12 +66,11 @@ export async function park(rec: RoomRecord, env: NodeJS.ProcessEnv = process.env
     const releaseMs = deps.releaseMs ?? settings(env).releaseMs;
     if (!isQuiet(activity, live, (deps.now ?? Date.now)(), releaseMs)) return skip('not quiet');
     if (whyPark(current, activity, roomPr(current, env)) === undefined) return skip('neither on the couch nor with an open PR');
-    if (activity.session === undefined) return skip('no session id');
-    // Checked again by closeRoomTab right before /exit; here so a draft never makes the record claim a seat.
-    const unsent = await unsentInput(current.herdr!.paneId);
-    if (unsent !== undefined) return skip(unsent);
+    // Here so a draft never makes the record claim a seat.
+    const blocker = await parkBlocker(current, activity);
+    if (blocker !== undefined) return skip(blocker);
 
-    const mine = { releasedAt: Date.now(), session: activity.session, ...(current.run !== undefined ? { run: current.run } : {}) };
+    const mine = { releasedAt: Date.now(), session: activity.session!, ...(current.run !== undefined ? { run: current.run } : {}) };
     const was = current.seat;
     const next = patchRoom(current, (r) => (r.seat?.releasedAt !== was?.releasedAt || r.seat?.session !== was?.session ? r : { ...r, seat: mine }), env);
     if (next.seat !== mine) return skip('the room changed');

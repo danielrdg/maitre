@@ -48,9 +48,10 @@ export function isQuiet(a: RoomActivity, herdr: RoomLiveness, now: number, ms: n
 }
 
 // `running` is the caller's liveness probe; a present couch counts as couched (staleness is the janitor's call).
-// With `pr` (pr.json) the PR decides; without it, the reducer's prUrl/whisky view does.
+// With `pr` (pr.json) the PR decides; without it, only a room resting on its delivered PR (whisky) is out:
+// the reducer never forgets a prUrl, so a room that works again counts again.
 export function isActive(rec: RoomRecord, a: RoomActivity, running: boolean, pr?: Pick<PrState, 'state'>): boolean {
   if (rec.closedBy !== undefined || !running || rec.couch !== undefined || rec.seat !== undefined) return false;
   if (pr !== undefined) return pr.state !== 'OPEN';
-  return a.prUrl === undefined && a.state !== 'whisky';
+  return a.state !== 'whisky';
 }

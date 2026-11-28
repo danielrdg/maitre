@@ -199,14 +199,17 @@ export async function createLabeledWorkspace(opts: { cwd: string; label: string;
 
 async function closeBareTabs(label: string): Promise<void> {
   for (const w of await listWorkspaces()) {
-    if (w.label !== label) continue;
-    let bare = true;
-    for (const pane of await listPanes(w.id)) {
-      const info = await agentInfo(pane);
-      if (info.agent !== undefined || (info.status !== 'unknown' && info.status !== 'gone')) bare = false;
-    }
-    if (bare) await closeWorkspace(w.id);
+    if (w.label === label && !(await holdsAgent(w.id))) await closeWorkspace(w.id);
   }
+}
+
+// Whether any pane of a tab holds an agent (in any state herdr reports).
+export async function holdsAgent(workspaceId: string): Promise<boolean> {
+  for (const pane of await listPanes(workspaceId)) {
+    const info = await agentInfo(pane);
+    if (info.agent !== undefined || (info.status !== 'unknown' && info.status !== 'gone')) return true;
+  }
+  return false;
 }
 
 export async function runInPane(paneId: string, command: string): Promise<void> {

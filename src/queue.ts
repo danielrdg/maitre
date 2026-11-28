@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { processStart } from './closing.js';
 import { readJson, writeJsonAtomic } from './config.js';
@@ -181,6 +181,16 @@ function isReservation(v: unknown): v is Reservation {
   return isObject(v) && typeof v.room === 'string' && Number.isInteger(v.pid) && typeof v.since === 'number' && (v.start === undefined || typeof v.start === 'string');
 }
 
+// A room being opened right now: a request for it cannot join its queue entry (the opener read the brief).
+export class RoomOpening extends Error {
+  constructor(
+    readonly room: string,
+    hint?: string,
+  ) {
+    super(`${room} is opening${hint !== undefined ? `; ${hint}` : ''}`);
+  }
+}
+
 // An unreadable reservations file holds nothing that can be shown to be live.
 function readOpening(env: NodeJS.ProcessEnv): Reservation[] {
   try {
@@ -211,9 +221,31 @@ export function isOpening(room: string, env: NodeJS.ProcessEnv = process.env): b
   return liveReservations(env).some((r) => r.room === room);
 }
 
+// Under the lock, before a write: an unreadable file is moved aside (and said on stderr) rather than replaced
+// by a list without the reservations it held.
+function readOpeningToWrite(env: NodeJS.ProcessEnv): Reservation[] {
+  const file = openingFile(env);
+  let raw: unknown;
+  try {
+    raw = readJson(file);
+  } catch {
+    raw = null;
+  }
+  if (raw === undefined) return [];
+  if (Array.isArray(raw)) return raw.filter(isReservation);
+  const aside = `${file}.bad-${Date.now()}`;
+  try {
+    renameSync(file, aside);
+    process.stderr.write(`maitre: warning: ${file} could not be read; kept as ${aside}\n`);
+  } catch {
+    // gone meanwhile
+  }
+  return [];
+}
+
 // Under the lock: drops the reservations of openers that are gone and returns the live ones.
 export function pruneReservations(env: NodeJS.ProcessEnv): Reservation[] {
-  const all = readOpening(env);
+  const all = readOpeningToWrite(env);
   const live = all.filter((r) => alive(r, env));
   if (live.length !== all.length) writeJsonAtomic(openingFile(env), live);
   return live;
@@ -239,7 +271,7 @@ export function reserveUnderLock(room: string, env: NodeJS.ProcessEnv): () => vo
 
 export function dropUnderLock(room: string, env: NodeJS.ProcessEnv): void {
   held.delete(heldKey(room, env));
-  const all = readOpening(env);
+  const all = readOpeningToWrite(env);
   const rest = all.filter((r) => !(r.room === room && r.pid === process.pid));
   if (rest.length !== all.length) writeJsonAtomic(openingFile(env), rest);
 }
@@ -268,7 +300,7 @@ export function appendToQueued(room: string, requestIds: string[], env: NodeJS.P
     const queue = readQueue(env);
     const entry = queue.find((e) => e.room === room);
     if (entry === undefined) return false;
-    if (pruneReservations(env).some((r) => r.room === room)) throw new Error(`${room} is opening; send it again once it is open`);
+    if (pruneReservations(env).some((r) => r.room === room)) throw new RoomOpening(room, 'send it again once it is open');
     const added = requestIds.filter((id) => !entry.requestIds.includes(id));
     if (added.length > 0) {
       entry.requestIds.push(...added);

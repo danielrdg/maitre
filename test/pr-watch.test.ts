@@ -15,7 +15,7 @@ const T0 = Date.parse('2026-11-27T10:00:00Z');
 const MIN = 60_000;
 const URL_A = 'https://github.com/example/repo/pull/7';
 const URL_B = 'https://github.com/example/repo/pull/8';
-const FIELDS = 'state,headRefName,mergedAt,closedAt,author,statusCheckRollup,latestReviews,comments,reviewDecision';
+const FIELDS = 'state,headRefName,headRepositoryOwner,mergedAt,closedAt,author,statusCheckRollup,latestReviews,comments,reviewDecision';
 
 interface GhView {
   state?: string;
@@ -118,11 +118,11 @@ test('adoption by branch discovery: baseline, no notice; discovery at most every
     assert.deepEqual(kinds(events), ['alpha:adopted']);
     assert.match(events[0]!.text, /#7/);
     const pr = readPr('alpha', w.env);
-    assert.deepEqual(pr, { url: URL_A, number: 7, state: 'OPEN', headRefName: 'maitre/alpha', seenAt: T0, failing: ['lint'], lastFeedbackAt: '2026-11-27T09:00:00Z' });
+    assert.deepEqual(pr, { url: URL_A, number: 7, state: 'OPEN', headRefName: 'maitre/alpha', seenAt: T0, failing: ['lint'], lastFeedbackAt: '2026-11-27T09:00:00Z', lastFeedbackKeys: [JSON.stringify(['comment', 'bot[bot]', '2026-11-27T09:00:00Z'])] });
     assert.equal(readPr('beta', w.env), undefined);
     const calls = w.calls();
     assert.deepEqual(calls.filter((a) => a[1] === 'list').map((a) => a[3]).sort(), ['maitre/alpha', 'maitre/beta']);
-    assert.deepEqual(calls.find((a) => a[1] === 'list'), ['pr', 'list', '--head', calls.find((a) => a[1] === 'list')![3]!, '--state', 'all', '--limit', '1', '--json', 'url,number,state,headRefName']);
+    assert.deepEqual(calls.find((a) => a[1] === 'list'), ['pr', 'list', '--head', calls.find((a) => a[1] === 'list')![3]!, '--state', 'all', '--limit', '20', '--json', 'url,number,state,headRefName,headRepositoryOwner', '--repo', 'example/repo']);
     assert.deepEqual(calls.find((a) => a[1] === 'view'), ['pr', 'view', URL_A, '--json', FIELDS]);
 
     // beta found nothing: no new list call before 15 minutes have passed.
@@ -576,7 +576,141 @@ test('prTick never throws; a corrupt config still records a merge with the defau
     mkdirSync(join(w.env.MAITRE_HOME!, 'state', 'rooms', 'junk'), { recursive: true });
     writeFileSync(join(w.env.MAITRE_HOME!, 'state', 'rooms', 'junk', 'room.json'), JSON.stringify({ room: 5, kind: 'code' }));
     const events = await w.tick(T0);
-    assert.deepEqual(kinds(events), ['alpha:adopted', 'alpha:merged']);
+    assert.deepEqual(kinds(events.filter((e) => e.kind !== 'error')), ['alpha:adopted', 'alpha:merged']);
     assert.deepEqual(readPr('alpha', w.env)?.dance, { until: T0 + 3 * MIN });
+  });
+});
+
+test('a fork PR on a branch of the same name is not adopted, nor a PR of another repository; ours is found behind it', async () => {
+  await withWorld(async (w) => {
+    w.room('alpha');
+    const fork = 'https://github.com/example/repo/pull/9';
+    const other = 'https://github.com/other/repo/pull/7';
+    w.prPrinted('alpha', other);
+    w.data({
+      list: { 'maitre/alpha': [{ ...listed(fork, 'maitre/alpha'), headRepositoryOwner: { login: 'stranger' } }, { ...listed(URL_A, 'maitre/alpha'), headRepositoryOwner: { login: 'example' } }] },
+      view: {
+        [other]: view('maitre/alpha'),
+        [fork]: view('maitre/alpha', { headRepositoryOwner: { login: 'stranger' } } as GhView),
+        [URL_A]: view('maitre/alpha', { headRepositoryOwner: { login: 'Example' } } as GhView),
+      },
+    });
+    assert.deepEqual(kinds(await w.tick(T0)), ['alpha:adopted']);
+    assert.equal(readPr('alpha', w.env)?.url, URL_A);
+    assert.ok(w.calls().every((a) => a[2] !== other), 'a PR of another repository is not even viewed');
+    const list = w.calls().find((a) => a[1] === 'list')!;
+    assert.deepEqual(list.slice(list.indexOf('--repo'), list.indexOf('--repo') + 2), ['--repo', 'example/repo']);
+  });
+});
+
+test('a fork PR named by the reducer is rejected, and a fork PR alone on the branch is never adopted', async () => {
+  await withWorld(async (w) => {
+    w.room('alpha');
+    w.prPrinted('alpha', URL_B);
+    w.data({ view: { [URL_B]: view('maitre/alpha', { headRepositoryOwner: { login: 'stranger' } } as GhView) } });
+    assert.deepEqual(await w.tick(T0), []);
+    assert.equal(readPr('alpha', w.env), undefined);
+  });
+});
+
+test('a second comment in the same second as the last one seen is still news', async () => {
+  await withWorld(async (w) => {
+    w.room('alpha');
+    w.prPrinted('alpha', URL_A);
+    const first = { ...comment('reviewer', '2026-11-27T10:01:00Z'), id: 'IC_1' };
+    w.data({ view: { [URL_A]: view('maitre/alpha', { comments: [] }) } });
+    await w.tick(T0);
+    w.data({ view: { [URL_A]: view('maitre/alpha', { comments: [first] }) } });
+    assert.deepEqual(kinds(await w.tick(T0 + 2 * MIN)), ['alpha:review']);
+    const second = { ...comment('bot[bot]', '2026-11-27T10:01:00Z'), id: 'IC_2' };
+    w.data({ view: { [URL_A]: view('maitre/alpha', { comments: [first, second] }) } });
+    assert.deepEqual(await w.tick(T0 + 4 * MIN), [{ room: 'alpha', kind: 'review', text: 'New comment from bot[bot]', login: 'bot[bot]' }]);
+    assert.deepEqual(await w.tick(T0 + 6 * MIN), []);
+    // Reviews come with an empty id: told apart by kind and author.
+    const r = review('carol', '2026-11-27T10:01:00Z');
+    w.data({ view: { [URL_A]: view('maitre/alpha', { comments: [first, second], latestReviews: [{ ...r, id: '' }] }) } });
+    assert.deepEqual(kinds(await w.tick(T0 + 8 * MIN)), ['alpha:review']);
+    assert.deepEqual(await w.tick(T0 + 10 * MIN), []);
+  });
+});
+
+test('a viewFailed stamp that is not finite does not pin the wait', async () => {
+  await withWorld(async (w) => {
+    w.room('alpha');
+    w.prPrinted('alpha', URL_A);
+    mkdirSync(roomDir('alpha', w.env), { recursive: true });
+    writeFileSync(join(roomDir('alpha', w.env), 'pr-seek.json'), `{"discoveredAt": ${T0}, "rejected": [], "viewFailed": {"url": "${URL_A}", "at": 1e999}}`);
+    w.data({ view: { [URL_A]: view('maitre/alpha') } });
+    assert.deepEqual(kinds(await w.tick(T0 + MIN)), ['alpha:adopted']);
+  });
+});
+
+test('a check run without a workflow and a status context of the same name are two checks; a run not started yet is the newest', async () => {
+  await withWorld(async (w) => {
+    w.room('alpha');
+    w.prPrinted('alpha', URL_A);
+    const bare = (name: string, conclusion: string, extra: Record<string, unknown> = {}) => ({ __typename: 'CheckRun', name, conclusion, status: 'COMPLETED', ...extra });
+    const rollup = [
+      bare('build', 'FAILURE'),
+      statusContext('build', 'SUCCESS'),
+      bare('test', '', { status: 'QUEUED' }),
+      bare('test', 'FAILURE', { completedAt: '2026-11-27T09:00:00Z', startedAt: '2026-11-27T08:50:00Z' }),
+    ];
+    w.data({ view: { [URL_A]: view('maitre/alpha', { statusCheckRollup: rollup }) } });
+    await w.tick(T0);
+    assert.deepEqual(readPr('alpha', w.env)?.failing, ['build']);
+  });
+});
+
+test('an unreadable config while a merge is recorded is reported, with the dance the default gives', async () => {
+  await withWorld(async (w) => {
+    w.room('alpha');
+    w.prPrinted('alpha', URL_A);
+    w.data({ view: { [URL_A]: view('maitre/alpha', { state: 'MERGED', mergedAt: '2026-11-27T09:59:00Z' }) } });
+    writeFileSync(join(w.env.MAITRE_HOME!, 'config.json'), '{broken');
+    const events = await w.tick(T0);
+    const error = events.find((e) => e.kind === 'error');
+    assert.match(error?.text ?? '', /could not read the settings.*3 minutes/);
+    assert.deepEqual(readPr('alpha', w.env)?.dance, { until: T0 + 3 * MIN });
+  });
+});
+
+// Round 2: fork workflows (R31).
+
+test('a fork workflow: origin is the fork, the PR goes into upstream from the fork; it is found and adopted', async () => {
+  await withWorld(async (w) => {
+    const rec = w.room('alpha', { origin: 'git@github.com:me/repo.git' });
+    execFileSync('git', ['-C', rec.dir, 'remote', 'add', 'upstream', 'https://github.com/example/repo.git'], { env: { ...process.env, HOME: w.env.HOME, GIT_CONFIG_NOSYSTEM: '1' } });
+    const mine = { ...listed(URL_A, 'maitre/alpha'), headRepositoryOwner: { login: 'me' } };
+    const stranger = { ...listed(URL_B, 'maitre/alpha'), headRepositoryOwner: { login: 'stranger' } };
+    w.data({
+      repos: { 'me/repo': { 'maitre/alpha': [] }, 'example/repo': { 'maitre/alpha': [stranger, mine] } },
+      view: { [URL_A]: view('maitre/alpha', { headRepositoryOwner: { login: 'me' } } as GhView), [URL_B]: view('maitre/alpha', { headRepositoryOwner: { login: 'stranger' } } as GhView) },
+    } as never);
+    assert.deepEqual(kinds(await w.tick(T0)), ['alpha:adopted']);
+    assert.equal(readPr('alpha', w.env)?.url, URL_A);
+    const repos = w.calls().filter((a) => a[1] === 'list').map((a) => a[a.indexOf('--repo') + 1]);
+    assert.deepEqual(repos, ['me/repo', 'example/repo']);
+  });
+});
+
+test('a fork workflow: a PR printed into upstream is adopted from the reducer', async () => {
+  await withWorld(async (w) => {
+    const rec = w.room('alpha', { origin: 'git@github.com:me/repo.git' });
+    execFileSync('git', ['-C', rec.dir, 'remote', 'add', 'upstream', 'https://github.com/example/repo.git'], { env: { ...process.env, HOME: w.env.HOME, GIT_CONFIG_NOSYSTEM: '1' } });
+    w.prPrinted('alpha', URL_A);
+    w.data({ view: { [URL_A]: view('maitre/alpha', { headRepositoryOwner: { login: 'me' } } as GhView) } });
+    assert.deepEqual(kinds(await w.tick(T0)), ['alpha:adopted']);
+  });
+});
+
+test('origin only (no upstream remote): a PR into another repository is not adopted, and only origin is listed', async () => {
+  await withWorld(async (w) => {
+    w.room('alpha', { origin: 'git@github.com:me/repo.git' });
+    w.prPrinted('alpha', URL_A);
+    w.data({ repos: { 'example/repo': { 'maitre/alpha': [listed(URL_A, 'maitre/alpha')] } }, view: { [URL_A]: view('maitre/alpha') } } as never);
+    assert.deepEqual(await w.tick(T0), []);
+    assert.deepEqual(w.calls().filter((a) => a[1] === 'list').map((a) => a[a.indexOf('--repo') + 1]), ['me/repo']);
+    assert.ok(w.calls().every((a) => a[1] !== 'view'));
   });
 });

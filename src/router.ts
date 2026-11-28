@@ -7,9 +7,9 @@ import { readJson, writeJsonAtomic } from './config.js';
 import { cleanEnv } from './env.js';
 import { maitreHome, roomDir, roomSlug } from './paths.js';
 import { readIndex, type Project } from './projects.js';
-import { BRIEF_HEADER, deliverToRoom, describeDelivery, describeOpen, isRecord, listRoomRows, openRoom, probeRoom, type Delivered } from './room-open.js';
+import { BRIEF_HEADER, deliverToRoom, describeDelivery, describeOpen, isRecord, listRoomRows, MaybeTyped, openRoom, probeRoom, type Delivered } from './room-open.js';
 import { ensureServer } from './herdr.js';
-import { admit, appendToQueued, queuedRooms, readQueue, type QueueEntry } from './doorman.js';
+import { admit, appendToQueued, queuedEntry, queuedRooms, readFailed, readQueue, RoomOpening, runningHead, type QueueEntry } from './doorman.js';
 import { liveLounge } from './lounge-file.js';
 import { listRooms, readRoom } from './rooms.js';
 import { isRequestId, readRequests } from './requests.js';
@@ -317,6 +317,8 @@ export async function routeDetailed(request: string, env: NodeJS.ProcessEnv = pr
   const raw = await callClaude(buildRouterPrompt(request, projects, rooms, recentMinutes(env)), env, Number.isFinite(ms) && ms > 0 ? ms : ROUTER_TIMEOUT_MS);
   const taken = listRooms(env).flatMap((r) => (typeof r.room === 'string' ? [{ name: r.room, ...(r.project !== undefined ? { project: r.project } : {}) }] : []));
   taken.push(...rooms.filter((r) => r.state === 'queued').map((r) => ({ name: r.name, ...(r.project !== undefined ? { project: r.project } : {}) })));
+  // A name that failed to open from the queue is refused by room open until it is removed: not a new name.
+  taken.push(...failedNames(env));
   return { route: parseRoute(raw, projects, rooms.map((r) => r.name), taken, (c, p) => hasMinutes(c, p, env)), ...(warning !== undefined ? { warning } : {}) };
 }
 
@@ -386,13 +388,60 @@ async function queuedReply(room: string, line: string, env: NodeJS.ProcessEnv): 
   return { room, lines: [line, ...hint], needsYou: false, queued: true };
 }
 
-// A name both queued and open: the open room takes the follow-up. herdr is asked only for a queued name.
-async function runningRoom(room: string, env: NodeJS.ProcessEnv): Promise<boolean> {
-  if (position(room, env) === undefined) return false;
+function failedNames(env: NodeJS.ProcessEnv): { name: string; project?: string }[] {
+  try {
+    return readFailed(env).map((e) => ({ name: e.room, ...(typeof e.route.project === 'string' ? { project: e.route.project } : {}) }));
+  } catch {
+    return [];
+  }
+}
+
+// A queued name whose room runs: 'ours' when the doorman opened it from that entry (it takes the request),
+// 'other' when something else runs under that name (refused: the router listed two rooms of one name).
+// herdr is asked only for a queued name. When it cannot be asked, the request joins the queue entry, unless
+// the doorman may already have opened the room from that entry: its next tick drops the entry as served, and
+// the request would reach no room ('unknown', with herdr's error).
+async function queuedRunning(room: string, env: NodeJS.ProcessEnv): Promise<'ours' | 'other' | { unknown: string } | undefined> {
+  const entry = queuedEntry(room, env);
+  if (entry === undefined) return undefined;
+  try {
+    return await runningHead(entry, env);
+  } catch (err) {
+    const rec = readRoom(room, env);
+    const opened = typeof rec === 'object' && rec !== null && rec.closedBy === undefined && rec.fromQueue === entry.queuedAt;
+    return opened ? { unknown: firstLine(err) } : undefined;
+  }
+}
+
+// A name open (registered, not closed, its Claude running) but not queued. herdr down: not known to run.
+async function openOutsideQueue(room: string, env: NodeJS.ProcessEnv): Promise<boolean> {
   const rec = readRoom(room, env);
   if (typeof rec !== 'object' || rec === null || !isRecord(rec) || rec.closedBy !== undefined) return false;
-  await ensureServer(env);
-  return (await probeRoom(rec, undefined, env)) !== 'not running';
+  try {
+    await ensureServer(env);
+    return (await probeRoom(rec, undefined, env)) !== 'not running';
+  } catch {
+    return false;
+  }
+}
+
+const NOT_SENT = 'the request was not sent';
+const notSent = (room: string, why: string): Dispatched => ({ room, lines: [why, NOT_SENT], needsYou: true });
+const bothNames = (room: string) =>
+  notSent(room, `${room} is both open and queued for another request: close one first (maitre room close ${room} removes the queued one and closes the open one)`);
+const openingNow = (room: string) => notSent(room, `${room} is opening: send it again once it is open`);
+
+// A delivery to a room that may have stopped since it was found running: its error is the reply's reason.
+// A failure of herdr's typing itself may come after the text went in: that one is never "not sent".
+async function deliverOrSay(room: string, text: string, env: NodeJS.ProcessEnv, opts: { confirmMs?: number }): Promise<Dispatched> {
+  let sent: Delivered;
+  try {
+    sent = await deliverToRoom(room, text, env, opts);
+  } catch (err) {
+    if (err instanceof MaybeTyped) return { room, lines: [firstLine(err)], needsYou: true };
+    return notSent(room, firstLine(err));
+  }
+  return { room, lines: [describeDelivery(room, sent)], needsYou: sent.result === 'unsent' };
 }
 
 // Registered, not closed, its Claude gone, and a session to resume.
@@ -416,7 +465,18 @@ export async function dispatchRouteDetailed(id: string, env: NodeJS.ProcessEnv =
   const text = readRequests(requestIds, env);
   if (r.room.kind === 'existing') {
     const room = roomSlug(r.room.name);
-    if (!(await runningRoom(room, env)) && appendToQueued(room, requestIds, env)) {
+    const head = await queuedRunning(room, env);
+    if (typeof head === 'object') return notSent(room, `could not check ${room}: ${head.unknown}`);
+    if (head === 'other') return bothNames(room);
+    if (head === 'ours') return deliverOrSay(room, text, env, opts);
+    let joined: boolean;
+    try {
+      joined = appendToQueued(room, requestIds, env);
+    } catch (err) {
+      if (err instanceof RoomOpening) return openingNow(room);
+      throw err;
+    }
+    if (joined) {
       const n = position(room, env);
       return queuedReply(room, `queued: ${room} waits for a seat${n !== undefined ? ` (position ${n})` : ''}`, env);
     }
@@ -443,13 +503,22 @@ export async function dispatchRouteDetailed(id: string, env: NodeJS.ProcessEnv =
     const sent = await deliverToRoom(room, text, env, opts);
     return { room, lines: [describeDelivery(room, sent)], needsYou: sent.result === 'unsent' };
   }
-  const seat = await admit(r, requestIds, env);
   const room = roomSlug(r.room.name);
-  if (seat.kind === 'queued') return queuedReply(room, `queued: ${room} waits for a seat (position ${seat.position})`, env);
-  if (seat.kind === 'running') {
-    const sent = await deliverToRoom(room, text, env, opts);
-    return { room, lines: [describeDelivery(room, sent)], needsYou: sent.result === 'unsent' };
+  // Refused up front: a name already open would only wait in the queue to fail there.
+  const head = await queuedRunning(room, env);
+  if (typeof head === 'object') return notSent(room, `could not check ${room}: ${head.unknown}`);
+  if (head === 'other') return bothNames(room);
+  if (queuedEntry(room, env) === undefined && (await openOutsideQueue(room, env))) return notSent(room, `room ${room} is already open`);
+  let seat;
+  try {
+    seat = await admit(r, requestIds, env);
+  } catch (err) {
+    if (err instanceof RoomOpening) return openingNow(room);
+    throw err;
   }
+  if (seat.kind === 'queued') return queuedReply(room, `queued: ${room} waits for a seat (position ${seat.position})`, env);
+  // Opened by the doorman from this name's entry: found running a moment ago, it may have stopped since.
+  if (seat.kind === 'running') return deliverOrSay(room, text, env, opts);
   let rec;
   try {
     rec = await openRoom({ name: r.room.name, ...(r.project !== null ? { project: r.project } : {}), model: r.model, taskType: r.taskType, brief: withMinutes(text, r.continues, r.project, env) }, env);

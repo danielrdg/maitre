@@ -70,6 +70,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MaitreConfig {
 const HOUR_MS = 3_600_000;
 const MINUTE_MS = 60_000;
 
+// What each setting is when config.json leaves it out (or cannot be read, for callers that go on without it).
+export const DEFAULTS = { capacity: 6, idleHours: 4, intervalMinutes: 5, releaseMinutes: 30, danceMinutes: 3, pollMinutes: 2 } as const;
+
 export function settings(env: NodeJS.ProcessEnv = process.env): Settings {
   const cfg = loadConfig(env);
   const warnings: string[] = [];
@@ -90,14 +93,14 @@ export function settings(env: NodeJS.ProcessEnv = process.env): Settings {
   };
   const seat = section('seat', cfg.seat);
   const pr = section('pr', cfg.pr);
-  const capacity = pick('capacity', cfg.capacity, (x): x is number => Number.isInteger(x) && (x as number) >= 1, 6, 'an integer of at least 1');
-  const idleHours = pick('janitor.idleHours', janitor.idleHours, positive, 4, 'a number above 0');
-  const intervalMinutes = pick('janitor.intervalMinutes', janitor.intervalMinutes, positive, 5, 'a number above 0');
+  const capacity = pick('capacity', cfg.capacity, (x): x is number => Number.isInteger(x) && (x as number) >= 1, DEFAULTS.capacity, 'an integer of at least 1');
+  const idleHours = pick('janitor.idleHours', janitor.idleHours, positive, DEFAULTS.idleHours, 'a number above 0');
+  const intervalMinutes = pick('janitor.intervalMinutes', janitor.intervalMinutes, positive, DEFAULTS.intervalMinutes, 'a number above 0');
   const vault = pick('vault', cfg.vault, (x): x is string => typeof x === 'string' && isAbsolute(x), join(maitreHome(env), 'memory'), 'an absolute path');
-  const releaseMinutes = pick('seat.releaseMinutes', seat.releaseMinutes, positive, 30, 'a number above 0');
+  const releaseMinutes = pick('seat.releaseMinutes', seat.releaseMinutes, positive, DEFAULTS.releaseMinutes, 'a number above 0');
   const autoWake = pick('pr.autoWake', pr.autoWake, (x): x is boolean => typeof x === 'boolean', false, 'true or false');
-  const danceMinutes = pick('pr.danceMinutes', pr.danceMinutes, positive, 3, 'a number above 0');
-  const pollMinutes = pick('pr.pollMinutes', pr.pollMinutes, positive, 2, 'a number above 0');
+  const danceMinutes = pick('pr.danceMinutes', pr.danceMinutes, positive, DEFAULTS.danceMinutes, 'a number above 0');
+  const pollMinutes = pick('pr.pollMinutes', pr.pollMinutes, positive, DEFAULTS.pollMinutes, 'a number above 0');
   return {
     capacity,
     idleMs: idleHours * HOUR_MS,

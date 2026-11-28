@@ -23,7 +23,7 @@ function asReply(body) {
   return null;
 }
 
-async function post(url, body, fetchImpl) {
+export async function post(url, body, fetchImpl) {
   const res = await fetchImpl(url, { method: 'POST', credentials: 'same-origin', headers: { ...HEADERS }, body: JSON.stringify(body) });
   let parsed = null;
   try { parsed = await res.json(); } catch { /* the server's own 403/404 answers are plain text */ }
@@ -54,13 +54,20 @@ export function replyView(reply, lang = 'en') {
 // One conversation with the maître. A question's id rides on the next request; an error keeps it,
 // so a retry after "busy" still answers the question. A second submit while one is in flight is
 // dropped: the server would store and dispatch it twice.
+// A reply that lands while its box is out of sight is held (hold) until it is shown (take). A held question
+// is never answered by text the user typed without seeing it: a new request drops it.
 export function receptionSession({ lang = 'en', fetchImpl } = {}) {
-  let answers, busy = false;
+  let answers, busy = false, held = null;
   return {
     get busy() { return busy; },
-    reset() { answers = undefined; },
+    get held() { return held; },
+    // A held question is still to be shown: closing the box does not drop it.
+    reset() { if (held?.kind !== 'question') answers = undefined; },
+    hold(reply) { held = reply; },
+    take() { const h = held; held = null; return h; },
     async submit(text) {
       if (busy || !String(text).trim()) return null;
+      if (held) { if (held.kind === 'question') answers = undefined; held = null; }
       busy = true;
       try {
         const reply = await sendRequest(text, answers, fetchImpl, lang);

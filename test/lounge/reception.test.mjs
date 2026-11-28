@@ -186,3 +186,54 @@ test('wakeRoom posts to the room wake endpoint and hands back the wake lines or 
   assert.equal(odd.ok, false);
   assert.ok(odd.message.length > 0);
 });
+
+test('a reply the user never saw is held: a hidden question never captures the next text', async () => {
+  const replies = [
+    json(200, { kind: 'question', id: '7', text: 'Which repo?' }),
+    json(200, { kind: 'dispatched', id: '8', room: 'x', lines: ['ok'], needsYou: false }),
+  ];
+  const f = fakeFetch(() => replies.shift());
+  const s = receptionSession({ fetchImpl: f });
+  const reply = await s.submit('fix the login');
+  s.hold(reply);
+  assert.equal(s.held, reply, 'kept for the next time the box opens');
+  await s.submit('something else');
+  assert.deepEqual(JSON.parse(f.calls[1].init.body), { text: 'something else' }, 'not an answer to a question it never showed');
+  assert.equal(s.held, null, 'a new request supersedes the unseen reply');
+});
+
+test('a held question, once shown, takes the next text as its answer', async () => {
+  const f = fakeFetch(() => json(200, { kind: 'question', id: '7', text: 'Which repo?' }));
+  const s = receptionSession({ fetchImpl: f });
+  const reply = await s.submit('fix the login');
+  s.hold(reply);
+  assert.equal(s.take(), reply, 'shown when the box reopens or the lobby comes back');
+  assert.equal(s.take(), null, 'only once');
+  await s.submit('the api repo');
+  assert.deepEqual(JSON.parse(f.calls[1].init.body), { text: 'the api repo', answers: '7' });
+});
+
+test('closing the box while a request is in flight does not drop the question it brings back', async () => {
+  let release;
+  const f = fakeFetch(() => (release ? json(200, { kind: 'dispatched', id: '9', room: 'x', lines: [], needsYou: false })
+    : new Promise(r => { release = () => r(json(200, { kind: 'question', id: '9', text: 'Sure?' })); })));
+  const s = receptionSession({ fetchImpl: f });
+  const pending = s.submit('do it');
+  s.reset();
+  release();
+  const reply = await pending;
+  s.hold(reply);
+  assert.equal(s.take(), reply);
+  await s.submit('yes');
+  assert.deepEqual(JSON.parse(f.calls[1].init.body), { text: 'yes', answers: '9' }, 'the answer still reaches its question');
+});
+
+test('resetting the box while a question is held keeps it: it is answered once shown', async () => {
+  const f = fakeFetch(() => json(200, { kind: 'question', id: '41', text: 'Which project?' }));
+  const s = receptionSession({ fetchImpl: f });
+  s.hold(await s.submit('fix the test'));
+  s.reset();
+  assert.equal(s.take().view.answers, '41');
+  await s.submit('webshop');
+  assert.deepEqual(JSON.parse(f.calls[1].init.body), { text: 'webshop', answers: '41' });
+});

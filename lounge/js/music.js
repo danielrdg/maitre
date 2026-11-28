@@ -128,9 +128,12 @@ export class MusicController {
     this.session = null;
     this._style = 'off';
     this._volume = 0.6;
+    this._default = null;
+    this._picked = false;
   }
 
   get style() { return this._style; }
+  get picked() { return this._picked; }
   get volume() { return this._volume; }
   get playing() { return this._style !== 'off' && !!this.session && this.ac?.state === 'running'; }
 
@@ -147,6 +150,21 @@ export class MusicController {
       this.timer = this.timers.setInterval(() => this.tick(), TICK_MS);
       this.timer?.unref?.();
     }
+  }
+
+  // The view's theme style. It leads only while music is on and no style was picked by hand.
+  setDefault(style) {
+    if (!STYLES[style]) return;
+    this._default = style;
+    if (this._style !== 'off' && !this._picked) this.setStyle(style);
+  }
+
+  // A choice in the musician's menu. The view's own style follows the theme; any other style is a hand pick
+  // that holds until the user picks again. Off lets the theme lead again.
+  pick(style) {
+    const next = STYLES[style] ? style : 'off';
+    this._picked = next !== 'off' && next !== this._default;
+    this.setStyle(next);
   }
 
   setVolume(v) {

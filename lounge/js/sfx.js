@@ -50,5 +50,6 @@ export function createSfx({ makeCtx = defaultCtx, rng = Math.random } = {}) {
       for (let i = 0; i < 5; i++) noise(0.25, 0.06, 0.9 + i * 0.35);
     },
     pop() { tone(880, 0.06, 'square', 0.03); },
+    lift() { tone(1319, 0.5, 'sine', 0.07); tone(1047, 0.7, 'sine', 0.07, 0.18); },
   };
 }

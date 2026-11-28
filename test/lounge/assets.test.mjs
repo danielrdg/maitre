@@ -44,6 +44,12 @@ test('every Features row has its sprite', () => {
   for (const r of rows) assert.match(r, /^\| <img src="docs\/assets\/sprites\/[a-z]+\.png" width="48" alt="[^"]+" \/> \| \*\*/);
 });
 
+test('the building is marked today and M4 is ticked on the roadmap', () => {
+  const md = readme();
+  assert.match(md, /^\| <img src="docs\/assets\/sprites\/building\.png"[^\n]*\| \*\*today\*\*/m);
+  assert.match(md, /^- \[x\] \*\*M4 · The building:\*\*/m);
+});
+
 test('the banner is 1280x320 and the GIF is 960 wide and under 8 MB', () => {
   const png = readFileSync(join(ROOT, 'docs', 'assets', 'banner.png'));
   assert.deepEqual([png.readUInt32BE(16), png.readUInt32BE(20)], [1280, 320]);

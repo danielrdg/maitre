@@ -5,9 +5,10 @@ import { STATE_KEYS, t } from '../../lounge/js/i18n.js';
 import { MODEL } from '../../lounge/js/sprites.js';
 import { panelModel, renderPanel } from '../../lounge/js/panel.js';
 import { createWorld, stepWorld, makeRngs, STEP } from '../../lounge/js/sim.js';
-import { createCast, SPOTS } from '../../lounge/js/agents.js';
+import { createCast, SPOTS, stepAgents, rehome } from '../../lounge/js/agents.js';
 import { mulberry32 } from '../../lounge/js/rng.js';
 import { badgeFor, isDim } from '../../lounge/js/scene.js';
+import { chipModel, chipText } from '../../lounge/js/hud.js';
 
 const room = (over = {}) => ({
   room: 'r1', session: 's-1', model: 'opus', state: 'work', since: 1_000_000, updatedAt: 1_000_000,
@@ -66,6 +67,26 @@ test('roomToAgents fills the panel info from the room', () => {
   assert.equal(main.id, 'r1');
   assert.equal(main.label, 'r1');
   assert.deepEqual(main.info, { task: 'Fix the flaky test', steps: ['Read a.ts', 'Ran the suite'], where: 'r1', since: 1_000_000, live: true });
+});
+
+test('roomToAgents carries the project (scratch when the kind has none) and the kind, subagents included', () => {
+  const sub = [{ id: 'a', type: 'Explore', model: 'haiku' }];
+  const code = roomToAgents(room({ project: 'webshop', kind: 'code', subagents: sub }));
+  assert.equal(code.main.info.project, 'webshop');
+  assert.equal(code.main.info.kind, 'code');
+  assert.equal(code.subagents[0].info.project, 'webshop');
+  assert.equal(code.subagents[0].info.kind, 'code');
+  const scratch = roomToAgents(room({ kind: 'scratch', subagents: sub }));
+  assert.equal(scratch.main.info.project, 'scratch');
+  assert.equal(scratch.main.info.kind, 'scratch');
+  assert.equal(scratch.subagents[0].info.project, 'scratch');
+  assert.equal(roomToAgents(room({ project: 'webshop', kind: 'scratch' })).main.info.project, 'scratch', 'scratch wins, as on the server');
+  for (const project of [undefined, '', 42]) assert.equal(roomToAgents(room({ project, kind: 'code' })).main.info.project, 'scratch');
+  // No kind: the server has not placed the room yet (still starting). The lounge does not guess scratch.
+  for (const project of [undefined, 'webshop']) assert.equal('project' in roomToAgents(room({ project })).main.info, false);
+  assert.equal('project' in roomToAgents(room({ kind: 'weird' })).main.info, false);
+  assert.equal('kind' in roomToAgents(room()).main.info, false, 'no kind key without a kind');
+  assert.equal('kind' in roomToAgents(room({ kind: 'weird' })).main.info, false);
 });
 
 test('subagents become slot agents labeled "<room> ↳ <type>" with their model color', () => {
@@ -446,6 +467,66 @@ test('LiveSource hands snapshots and room events to its callbacks and ignores ju
   assert.ok(es.closed);
 });
 
+test('LiveSource delivers the floors from the snapshot, before its rooms, and from the floors event', () => {
+  const calls = [];
+  const src = new LiveSource('api/events', r => calls.push(['rooms', r.map(x => x.room)]), () => {},
+    { EventSource: FakeEventSource, onFloors: f => calls.push(['floors', f]) });
+  assert.deepEqual(src.floors, [], 'no floors before the first snapshot');
+  src.start();
+  const es = FakeEventSource.last;
+  const F1 = [{ project: 'webshop', floor: 1, theme: 'casino', locked: false }, { project: 'scratch', floor: 2, theme: 'hall', locked: true }];
+  es.emit('snapshot', JSON.stringify({ rooms: [room({ room: 'a' })], floors: F1 }));
+  assert.deepEqual(calls, [['floors', F1], ['rooms', ['a']]]);
+  assert.deepEqual(src.floors, F1);
+  const F2 = [...F1, { project: 'api', floor: 3, theme: 'deco', locked: false }];
+  es.emit('floors', JSON.stringify(F2));
+  assert.deepEqual(calls.at(-1), ['floors', F2]);
+  assert.deepEqual(src.floors, F2, 'the latest floors are kept');
+  es.emit('floors', JSON.stringify([]));
+  assert.deepEqual(src.floors, [], 'every floor closed');
+  src.stop();
+});
+
+test('LiveSource hands onFloors a copy, so a listener cannot change its floors', () => {
+  const heard = [];
+  const src = new LiveSource('api/events', () => {}, () => {}, { EventSource: FakeEventSource, onFloors: f => { heard.push(f); f.pop(); } });
+  src.start();
+  const F = [{ project: 'api', floor: 1, theme: 'deco', locked: false }, { project: 'web', floor: 2, theme: 'tiki', locked: false }];
+  FakeEventSource.last.emit('floors', JSON.stringify(F));
+  assert.deepEqual(src.floors, F, 'the listener popped its copy, not the source\'s list');
+  assert.notEqual(heard[0], src.floors);
+  src.stop();
+});
+
+test('LiveSource drops junk floors and survives a snapshot without them', () => {
+  const floors = [];
+  const snaps = [];
+  const src = new LiveSource('api/events', r => snaps.push(r), () => {}, { EventSource: FakeEventSource, onFloors: f => floors.push(f) });
+  src.start();
+  const es = FakeEventSource.last;
+  es.emit('snapshot', JSON.stringify({ rooms: [room({ room: 'a' })] }));
+  assert.equal(snaps.length, 1, 'an old server without floors still delivers its rooms');
+  assert.deepEqual(floors, []);
+  es.emit('floors', '{not json');
+  es.emit('floors', JSON.stringify({ project: 'x' }));
+  assert.deepEqual(floors, [], 'not an array: ignored');
+  const good = { project: 'api', floor: 2, theme: 'deco', locked: false };
+  es.emit('floors', JSON.stringify([good, null, 'x', { project: '', floor: 1, theme: 'hall', locked: false }, { project: 'b', floor: 1.5, theme: 'hall', locked: false },
+    { project: 'c', floor: 3, theme: 7, locked: false }, { project: 'd', floor: 4, theme: 'tiki', locked: 'yes' }, { project: 'e', floor: 0, theme: 'hall', locked: false }]));
+  assert.deepEqual(floors, [[good, { project: 'd', floor: 4, theme: 'tiki', locked: false }]]);
+  assert.deepEqual(src.floors, floors[0]);
+  src.stop();
+});
+
+test('LiveSource still works without an onFloors callback', () => {
+  const src = new LiveSource('api/events', () => {}, () => {}, { EventSource: FakeEventSource });
+  src.start();
+  const F = [{ project: 'api', floor: 1, theme: 'deco', locked: false }];
+  assert.doesNotThrow(() => FakeEventSource.last.emit('floors', JSON.stringify(F)));
+  assert.deepEqual(src.floors, F);
+  src.stop();
+});
+
 test('the empty-lounge hint points to the maître and the reception in both languages', () => {
   assert.equal(t('live.empty', 'en'), 'No rooms yet — click the maître at the desk, or run `maitre` in a terminal');
   assert.match(t('live.empty', 'pt-BR'), /maître.*`maitre`/);
@@ -707,4 +788,69 @@ test('a wake result is shown even when the room already left the couch before it
     assert.ok(walk(root).some(n => n.textContent === text), text);
     assert.equal(walk(root).some(n => n.tag === 'button' && n.textContent === t('panel.wake')), false, 'no Wake button: it is awake');
   }
+});
+
+// ---------- the building ----------
+
+function buildingWorld(floors) {
+  const { rng, fxRng } = makeRngs(7);
+  const world = createWorld({ rng, fxRng, floors });
+  return { world, cast: createLiveCast(world, {}) };
+}
+const walkOut = world => { for (let i = 0; i < 60 * 30; i++) stepAgents(world.agents, 1 / 30, i / 30); };
+
+test('in the building a room whose project arrives after its floor rides up to it, without a state change', () => {
+  const { world, cast } = buildingWorld([{ project: 'webshop', floor: 1, theme: 'casino', locked: false }]);
+  cast.snapshot([room({ room: 'a' })]);
+  const [a] = byId(world, 'a');
+  assert.equal(a.place, 'lobby', 'no project yet, no scratch floor: it waits in the lobby');
+  world.floors = [...world.floors, { project: 'mobile', floor: 2, theme: 'tiki', locked: false }];
+  rehome(world);
+  assert.equal(a.dest, 'lobby', 'the floors list alone does not know the room is mobile\'s');
+  cast.room(room({ room: 'a', project: 'mobile', kind: 'code' }));
+  assert.equal(a.dest, 'floor:mobile', 'its project arrived in the same state: it heads for its floor');
+  walkOut(world);
+  assert.equal(a.place, 'floor:mobile');
+});
+
+test('in the building a room run by hand waits in the lobby, then plays cards on the scratch floor once the server places it', () => {
+  const scratch = { project: 'scratch', floor: 2, theme: 'hall', locked: true };
+  const { world, cast } = buildingWorld([{ project: 'webshop', floor: 1, theme: 'casino', locked: false }, scratch]);
+  const subagents = [{ id: 's1', type: 'Explore', model: 'haiku' }];
+  cast.snapshot([room({ room: 'hand', subagents })]);
+  const [a] = byId(world, 'hand'), [sub] = byId(world, 'hand/s1');
+  assert.equal(a.place, 'lobby', 'no kind yet: not on the scratch floor, open as it is');
+  assert.equal(sub.place, 'lobby', 'nor its subagent');
+  cast.room(room({ room: 'hand', kind: 'scratch', subagents }));
+  assert.equal(a.dest, 'floor:scratch');
+  assert.equal(sub.dest, 'floor:scratch', 'the subagent goes up with it');
+  walkOut(world);
+  assert.equal(a.place, 'floor:scratch');
+  assert.equal(a.state, 'work');
+  assert.ok(SPOTS.work.some(([x, y]) => a.x === x && a.y === y), `at the card table, not at ${a.x},${a.y}`);
+  assert.equal(sub.place, 'floor:scratch');
+  assert.ok(SPOTS.slot.some(([x, y]) => sub.x === x && sub.y === y), 'its subagent pulls a slot lever');
+});
+
+test('in the building a starting room that is blocked names no floor: its chip says nothing of scratch', () => {
+  const scratch = { project: 'scratch', floor: 1, theme: 'hall', locked: true };
+  const { world, cast } = buildingWorld([scratch]);
+  cast.snapshot([room({ room: 'fix-login', state: 'blocked' })]);
+  const m = chipModel(world.agents);
+  assert.equal(m.project, null);
+  assert.equal(chipText(m, 'en'), t('chip.needsYouAlone', 'en', { name: 'fix-login' }));
+  assert.doesNotMatch(chipText(m, 'pt-BR'), /scratch/);
+  assert.equal(chipText(chipModel([{ label: 'a', state: 'blocked', info: { project: 'api', since: 1 } }]), 'en'), t('chip.needsYou', 'en', { name: 'a', project: 'api' }));
+});
+
+test('in the building a room whose project arrives before its floor rides up when the floor opens', () => {
+  const { world, cast } = buildingWorld([{ project: 'webshop', floor: 1, theme: 'casino', locked: false }]);
+  cast.snapshot([room({ room: 'a' })]);
+  const [a] = byId(world, 'a');
+  cast.room(room({ room: 'a', project: 'mobile', kind: 'code' }));
+  assert.equal(a.dest, 'lobby', 'its floor is not open yet');
+  world.floors = [...world.floors, { project: 'mobile', floor: 2, theme: 'tiki', locked: false }];
+  rehome(world);
+  walkOut(world);
+  assert.equal(a.place, 'floor:mobile');
 });

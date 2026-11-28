@@ -224,3 +224,66 @@ test('MusicController: volume is clamped to 0..1 and beatPos follows the audio c
   assert.ok(near(m.beatPos() - b0, 1, 1e-6), 'one beat per 60/bpm seconds');
   m.setStyle('off');
 });
+
+test('MusicController: the theme default changes the style only while music is on', () => {
+  const timers = fakeTimers();
+  const m = new MusicController(() => fakeCtx(), { timers });
+  m.setDefault('house');
+  assert.equal(m.style, 'off', 'a default never turns music on');
+  assert.equal(timers.live.size, 0, 'and starts no scheduler');
+  m.pick('house');
+  assert.equal(m.style, 'house');
+  assert.equal(m.picked, false, "turning music on with the view's own style follows the theme");
+  m.setDefault('jazz');
+  assert.equal(m.style, 'jazz', "the next view's theme sets the style");
+  m.setDefault('house');
+  assert.equal(m.style, 'house');
+  m.setDefault('nope');
+  assert.equal(m.style, 'house', 'an unknown style is ignored');
+  m.pick('off');
+  m.setDefault('jazz');
+  assert.equal(m.style, 'off', 'off stays off');
+  assert.equal(timers.live.size, 0);
+});
+
+test('MusicController: a style picked by hand holds across views until the user picks again', () => {
+  const m = new MusicController(() => fakeCtx(), { timers: fakeTimers() });
+  m.setDefault('jazz');
+  m.pick('house');
+  assert.equal(m.picked, true, "a style other than the view's own is a hand pick");
+  for (const d of ['jazz', 'house', 'jazz']) { m.setDefault(d); assert.equal(m.style, 'house'); }
+  m.setDefault('house');
+  m.pick('jazz');
+  assert.equal(m.picked, true, 'picking again while on is still by hand');
+  for (const d of ['house', 'jazz', 'house']) { m.setDefault(d); assert.equal(m.style, 'jazz'); }
+  m.pick('off');
+  assert.equal(m.picked, false, 'off lets the theme lead again');
+  m.pick('house');
+  assert.equal(m.picked, false, "back on with the view's own style");
+  m.setDefault('jazz');
+  assert.equal(m.style, 'jazz');
+  m.pick('off');
+});
+
+test("MusicController: picking the view's own style follows the theme, turning on or already on", () => {
+  const m = new MusicController(() => fakeCtx(), { timers: fakeTimers() });
+  m.setDefault('house');
+  m.pick('jazz');
+  assert.equal(m.picked, true);
+  m.pick('house');
+  assert.equal(m.picked, false, "back to the view's own style while on: the theme leads again");
+  m.setDefault('jazz');
+  assert.equal(m.style, 'jazz');
+  m.pick('jazz');
+  assert.equal(m.picked, false, 'clicking the playing style when it is the default still follows');
+  m.setDefault('house');
+  assert.equal(m.style, 'house');
+  m.pick('jazz');
+  assert.equal(m.picked, true, 'any other style holds');
+  m.setDefault('jazz');
+  m.setDefault('house');
+  assert.equal(m.style, 'jazz');
+  m.pick('off');
+  assert.equal(m.picked, false);
+  assert.equal(m.style, 'off');
+});

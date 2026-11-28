@@ -22,7 +22,8 @@ import { startLoungeServer, type LoungeServer } from '../src/lounge-server.js';
 import { writeIndex, type Project } from '../src/projects.js';
 import { closeRoom } from '../src/janitor.js';
 import { openRoom } from '../src/room-open.js';
-import { readRoom } from '../src/rooms.js';
+import { readRoom, writeRoom } from '../src/rooms.js';
+import { openFloors } from '../src/floors.js';
 import { claimLounge } from '../src/lounge-file.js';
 import { QUEUE_HINT } from '../src/router.js';
 import { WORST_DELIVERY_MS } from '../src/room-open.js';
@@ -42,6 +43,7 @@ const QUESTION_ROUTE = { ...SCRATCH_ROUTE, question: 'Which project: backend?' }
 let sb: HerdrSandbox;
 let claudeLog: string;
 let server: LoungeServer | undefined;
+let live: LiveRooms;
 
 beforeEach(() => {
   sb = herdrSandbox();
@@ -101,6 +103,7 @@ async function start(
 ): Promise<number> {
   const env = opts.env ?? process.env;
   const spawned = opts.spawned ?? [];
+  live = new LiveRooms(env, { warn: () => {} });
   const reception =
     opts.reception === false
       ? undefined
@@ -110,11 +113,12 @@ async function start(
           spawnTerminal: (c, e) => void spawned.push({ c, env: e }),
           ...(opts.deps ? { deps: opts.deps } : {}),
           ...(opts.wake ? { wake: opts.wake } : {}),
+          floorsChanged: () => live.refresh(),
         });
   const root = join(sb.dir, 'www');
   mkdirSync(root, { recursive: true });
   writeFileSync(join(root, 'index.html'), '<!doctype html>');
-  server = await startLoungeServer({ root, port: 0, token: TOKEN, routes: liveRoutes(new LiveRooms(env), { reception }) });
+  server = await startLoungeServer({ root, port: 0, token: TOKEN, routes: liveRoutes(live, { reception }) });
   return server.port;
 }
 
@@ -761,4 +765,84 @@ test('wake: a registered room is woken; the reply carries the wake lines; a refu
 test('wake: the demo lounge (no reception routes) never answers it', async () => {
   const port = await start({ reception: false });
   assert.equal((await call(port, '/api/rooms/p/wake')).status, 403);
+});
+
+// --- floor themes
+
+const floorsFile = () => join(sb.home, 'state', 'floors.json');
+const themePath = (project: string) => `/api/floors/${project}/theme`;
+const setTheme = (port: number, project: string, payload: unknown, extra: Parameters<typeof call>[2] = {}) =>
+  call(port, themePath(project), { body: typeof payload === 'string' ? payload : JSON.stringify(payload), ...extra });
+
+function floorsFixture(): void {
+  writeFileSync(join(sb.home, 'config.json'), JSON.stringify({ projects: { api: { theme: 'garden' } } }));
+  openFloors(['webshop', 'api'], process.env, () => {});
+}
+
+test('floor theme: a valid change is saved to floors.json only, answered with the floor, and told to the lounge at once', async () => {
+  floorsFixture();
+  writeRoom({ room: 'w1', project: 'webshop', kind: 'code', dir: '/w', model: 'sonnet', taskType: 'build', createdAt: 1 });
+  const port = await start();
+  live.apply({ v: 1, ts: 1, room: 'w1', session: 's', event: 'SessionStart' });
+  live.snapshot();
+  const told: unknown[] = [];
+  live.onFloors((f) => told.push(f));
+  const cfg = readFileSync(join(sb.home, 'config.json'), 'utf8');
+  const res = await setTheme(port, 'webshop', { theme: 'tiki' });
+  assert.equal(res.status, 200, res.body);
+  assert.deepEqual(res.json, { kind: 'ok', floor: { project: 'webshop', floor: 1, theme: 'tiki', locked: false } });
+  assert.deepEqual(JSON.parse(readFileSync(floorsFile(), 'utf8')).webshop, { floor: 1, theme: 'tiki' });
+  assert.equal(readFileSync(join(sb.home, 'config.json'), 'utf8'), cfg);
+  assert.deepEqual(told, [[{ project: 'webshop', floor: 1, theme: 'tiki', locked: false }]]);
+});
+
+test('floor theme: an unknown project or theme is a 400; a theme set in config is a 409; nothing is written', async () => {
+  floorsFixture();
+  const before = readFileSync(floorsFile(), 'utf8');
+  const port = await start();
+  for (const project of ['ghost', 'constructor', '__proto__', '%zz', 'web%2Fshop', 'a%00b', 'WEBSHOP']) {
+    const res = await setTheme(port, project, { theme: 'tiki' });
+    assert.equal(res.status, 400, project);
+    assert.equal(res.json?.kind, 'error', project);
+  }
+  for (const payload of [{ theme: 'disco' }, { theme: 'Hall' }, {}, { theme: 3 }, [], 'null', '{bad']) {
+    const res = await setTheme(port, 'webshop', payload);
+    assert.equal(res.status, 400, JSON.stringify(payload));
+    assert.equal(res.json?.kind, 'error', JSON.stringify(payload));
+  }
+  const notJson = await setTheme(port, 'webshop', { theme: 'tiki' }, { headers: { 'content-type': 'text/plain' } });
+  assert.equal(notJson.status, 400);
+  for (const [project, theme] of [['api', 'tiki'], ['scratch', 'tiki'], ['scratch', 'hall']]) {
+    const locked = await setTheme(port, project!, { theme });
+    assert.equal(locked.status, 409, project);
+    assert.equal(locked.json?.kind, 'error', project);
+  }
+  assert.equal(readFileSync(floorsFile(), 'utf8'), before);
+});
+
+test('floor theme: POST only (405 with allow: POST); a cookie POST without Origin and x-maitre-request is a 403', async () => {
+  floorsFixture();
+  const before = readFileSync(floorsFile(), 'utf8');
+  const port = await start();
+  for (const method of ['GET', 'HEAD', 'PUT', 'DELETE']) {
+    const res = await call(port, themePath('webshop'), { method });
+    assert.equal(res.status, 405, method);
+    assert.equal(res.headers.allow, 'POST', method);
+  }
+  const self = `http://127.0.0.1:${port}`;
+  const body = JSON.stringify({ theme: 'tiki' });
+  for (const headers of [{ 'x-maitre-request': '1' }, { origin: 'http://evil.example', 'x-maitre-request': '1' }, { origin: self }] as Record<string, string>[]) {
+    assert.equal((await call(port, themePath('webshop'), { auth: 'cookie', body, headers })).status, 403, JSON.stringify(headers));
+  }
+  assert.equal(readFileSync(floorsFile(), 'utf8'), before);
+  const ok = await call(port, themePath('webshop'), { auth: 'cookie', body, headers: { origin: self, 'x-maitre-request': '1' } });
+  assert.equal(ok.status, 200, ok.body);
+});
+
+test('floor theme: the demo lounge (no reception routes) answers 403', async () => {
+  floorsFixture();
+  const before = readFileSync(floorsFile(), 'utf8');
+  const port = await start({ reception: false });
+  assert.equal((await setTheme(port, 'webshop', { theme: 'tiki' })).status, 403);
+  assert.equal(readFileSync(floorsFile(), 'utf8'), before);
 });

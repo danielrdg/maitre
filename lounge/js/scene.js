@@ -1,6 +1,8 @@
 import { W, H, SLOT_X } from './scene-static.js';
 import { buildSprite } from './sprites.js';
 import { poseFor, npcPose } from './agents.js';
+import { FLOOR } from './places.js';
+import { THEMES, CASINO_SLOT_X, lantern, drawCeiling, drawWallFx, drawSignature, signatureY, themeGlows } from './themes.js';
 import { emitSmoke, drawParticles, drawHaze, drawFireworks } from './particles.js';
 
 // Dynamic layer, redrawn every simulation step on top of the static background.
@@ -15,7 +17,7 @@ const SYMS = [
   { m: ['.yyy.', 'rrrrr', 'ryrrr', 'rrrrr', '.yyy.'], c: { y: '#f0c040', r: '#c8281e' } },
 ];
 
-function drawSlots(t, slots) {
+function drawSlots(t, slots, th) {
   slots.forEach(s => {
     const x = s.x;
     for (let r = 0; r < 3; r++) { const rx = x + 3 + r * 8; R(rx, 156, 7, 14, '#f2ede2'); R(rx, 156, 7, 1, '#c9c2b2'); R(rx, 169, 7, 1, '#c9c2b2');
@@ -23,7 +25,7 @@ function drawSlots(t, slots) {
       sy.m.forEach((row, yy) => [...row].forEach((ch, xx) => { if (ch !== '.') R(rx + 1 + xx, 160 + yy + jit, 1, 1, sy.c[ch]); })); }
     const flash = s.flash > t;
     for (let b = 0; b < 14; b++) { const on = flash ? (Math.floor(t * 16) % 2 === 0) : (Math.floor(t * 8) + b) % 4 === 0; R(x - 1 + b * 2 + 1, 137, 1, 1, on ? '#fff6b0' : '#8a6a20'); R(x - 1 + b * 2 + 1, 145, 1, 1, on ? '#8a6a20' : '#fff6b0'); }
-    R(x + 4, 139, 20, 5, flash ? (Math.floor(t * 10) % 2 ? '#ffd45c' : '#ff5a5a') : '#3a0d0a');
+    R(x + 4, 139, 20, 5, flash ? (Math.floor(t * 10) % 2 ? '#ffd45c' : '#ff5a5a') : th.slotEdge[2]);
     if (!flash) { R(x + 6, 141, 2, 1, '#ffd45c'); R(x + 10, 141, 2, 1, '#ffd45c'); R(x + 14, 141, 2, 1, '#ffd45c'); R(x + 18, 141, 2, 1, '#ffd45c'); }
     const pulled = (t - s.pulled) < .35;
     R(x + 28, 156, 2, 18, '#b9b9c0'); R(x + 28, 172, 3, 3, '#7a7a84');
@@ -32,39 +34,34 @@ function drawSlots(t, slots) {
   });
 }
 
-export const LANTERNS = [[124, 16], [190, 26], [256, 18], [454, 22], [322, 30]];
-function lantern(x, y, t, i) { const sw = Math.round(Math.sin(t * .9 + i * 1.7)); x += sw;
-  R(x + 5 - sw, 0, 1, y, '#5a3320'); R(x + 2, y, 7, 2, '#d9a441'); R(x, y + 2, 11, 13, '#c8281e'); R(x + 1, y + 2, 2, 13, '#e8483a'); R(x + 8, y + 2, 2, 13, '#9a1c14');
-  for (const k of [5, 9, 13]) R(x, y + k, 11, 1, '#9a1c14'); R(x + 4, y + 4, 3, 9, '#ffb060'); R(x + 5, y + 5, 1, 7, '#ffe0a0');
-  R(x + 2, y + 15, 7, 2, '#d9a441'); R(x + 5, y + 17, 1, 5, '#d9a441'); R(x + 4, y + 22, 3, 1, '#c8281e'); }
-const BULB = ['#ffd45c', '#ff7a5a', '#fff0b0', '#ff5fa2'];
-function stringLights(t) { for (let seg = 0; seg < 6; seg++) { const x0 = 90 + seg * 80, x1 = x0 + 80;
-    for (let x = x0; x < x1; x++) { const k = (x - x0) / 80, y = 44 + Math.round(Math.sin(k * Math.PI) * 10); R(x, y, 1, 1, '#2a160b');
-      if ((x - x0) % 10 === 5) { const on = (Math.floor(t * 3) + x) % 5 !== 0; R(x - 1, y + 1, 3, 3, on ? BULB[(x / 10 | 0) % 4] : '#6a4a2a'); } } } }
-function discoBall(t) { const cx = 400, cy = 74; R(cx, 0, 1, cy - 7, '#8a8a92');
-  for (let y = -7; y <= 7; y++) for (let x = -7; x <= 7; x++) if (x * x + y * y <= 49) { const glint = ((x + y + Math.floor(t * 6)) & 3) === 0;
-    R(cx + x, cy + y, 1, 1, glint ? '#ffffff' : ((x ^ y) & 1 ? '#9aa0b0' : '#c8ccd8')); } }
-function wallDots(t) { const cols = ['rgba(255,95,162,.55)', 'rgba(91,156,245,.5)', 'rgba(255,212,92,.55)', 'rgba(95,211,154,.45)'];
-  for (let i = 0; i < 18; i++) { const an = t * .35 + i * 2.1, x = 400 + Math.cos(an) * (90 + (i % 5) * 26), y = 74 + Math.sin(an * 1.3) * (30 + (i % 3) * 20) + 30;
-    if (x > 104 && x < 524 && y > 4 && y < 196) R(x, y, 2, 2, cols[i % 4]); } }
-function danceFloor(t) { const C = ['#5a1a3a', '#1a2a5a', '#5a4a10', '#1a4a2a', '#3a1a5a'];
+export const LANTERNS = FLOOR.lanterns;
+function danceFloor(t, th) { const C = th.dance;
   for (let ty = 0; ty < 4; ty++) for (let tx = 0; tx < 10; tx++) { const x = 330 + tx * 14, y = 274 + ty * 12;
-    const on = ((tx + ty + Math.floor(t * 2)) % 5); R(x, y, 13, 11, C[on]); R(x, y, 13, 1, 'rgba(255,255,255,.12)'); } R(330, 272, 140, 2, '#d9a441'); }
+    const on = ((tx + ty + Math.floor(t * 2)) % 5); R(x, y, 13, 11, C[on]); R(x, y, 13, 1, 'rgba(255,255,255,.12)'); } R(330, 272, 140, 2, th.gold); }
 
-function drawFurnitureFront(kind, t, world) {
+// The casino's decor slots spin on their own clock, as in the mockup.
+const decorSlots = t => CASINO_SLOT_X.map((x, i) => {
+  const T = t + .9, ph = (T + i * 1.4) % 2.8, spin = ph < .7, k = Math.floor((T + i * 1.4) / 2.8);
+  const reels = [0, 1, 2].map(r => (spin ? (Math.floor(T * 30) + r) % 4 : (k + r * (i + 1)) % 4));
+  return { x, reels, spin: [spin, spin, spin], flash: -1, pulled: ph < .35 ? t - ph : -1 };
+});
+
+function drawFurnitureFront(kind, t, world, th) {
   const { ringUntil } = world, { tableCards } = world.particles;
-  if (kind === 'sofa') { R(106, 184, 66, 16, '#7a2230'); R(106, 184, 66, 2, '#a8394c'); R(102, 168, 7, 32, '#6a1c28'); R(169, 168, 7, 32, '#6a1c28');
-    R(102, 168, 7, 2, '#a8394c'); R(169, 168, 7, 2, '#a8394c'); R(108, 200, 3, 4, '#24100b'); R(167, 200, 3, 4, '#24100b'); }
+  if (kind === 'sofa') { R(106, 184, 66, 16, th.sofa[2]); R(106, 184, 66, 2, th.sofaEdge[0]); R(102, 168, 7, 32, th.sofa[3]); R(169, 168, 7, 32, th.sofa[3]);
+    R(102, 168, 7, 2, th.sofaEdge[0]); R(169, 168, 7, 2, th.sofaEdge[0]); R(108, 200, 3, 4, '#24100b'); R(167, 200, 3, 4, '#24100b'); }
   if (kind === 'table') { R(166, 222, 140, 3, '#9a5f38'); R(168, 225, 136, 9, '#1f6b45'); R(170, 225, 132, 1, '#2f8f5e'); R(168, 233, 136, 1, '#17553a');
     for (const c of tableCards) { R(c.x, c.y, 3, 4, '#f2ede2'); R(c.x + 1, c.y + 1, 1, 1, c.red ? '#c0262a' : '#1a1a1a'); }
     [[176, '#c0262a'], [181, '#5b9cf5'], [292, '#ffd45c'], [297, '#5fd39a']].forEach(([cx, col], i) => { const hh = 2 + Math.round((Math.sin(t * .7 + i * 2) + 1) * 2);
       for (let k = 0; k < hh; k++) R(cx, 232 - k, 4, 1, k % 2 ? col : '#efe9dc'); });
-    R(166, 234, 140, 6, '#5a3320'); R(166, 234, 140, 1, '#d9a441'); R(228, 240, 16, 16, '#3a2010'); R(218, 256, 36, 3, '#2a160b'); }
-  if (kind === 'counter') { R(360, 178, 110, 4, '#9a5f38'); R(360, 182, 110, 30, '#6b3a22');
-    for (let x = 366; x < 466; x += 18) { R(x, 186, 14, 22, '#5a3020'); R(x, 186, 14, 1, '#7a4a2a'); R(x + 6, 196, 2, 2, '#d9a441'); }
-    R(360, 211, 110, 2, '#c89a3c');
-    for (const sx of [388, 446]) { R(sx, 214, 11, 3, '#a3221b'); R(sx, 214, 11, 1, '#d04a40'); R(sx + 5, 217, 1, 18, '#b9b9c0'); R(sx + 2, 235, 7, 1, '#b9b9c0'); } }
-  if (kind === 'armchair') { R(480, 172, 6, 22, '#5e1428'); R(506, 172, 6, 22, '#5e1428'); R(484, 180, 24, 14, '#4a1020'); R(480, 172, 6, 1, '#8a2440'); R(506, 172, 6, 1, '#8a2440'); }
+    R(166, 234, 140, 6, '#5a3320'); R(166, 234, 140, 1, th.gold); R(228, 240, 16, 16, '#3a2010'); R(218, 256, 36, 3, '#2a160b'); }
+  if (kind === 'counter') { R(360, 178, 110, 4, th.counter[0]); R(360, 182, 110, 30, th.counter[1]);
+    if (th === THEMES.tiki) for (let x = 360; x < 470; x += 5) R(x, 182, 4, 30, (x / 5) % 2 ? '#8a6a30' : '#7a5a26');
+    for (let x = 366; x < 466; x += 18) { R(x, 186, 14, 22, th.cabinet[0]); R(x, 186, 14, 1, th.cabinet[1]); R(x + 6, 196, 2, 2, th.gold); }
+    R(360, 211, 110, 2, th.trim);
+    if (th === THEMES.tiki) for (const ux of [372, 420, 462]) { R(ux, 172, 3, 6, '#ff9a3c'); R(ux - 2, 168, 7, 2, ['#ff5fa2', '#2fb8a0', '#ffd45c'][ux % 3]); R(ux + 1, 170, 1, 2, '#f2ede2'); }
+    for (const sx of [388, 446]) { R(sx, 214, 11, 3, th.stool[0]); R(sx, 214, 11, 1, th.stool[1]); R(sx + 5, 217, 1, 18, '#b9b9c0'); R(sx + 2, 235, 7, 1, '#b9b9c0'); } }
+  if (kind === 'armchair') { R(480, 172, 6, 22, th.chair[0]); R(506, 172, 6, 22, th.chair[0]); R(484, 180, 24, 14, th.chair[2]); R(480, 172, 6, 1, th.chair[1]); R(506, 172, 6, 1, th.chair[1]); }
   if (kind === 'desk') { R(204, 268, 84, 4, '#9a5f38'); R(206, 272, 80, 30, '#6b3a22'); R(206, 272, 80, 1, '#d9a441');
     for (let x = 210; x < 282; x += 18) { R(x, 276, 14, 22, '#5a3020'); R(x + 6, 285, 2, 2, '#d9a441'); }
     const ring = ringUntil > t; const bx = 270 + (ring ? (Math.floor(t * 30) % 2 ? -1 : 0) : 0);
@@ -84,6 +81,7 @@ export function drawSprite(spr, cx, fy, flip, bob, dim, shadow = true) {
   g.globalAlpha = 1;
   return [x0, y0];
 }
+export function spriteOn(ctx, spr, cx, fy, flip, bob, dim, shadow = true) { g = ctx; return drawSprite(spr, cx, fy, flip, bob, dim, shadow); }
 export const anc = (o, a, flip) => [flip ? o[0] + 17 - a[0] : o[0] + a[0], o[1] + a[1]];
 
 function drawBubble(o, kind) {
@@ -119,23 +117,12 @@ const glowAt = (x, y, r, c) => {
   g.fillStyle = gr; g.fillRect(x - r, y - r, r * 2, r * 2);
 };
 
-// Draws one frame and refreshes world.hitboxes. Returns whether the neon is lit.
-export function renderFrame(ctx, bg, world, t) {
-  g = ctx;
-  const { agents, npcs, slots, particles: ps, frame, fxRng, cheerUntil, ringUntil, fireworksUntil, beat = null } = world;
-  const hitboxes = world.hitboxes = [];
-  const sprite = (look, pose) => buildSprite(look, pose);
-  g.drawImage(bg, 0, 0);
-  drawParticles(g, ps);
-  drawFireworks(g, ps);
-  R(550, 21, 2, 147, '#5a3320');
-  danceFloor(t); wallDots(t); drawSlots(t, slots);
-  const neonOn = !(Math.sin(t * 3.1) > .97 || (t % 7 > 6.85));
-
-  // drawables sorted by depth (feet y)
-  const items = [];
-  for (const a of agents) { const ps2 = poseFor(a, t, cheerUntil); items.push({ y: a.y, draw() {
-    const spr = sprite(a.look, ps2.pose);
+// One agent or staff member as a depth-sorted drawable, with its ember, smoke, steam and balloon.
+function agentItem(a, t, world, hitboxes) {
+  const { particles: ps, frame, cheerUntil } = world;
+  const ps2 = poseFor(a, t, cheerUntil);
+  return { y: a.y, draw() {
+    const spr = buildSprite(a.look, ps2.pose);
     const o = drawSprite(spr, a.x, a.y, ps2.flip, ps2.bob, isDim(a) && dimAlpha(a), !(a.state === 'ready' && !a.walking));
     hitboxes.push({ kind: 'agent', ref: a, x: o[0], y: o[1], w: 18, h: 34 });
     if (ps2.ember) { const [ex, ey] = anc(o, ps2.ember, ps2.flip); R(ex, ey, 1, 1, (t * 3 + a.off) % 1 < .5 ? '#ff7a1a' : '#ffd04a');
@@ -146,9 +133,14 @@ export function renderFrame(ctx, bg, world, t) {
     if (a.state === 'sleep' && frame % 70 === 0) ps.parts.push({ k: 'zz', x: o[0] + 13, y: o[1] + 4, life: 0, max: 80 });
     const badge = badgeFor(a, t);
     if (badge) drawBubble(o, badge);
-  } }); }
-  for (const n of npcs) { const ps2 = npcPose(n, t, ringUntil, beat); items.push({ y: n.y, draw() {
-    const o = drawSprite(sprite(n.look, ps2.pose), n.x, n.y, ps2.flip, ps2.bob);
+  } };
+}
+
+function npcItem(n, t, world, hitboxes) {
+  const { particles: ps, frame, ringUntil, beat = null } = world;
+  const ps2 = npcPose(n, t, ringUntil, beat);
+  return { y: n.y, draw() {
+    const o = drawSprite(buildSprite(n.look, ps2.pose), n.x, n.y, ps2.flip, ps2.bob);
     hitboxes.push({ kind: 'npc', ref: n, x: o[0], y: o[1], w: 18, h: 34 });
     if (n.kind === 'sax') {
       // With music on, one note every two beats, so the rate follows the bpm.
@@ -157,36 +149,102 @@ export function renderFrame(ctx, bg, world, t) {
       n.noteAt = k;
     }
     if (n.kind === 'barman') { const gx = o[0] + 8 + Math.round(Math.sin(t * 4) * 2); R(gx, o[1] + 17, 3, 4, '#dfe8ee'); R(gx, o[1] + 17, 3, 1, '#ffffff'); }
-  } }); }
-  for (const [kind, y] of [['sofa', 199.5], ['table', 240], ['counter', 213], ['armchair', 196], ['desk', 303], ['rope', 306]]) {
-    items.push({ y, draw: () => drawFurnitureFront(kind, t, world) });
+  } };
+}
+
+// Drawables for another scene (the lobby) on ctx: these people, and the desk and rope in the hall's colours.
+export function peopleItems(ctx, world, t, agents, npcs, hitboxes) {
+  g = ctx;
+  return [...agents.map(a => agentItem(a, t, world, hitboxes)), ...npcs.map(n => npcItem(n, t, world, hitboxes))];
+}
+export function furnitureItem(ctx, kind, y, t, world) { g = ctx; return { y, draw: () => drawFurnitureFront(kind, t, world, THEMES.hall) }; }
+
+// Lift doors on a wall, open 0..1, with the trim around them.
+export function liftDoors(ctx, x, y, w, h, open, trim) {
+  g = ctx;
+  R(x - 3, y - 3, w + 6, h + 3, trim); R(x - 2, y - 2, w + 4, h + 2, '#2a2620'); R(x, y, w, h, '#1a1410');
+  const half = w / 2, gap = Math.round(open * (half - 2));
+  if (open > 0) { R(x + 2, y + 2, w - 4, h - 2, '#ffcf7a'); R(x + 2, y + 2, w - 4, 3, '#fff0c0'); }
+  g.save(); g.beginPath(); g.rect(x, y, w, h); g.clip();
+  for (const [dx, dir] of [[0, -1], [half, 1]]) { const px = x + dx + dir * gap;
+    R(px, y, half, h, '#9a8a70'); R(px + 1, y + 1, half - 2, h - 2, '#b8a888'); R(px + (dir < 0 ? half - 2 : 1), y, 1, h, '#6a5a44');
+    R(px + 3, y + 4, half - 6, h - 8, 'rgba(255,255,255,.08)'); }
+  g.restore();
+}
+// How far lift doors stand open, `since` seconds after they opened (closed again after 1.6 s).
+export const doorOpen = since => { const k = since / 1.6; return k < 0 || k > 1 ? 0 : Math.min(1, Math.sin(k * Math.PI) * 1.6); };
+
+// The hall's floor in the building has a gong where the single-room lounge has the reception desk.
+const HALL_GONG_Y = 304;
+
+// Draws one frame and refreshes world.hitboxes. Returns whether the neon is lit.
+// `floor` makes it a floor of the building: only those agents and staff, the lift landing on the left
+// (doors open `floor.open`, 0..1) instead of the street, and the theme's signature piece instead of the desk.
+export function renderFrame(ctx, bg, world, t, th = THEMES.hall, floor = null) {
+  g = ctx;
+  const { slots, particles: ps, fxRng, fireworksUntil } = world;
+  const agents = floor ? floor.agents : world.agents, npcs = floor ? floor.npcs : world.npcs;
+  const hitboxes = world.hitboxes = [];
+  g.drawImage(bg, 0, 0);
+  drawParticles(g, ps);
+  drawFireworks(g, ps);
+  R(550, 21, 2, 147, th.frame);
+  danceFloor(t, th); drawWallFx(g, th, t); drawSlots(t, slots, th);
+  if (th === THEMES.casino) drawSlots(t, decorSlots(t), th);
+  if (floor) {
+    liftDoors(g, 22, 128, 44, 78, floor.open, th.trim);
+    R(36, 120, 16, 6, '#140b08'); R(38, 121, 3, 4, floor.open > 0 ? '#ffd45c' : '#5a4a2a'); R(47, 121, 3, 4, '#5a4a2a');
   }
+  const neonOn = !(Math.sin(t * 3.1) > .97 || (t % 7 > 6.85));
+
+  // drawables sorted by depth (feet y)
+  const items = [];
+  for (const a of agents) items.push(agentItem(a, t, world, hitboxes));
+  for (const n of npcs) items.push(npcItem(n, t, world, hitboxes));
+  const sigY = signatureY(th) ?? (floor ? HALL_GONG_Y : null), sig = sigY !== null;
+  for (const [kind, y] of [['sofa', 199.5], ['table', 240], ['counter', 213], ['armchair', 196], ['desk', 303], ['rope', 306]]) {
+    if (kind === 'desk' && sig) continue;
+    if (kind === 'rope' && floor) continue;
+    items.push({ y, draw: () => drawFurnitureFront(kind, t, world, th) });
+  }
+  if (sig) items.push({ y: sigY, draw: () => drawSignature(g, th, t) });
   items.sort((a, b) => a.y - b.y).forEach(it => it.draw());
 
-  LANTERNS.forEach(([x, y], i) => lantern(x, y, t, i)); stringLights(t); discoBall(t);
+  drawCeiling(g, th, t);
   drawHaze(g, ps); drawParticles(g, ps);
 
   // light
   g.globalCompositeOperation = 'lighter';
   const glow = glowAt;
-  LANTERNS.forEach(([x, y], i) => { const f = .9 + Math.sin(t * 6 + i * 2.3) * .05 + fxRng() * .04; glow(x + 5, y + 9, 72, `rgba(255,186,90,${.3 * f})`); });
-  glow(183, 145, 34, 'rgba(255,220,150,.25)'); glow(97, 200, 40, 'rgba(255,170,80,.25)');
-  if (neonOn) glow(42, 80, 46, 'rgba(255,60,150,.22)');
+  LANTERNS.forEach(([x, y], i) => { const f = .9 + Math.sin(t * 6 + i * 2.3) * .05 + fxRng() * .04;
+    if (th !== THEMES.garden) glow(x + 5, y + 9, 72, `rgba(${th.light},${.3 * f})`); });
+  if (th === THEMES.garden) for (let i = 0; i < 6; i++) glow(110 + i * 85, 22, 50, `rgba(${th.light},.12)`);
+  glow(183, 145, 34, 'rgba(255,220,150,.25)');
+  if (floor) glow(44, 170, 40, `rgba(${th.light},.14)`);
+  else { glow(97, 200, 40, 'rgba(255,170,80,.25)'); if (neonOn) glow(FLOOR.neon[0], FLOOR.neon[1], 46, 'rgba(255,60,150,.22)'); }
   SLOT_X.forEach((x, i) => glow(x + 14, 165, 26, slots[i].flash > t ? 'rgba(255,220,90,.45)' : 'rgba(255,90,70,.16)'));
-  glow(246, 266, 38, 'rgba(255,200,110,.18)'); glow(496, 160, 40, 'rgba(255,190,80,.2)'); glow(556, 40, 30, 'rgba(160,180,255,.14)');
+  if (!sig) glow(246, 266, 38, 'rgba(255,200,110,.18)');
+  if (floor && th === THEMES.hall) glow(246, 280, 30, 'rgba(255,200,110,.16)');
+  glow(496, 160, 40, th.vipGlow); glow(556, 40, 30, 'rgba(160,180,255,.14)');
+  themeGlows(th, glow);
   for (let i = 0; i < 3; i++) { const an = t * .8 + i * 2.1, tx = 400 + Math.cos(an) * 55, ty = 296 + Math.sin(an * 1.4) * 14;
-    const cols = ['rgba(255,95,162,.16)', 'rgba(91,156,245,.16)', 'rgba(255,212,92,.16)'];
+    const cols = th.dots.map(c => `rgba(${c},.16)`);
     g.fillStyle = cols[i]; g.beginPath(); g.moveTo(400 - 2, 80); g.lineTo(400 + 2, 80); g.lineTo(tx + 18, ty); g.lineTo(tx - 18, ty); g.closePath(); g.fill(); glow(tx, ty, 18, cols[i]); }
   if ((t % .9) < .6) agents.filter(a => a.state === 'blocked' && !a.walking).forEach(a => glow(a.x, a.y - 30, 18, 'rgba(255,40,40,.35)'));
   if (fireworksUntil > t) glow(551, 70, 50, 'rgba(255,200,140,.12)');
   g.globalCompositeOperation = 'source-over';
-  const vg = g.createRadialGradient(W / 2, H / 2, 110, W / 2, H / 2, 360); vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(10,4,2,.62)');
-  g.fillStyle = vg; g.fillRect(0, 0, W, H);
+  vignette(W, H);
   return neonOn;
 }
 
+export function vignette(w = W, h = H, edge = .62, ctx = g) {
+  const vg = ctx.createRadialGradient(w / 2, h / 2, 110, w / 2, h / 2, 360); vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, `rgba(10,4,2,${edge})`);
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, w, h);
+}
+export function glowOn(ctx) { return (x, y, r, c) => { g = ctx; glowAt(x, y, r, c); }; }
+
 // Standalone pieces for the README art (banner, state sheet).
-export function drawLantern(ctx, x, y, t = 0, i = 0) { g = ctx; lantern(x, y, t, i); }
+export function drawLantern(ctx, x, y, t = 0, i = 0) { lantern(ctx, x, y, t, i); }
 export function drawBadge(ctx, o, kind) { g = ctx; drawBubble(o, kind); }
 
 // Standalone figure for the panel portrait.

@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isClosing } from './closing.js';
 import { countsAsActivity, type HookLine } from './events.js';
+import { SCRATCH, openFloors, warnOnce, type Floor, type Warn } from './floors.js';
 import { herdrSession } from './herdr.js';
 import type { LoungeAuth, TicketStore } from './lounge-server.js';
 import { statSync } from 'node:fs';
@@ -17,6 +18,9 @@ const PING_MS = 15_000;
 const WATCH_MS = 1_000;
 const NOTICE_MAX = 200;
 const DANCES_OVER = new Set(['ready', 'coffee', 'whisky', 'couch', 'parked']);
+// How long a room with no record waits in the lobby before it counts under scratch: an open writes room.json
+// right after the room's first event, while one run by hand never does.
+const START_GRACE_MS = 10_000;
 // The only links the lounge is given: the page puts it in an href.
 const PR_LINK = /^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/pull\/\d+$/;
 
@@ -49,7 +53,12 @@ export class LiveRooms {
   // makes the couch stale. maître's starting note is left out: it says nothing about a Claude being there.
   private readonly lastEvent = new Map<string, number>();
   // What each room was last sent as, so refresh() sends only what changed.
-  private readonly shown = new Map<string, { state: string; json: string }>();
+  private readonly shown = new Map<string, { state: string; json: string; floor: string | undefined }>();
+  private readonly floorListeners = new Set<(floors: Floor[]) => void>();
+  // The floors last told, and the open projects they came from. Unset until the first refresh: the boot
+  // replay passes rooms that ended long ago through live states, and must not give them a floor.
+  private told: { json: string; floors: Floor[]; open: string } | undefined;
+  private readonly warn: Warn;
   private queue: { stamp: string; rooms: Map<string, RoomState> } = { stamp: '', rooms: new Map() };
   // Entries the doorman opened (a record stamped with their queuedAt): shown queued until the room's own
   // events reach the tail, so the agent walks from the sidewalk to its table instead of out and back in.
@@ -57,13 +66,16 @@ export class LiveRooms {
 
   // The newest real prompt per room (the main agent's, not synthetic): a PR notice older than it is read.
   private readonly lastPrompt = new Map<string, number>();
+  // When each room's current opening sent its first line: where its start grace runs from.
+  private readonly firstSeen = new Map<string, number>();
   private readonly now: () => number;
 
   constructor(
     private readonly env: NodeJS.ProcessEnv = process.env,
-    opts: { now?: () => number } = {},
+    opts: { now?: () => number; warn?: Warn } = {},
   ) {
     this.now = opts.now ?? Date.now;
+    this.warn = opts.warn ?? warnOnce;
   }
 
   // Keyed by room.json's mtime: the file is read again only when it changes.
@@ -163,13 +175,14 @@ export class LiveRooms {
     return this.queue.rooms;
   }
 
+  // `kind` on the wire says where a room belongs: a room sent without one is still starting, and waits in the lobby.
   private view(state: RoomState, isParked = false): RoomState {
     const rec = this.record(state.room);
-    if (!rec) return state;
+    if (!rec) return this.now() - (this.firstSeen.get(state.room) ?? -Infinity) >= START_GRACE_MS ? { ...state, kind: 'scratch' } : state;
     const out: RoomState = { ...state };
     if (typeof rec.project === 'string' && rec.project !== '') out.project = rec.project;
     if (typeof rec.branch === 'string' && rec.branch !== '') out.branch = rec.branch;
-    if (rec.kind === 'code' || rec.kind === 'scratch') out.kind = rec.kind;
+    out.kind = rec.kind === 'code' || rec.kind === 'scratch' ? rec.kind : out.project !== undefined ? 'code' : 'scratch';
     if (state.model === 'unknown' && typeof rec.model === 'string') out.model = modelKey(rec.model);
     const couch = parked(rec.couch);
     if (couch !== undefined && couchHolds(couch, state.state, this.lastEvent.get(state.room) ?? state.updatedAt)) {
@@ -225,9 +238,12 @@ export class LiveRooms {
     return live && this.view(live, this.parked(live));
   }
 
+  // A floor is told before the room that opens it arrives, and after the room that empties it leaves.
   private emit(room: RoomState): void {
-    this.shown.set(room.room, { state: room.state, json: JSON.stringify(room) });
+    this.shown.set(room.room, { state: room.state, json: JSON.stringify(room), floor: this.floorOf(room) });
     if (room.state === 'exit' && !this.rooms.has(room.room)) this.shown.delete(room.room);
+    const leaving = room.state === 'exit';
+    if (!leaving) this.floorsMoved();
     for (const fn of [...this.listeners]) {
       try {
         fn(room);
@@ -235,6 +251,59 @@ export class LiveRooms {
         // One broken subscriber must not starve the others.
       }
     }
+    if (leaving) this.floorsMoved();
+  }
+
+  // The lounge's own rule, read off what it is sent: no kind yet, no floor (see view()).
+  private floorOf(r: RoomState): string | undefined {
+    if (r.state === 'exit' || r.kind === undefined) return undefined;
+    return r.kind !== 'scratch' && typeof r.project === 'string' && r.project !== '' ? r.project : SCRATCH;
+  }
+
+  private openProjects(): string[] {
+    const open = new Set<string>();
+    for (const s of this.shown.values()) if (s.floor !== undefined) open.add(s.floor);
+    return [...open];
+  }
+
+  private floorsMoved(): void {
+    if (this.told !== undefined && this.openProjects().join('\0') !== this.told.open) this.refreshFloors();
+  }
+
+  // Reads floors.json and config.json (each parsed again only when it changed) and tells a change.
+  refreshFloors(): void {
+    const open = this.openProjects();
+    let floors: Floor[];
+    try {
+      floors = openFloors(open, this.env, this.warn);
+    } catch (err) {
+      this.warn(`floors: ${(err as Error).message}`);
+      return;
+    }
+    const json = JSON.stringify(floors);
+    const same = json === this.told?.json;
+    this.told = { json, floors, open: open.join('\0') };
+    if (same) return;
+    for (const fn of [...this.floorListeners]) {
+      try {
+        fn(floors);
+      } catch {
+        // as for rooms
+      }
+    }
+  }
+
+  floors(): Floor[] {
+    if (this.told === undefined) this.refreshFloors();
+    return this.told?.floors ?? [];
+  }
+
+  onFloors(fn: (floors: Floor[]) => void): () => void {
+    const entry = (floors: Floor[]) => fn(floors);
+    this.floorListeners.add(entry);
+    return () => {
+      this.floorListeners.delete(entry);
+    };
   }
 
   apply(line: HookLine): RoomState {
@@ -244,6 +313,7 @@ export class LiveRooms {
     const next = reduce(prev, line);
     if (next === prev) return next;
     this.rooms.set(line.room, next);
+    if (prev === undefined || (prev.state === 'exit' && next.state !== 'exit')) this.firstSeen.set(line.room, typeof line.ts === 'number' ? line.ts : this.now());
     if (prev?.state === 'exit' && next.state === 'exit') return next;
     this.emit(this.present(line.room)!);
     return next;
@@ -263,6 +333,7 @@ export class LiveRooms {
       if (now === undefined || (now.state === 'exit' && quiet)) continue;
       if (JSON.stringify(now) !== was?.json) this.emit(now);
     }
+    this.refreshFloors();
   }
 
   // Polls refresh(): queue.json is replaced by a rename, which a file watch would lose.
@@ -353,8 +424,13 @@ export function liveRoutes(rooms: LiveRooms, opts: { pingMs?: number; tickets?: 
       });
       const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
       // Snapshot and subscription in one synchronous block, so no change can fall between them.
-      send('snapshot', { rooms: rooms.snapshot() });
-      const off = rooms.on((room) => send('room', room));
+      send('snapshot', { rooms: rooms.snapshot(), floors: rooms.floors() });
+      const offRooms = rooms.on((room) => send('room', room));
+      const offFloors = rooms.onFloors((floors) => send('floors', floors));
+      const off = () => {
+        offRooms();
+        offFloors();
+      };
       const ping = setInterval(() => res.write(': ping\n\n'), pingMs);
       ping.unref();
       const cleanup = () => {

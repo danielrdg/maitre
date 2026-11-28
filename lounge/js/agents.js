@@ -1,35 +1,38 @@
 import { DEMO_CAST } from './demo.js';
+import { FLOOR, LOBBY } from './places.js';
+import { viewOf } from './building.js';
 
-export const SPOTS = {
-  queue: [[20, 302], [40, 302], [60, 302], [-6, 302], [-26, 302], [-46, 302]],
-  work: [[186, 238], [210, 238], [260, 238], [284, 238], [162, 238]],
-  smoke: [[538, 236], [566, 236]],
-  blocked: [[300, 314], [322, 314]],
-  visitor: [[470, 238]],
-  boss: [[496, 192]],
-  slot: [[314, 238], [345, 238]],
-  coffee: [[378, 242], [400, 242]],
-  whisky: [[454, 242], [432, 242]],
-  ready: [[394, 219], [452, 219]],
-  sleep: [[136, 199]],
-  dance: [[364, 306], [402, 316], [440, 306]],
-};
-
-export const AISLE_Y = 266;
-export const DOOR = [94, 302];
+export const SPOTS = FLOOR.spots;
+export const AISLE_Y = FLOOR.aisleY;
+export const DOOR = FLOOR.door;
 const WALK_SPEED = 46;
-const STREET_X = 86;
+const STREET_X = FLOOR.streetX;
 
 export function assignHabit(rng = Math.random) {
   const r = rng();
   return r < 0.35 ? 'heavy' : r < 0.75 ? 'light' : 'none';
 }
 
-const occupants = (agents, agent, state, i) => agents.filter(b => b !== agent && b.state === state && b.spot === i).length;
+// In the building an agent has `place`, where it stands now ('floor:<project>', 'lobby' with its sidewalk, or
+// 'terrace'; null while it rides the lift), and `dest`, the place of its spot. Spots are counted per dest.
+// The README capture's single-room lounge has neither, so all its agents share one set of spots.
+const isFloor = p => typeof p === 'string' && p.startsWith('floor:');
+export const placeOf = v => (typeof v === 'string' ? v : v.view === 'floor' ? `floor:${v.project}` : v.view === 'terrace' ? 'terrace' : 'lobby');
 
-export function hasFreeSpot(agents, agent, state) {
-  const list = SPOTS[state];
-  return !!list && list.some((_, i) => occupants(agents, agent, state, i) === 0);
+function spotsFor(dest, state) {
+  if (dest === undefined || isFloor(dest) || state === 'exit') return SPOTS[state];
+  if (dest === 'terrace') return LOBBY.spots.smoke;
+  return LOBBY.spots[state] ?? LOBBY.spots.wait;
+}
+
+// Rooms waiting in the lobby for their floor share one set of seats, whatever their state.
+const waits = (dest, state) => dest === 'lobby' && state !== 'exit' && !LOBBY.spots[state];
+const sameSeats = (dest, state, b) => b.dest === dest && (waits(dest, state) ? waits(b.dest, b.state) : b.state === state);
+const occupants = (agents, agent, state, i, dest) => agents.filter(b => b !== agent && b.spot === i && sameSeats(dest, state, b)).length;
+
+export function hasFreeSpot(agents, agent, state, dest = agent.dest) {
+  const list = spotsFor(dest, state);
+  return !!list && list.some((_, i) => occupants(agents, agent, state, i, dest) === 0);
 }
 
 export const STACK_DX = 9;
@@ -39,11 +42,11 @@ export const STACK_DX = 9;
 // set stands agent.tier * STACK_DX px to the right on a shared spot, at least STACK_DX px from
 // every other agent in that state, so a later-drawn neighbour never covers its whole hitbox.
 export function takeSpot(agents, agent, state) {
-  const list = SPOTS[state];
+  const list = spotsFor(agent.dest, state);
   agent.overflow = false;
   if (agent.stacks) agent.tier = 0;
   if (!list) return [agent.x, agent.y];
-  const counts = list.map((_, i) => occupants(agents, agent, state, i));
+  const counts = list.map((_, i) => occupants(agents, agent, state, i, agent.dest));
   let best = counts.indexOf(0);
   if (best < 0) {
     best = list.length - 1;
@@ -55,7 +58,7 @@ export function takeSpot(agents, agent, state) {
   const [x0, y0] = list[best];
   // Measured against where the others stand or are heading (tx), not a count: a place freed by a
   // leaver is reused, and a tier never lands on the next spot over.
-  const taken = agent.overflow ? agents.filter(b => b !== agent && b.state === state).map(b => b.tx ?? b.x) : [];
+  const taken = agent.overflow ? agents.filter(b => b !== agent && sameSeats(agent.dest, state, b)).map(b => b.tx ?? b.x) : [];
   let k = 0;
   while (taken.some(x => Math.abs(x0 + STACK_DX * k - x) < STACK_DX)) k++;
   agent.tier = k;
@@ -64,14 +67,16 @@ export function takeSpot(agents, agent, state) {
 }
 
 // A blocked agent goes back to the table, or waits at the bar when every seat is taken.
-export function stateAfterAnswer(agents, agent) {
-  return hasFreeSpot(agents, agent, 'work') ? 'work' : 'ready';
+// In the building, the table is on its own floor.
+export function stateAfterAnswer(agents, agent, floors) {
+  const dest = floors ? placeOf(viewOf({ state: 'work', info: agent.info }, floors)) : agent.dest;
+  return hasFreeSpot(agents, agent, 'work', dest) ? 'work' : 'ready';
 }
 
 export function planPath(from, to, state) {
   const outside = p => p[0] < STREET_X;
-  if (outside(from) && !outside(to)) return [DOOR, [118, AISLE_Y], [to[0], AISLE_Y], to];
-  if (!outside(from) && state === 'exit') return [[from[0], AISLE_Y], [118, AISLE_Y], DOOR, [-30, 302]];
+  if (outside(from) && !outside(to)) return [DOOR, [FLOOR.doorLead, AISLE_Y], [to[0], AISLE_Y], to];
+  if (!outside(from) && state === 'exit') return [[from[0], AISLE_Y], [FLOOR.doorLead, AISLE_Y], DOOR, FLOOR.exit];
   if (outside(from) && outside(to)) return [to];
   return [[from[0], AISLE_Y], [to[0], AISLE_Y], to];
 }
@@ -85,24 +90,140 @@ export function moveTo(agents, agent, state, after = null) {
   agent.after = after;
 }
 
-// Advances walkers; removes agents that finished leaving and returns them.
+// ---------- the building: walks inside a place, and rides between places ----------
+
+const RIDE_SEC = 0.8;
+const doorOf = p => (isFloor(p) ? FLOOR.elevator.door : p === 'terrace' ? LOBBY.terraceLift : LOBBY.lift);
+const copy = path => path.map(p => (Array.isArray(p) ? [...p] : { ...p, to: [...p.to] }));
+
+// A floor has no street: its paths keep to the aisle and the lift landing. The terrace has its own deck.
+// The lobby is the old lounge's street side, so the door and the sidewalk work as they always did.
+function routeIn(place, from, to) {
+  const A = AISLE_Y;
+  if (isFloor(place)) return [[from[0], A], [to[0], A], to];
+  if (place === 'terrace') return [[from[0], LOBBY.terraceY], [to[0], LOBBY.terraceY], to];
+  const out = p => p[0] < STREET_X;
+  if (out(from) && out(to)) return [to];
+  if (out(from)) return [DOOR, [FLOOR.doorLead, A], [to[0], A], to];
+  if (out(to)) return [[from[0], A], [FLOOR.doorLead, A], DOOR, to];
+  return [[from[0], A], [to[0], A], to];
+}
+
+// Walks to fromView's lift door, rides hidden, steps out at toView's and walks to its spot for agent.state.
+// The spot is held from the start; `after` runs once, on the final arrival. An agent already riding
+// (place null) just rides on to the new door.
+export function changeView(agents, agent, fromView, toView, after = null) {
+  const to = placeOf(toView), door = doorOf(to);
+  const from = agent.place === null ? null : placeOf(fromView);
+  agent.dest = to;
+  const spot = takeSpot(agents, agent, agent.state);
+  const out = from === null ? [] : routeIn(from, [agent.x, agent.y], doorOf(from));
+  agent.path = copy([...out, { ride: RIDE_SEC, to: door, place: to }, ...routeIn(to, door, spot)]);
+  agent.walking = true;
+  agent.after = after;
+}
+
+// Leaving walks out of the place it is in: a lift door upstairs, the street door from the lobby. One riding
+// just goes: stepAgents removes it on the next step and runs `after` then.
+function leave(agent, after) {
+  agent.after = after;
+  if (agent.place === null) { agent.path = []; agent.walking = false; return; }
+  agent.dest = agent.place;
+  const to = agent.place === 'lobby' ? FLOOR.exit : doorOf(agent.place);
+  agent.path = copy(routeIn(agent.place, [agent.x, agent.y], to));
+  agent.walking = true;
+}
+
+// The building's moveTo: the state decides the place (viewOf), and a new place means a lift ride.
+export function walkTo(agents, agent, state, floors, after = null) {
+  agent.state = state;
+  if (state === 'exit') { leave(agent, after); return; }
+  const to = placeOf(viewOf(agent, floors));
+  if (agent.place !== to) { changeView(agents, agent, agent.place ?? to, to, after); return; }
+  agent.dest = to;
+  const spot = takeSpot(agents, agent, state);
+  agent.path = copy(routeIn(to, [agent.x, agent.y], spot));
+  agent.walking = true;
+  agent.after = after;
+}
+
+// Puts an agent straight at its spot in its place, as the first snapshot does.
+export function seat(agents, agent, floors) {
+  agent.place = agent.dest = placeOf(viewOf(agent, floors));
+  const [x, y] = takeSpot(agents, agent, agent.state);
+  Object.assign(agent, { x, y, path: [], walking: false, after: null });
+  return agent;
+}
+
+// world: { agents, floors }. Without floors it is the README capture's single room.
+export function go(world, agent, state, after = null) {
+  if (world.floors) walkTo(world.agents, agent, state, world.floors, after);
+  else moveTo(world.agents, agent, state, after);
+}
+
+// A new room comes in from the street.
+export function walkIn(world, agent, state) {
+  agent.x = FLOOR.exit[0]; agent.y = DOOR[1];
+  if (world.floors) agent.place = agent.dest = 'lobby';
+  go(world, agent, state);
+}
+
+// Points a walker at a new spot in the same state, keeping a lift ride it is on.
+export function retarget(world, agent, to) {
+  if (!world.floors) { agent.path = planPath([agent.x, agent.y], to, agent.state).map(p => [...p]); agent.walking = true; return; }
+  const ride = agent.path.findIndex(p => !Array.isArray(p));
+  agent.path = ride >= 0
+    ? [...agent.path.slice(0, ride + 1), ...copy(routeIn(agent.dest, agent.path[ride].to, to))]
+    : copy(routeIn(agent.place, [agent.x, agent.y], to));
+  agent.walking = true;
+}
+
+// After the open floors change: everyone whose place moved (a floor opened or closed) walks there.
+export function rehome(world) {
+  const moved = [];
+  for (const a of world.agents) {
+    if (a.state === 'exit' || a.dest === undefined) continue;
+    if (placeOf(viewOf(a, world.floors)) !== a.dest) { walkTo(world.agents, a, a.state, world.floors, a.after); moved.push(a); }
+  }
+  return moved;
+}
+
+// Advances walkers; removes agents that finished leaving and returns them. A ride step in the path hides
+// the agent (place null) for its time, then sets it down at the next place's door; `lift` records the
+// door it last used, so a scene can open it.
 export function stepAgents(agents, dt, t) {
+  const arrive = a => {
+    a.walking = false;
+    if (a.after) { const f = a.after; a.after = null; f(a, t); }
+  };
   for (const a of agents) {
     if (!a.walking || !a.path.length) continue;
-    const [tx, ty] = a.path[0];
+    const head = a.path[0];
+    if (!Array.isArray(head)) {
+      if (a.place !== null) { a.lift = { place: a.place, at: t }; a.place = null; a.ride = head.ride; }
+      a.ride -= dt;
+      if (a.ride > 1e-9) continue;
+      [a.x, a.y] = head.to; a.place = head.place; a.lift = { place: head.place, at: t };
+      a.path.shift();
+      if (!a.path.length) arrive(a);
+      continue;
+    }
+    const [tx, ty] = head;
     const dx = tx - a.x, dy = ty - a.y, d = Math.hypot(dx, dy), sp = WALK_SPEED * dt;
     if (Math.abs(dx) > 0.5) a.dir = dx > 0 ? 1 : -1;
     if (d <= sp) {
       a.x = tx; a.y = ty; a.path.shift();
-      if (!a.path.length) {
-        a.walking = false;
-        if (a.after) { const f = a.after; a.after = null; f(a, t); }
-      }
+      if (!a.path.length) arrive(a);
     } else { a.x += dx / d * sp; a.y += dy / d * sp; }
   }
   const gone = [];
   for (let i = agents.length - 1; i >= 0; i--) {
-    if (agents[i].state === 'exit' && !agents[i].walking) gone.push(...agents.splice(i, 1));
+    const a = agents[i];
+    if (a.state !== 'exit' || a.walking) continue;
+    // Upstairs a leaver goes by the lift: its doors open behind it.
+    if (a.place && a.place !== 'lobby') a.lift = { place: a.place, at: t };
+    if (a.after) { const f = a.after; a.after = null; f(a, t); }
+    gone.push(...agents.splice(i, 1));
   }
   return gone;
 }

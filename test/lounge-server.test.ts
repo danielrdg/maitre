@@ -351,9 +351,16 @@ test('tickets are refused when the server has no ticket store', async () => {
   }
 });
 
+// Never the real ~/.maitre: a snapshot reads the queue, and an open floor writes floors.json.
+async function scratchHome(): Promise<string> {
+  const home = await mkdtemp(join(tmpdir(), 'maitre-lounge-home-'));
+  bases.push(home);
+  return home;
+}
+
 async function ticketServer(): Promise<{ port: number; close(): Promise<void> }> {
   const tickets = new TicketStore();
-  return startLoungeServer({ root: await fixture(), port: 0, token: TOKEN, tickets, routes: liveRoutes(new LiveRooms({}), { tickets }) });
+  return startLoungeServer({ root: await fixture(), port: 0, token: TOKEN, tickets, routes: liveRoutes(new LiveRooms({ MAITRE_HOME: await scratchHome() }), { tickets }) });
 }
 
 test('POST /api/ticket with the token header returns a working ticket', async () => {
@@ -389,7 +396,7 @@ test('POST /api/ticket refuses a cookie, even a same-origin one, and a wrong hea
 });
 
 test('POST /api/ticket is not served without a ticket store', async () => {
-  const s = await startLoungeServer({ root: await fixture(), port: 0, token: TOKEN, routes: liveRoutes(new LiveRooms({})) });
+  const s = await startLoungeServer({ root: await fixture(), port: 0, token: TOKEN, routes: liveRoutes(new LiveRooms({ MAITRE_HOME: await scratchHome() })) });
   try {
     assert.equal((await send(s.port, '/api/ticket', { method: 'POST', headers: { 'x-maitre-token': TOKEN } })).status, 403);
   } finally {
